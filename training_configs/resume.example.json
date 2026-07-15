@@ -1,0 +1,35 @@
+{
+  "_comment": "从旧 checkpoint 完整续训的示例 / Example: fully resume training from an existing checkpoint",
+  "extends": "../configs/internal/pipeline_defaults.json",
+  "experiment": {
+    "_comment": "languages 及顺序必须与旧 checkpoint 完全一致 / Languages and their order must exactly match the checkpoint",
+    "name": "model_1_resume",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "metadata": "datasets/model_1/metadata.phonemes.csv",
+    "device": "auto",
+    "initialization": {
+      "_comment": "resume 会恢复 Generator、Discriminator、Optimizer、epoch 和 step / resume restores Generator, Discriminator, optimizers, epoch and step",
+      "mode": "resume",
+      "checkpoint": "runs/model_1/checkpoints/last"
+    }
+  },
+  "generation": {
+    "_comment": "续训直接使用已有数据，不重新调用 Qwen / Reuse existing data and do not call Qwen again",
+    "enabled": false
+  },
+  "pipeline": {
+    "_comment": "已有冻结音素 metadata，因此跳过生成和音素化 / Existing metadata already contains frozen phonemes, so generation and phonemization are skipped",
+    "generate_samples": false,
+    "phonemize": false
+  },
+  "training": {
+    "_comment": "epochs 是总目标轮数，必须大于 checkpoint 已完成轮数 / epochs is the total target and must exceed the checkpoint epoch",
+    "batch_size": 8,
+    "learning_rate_generator": 0.0002,
+    "learning_rate_discriminator": 0.0002,
+    "epochs": 1500,
+    "checkpoint_every_steps": 5000,
+    "num_workers": 0,
+    "seed": 1337
+  }
+}

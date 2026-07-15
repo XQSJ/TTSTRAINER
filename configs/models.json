@@ -1,0 +1,9 @@
+{
+  "models_dir": "models/qwen",
+  "default_teacher": "base-1.7b",
+  "models": {
+    "voice-design-1.7b": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    "base-1.7b": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    "base-0.6b": "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+  }
+}

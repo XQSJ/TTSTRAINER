@@ -1,0 +1,31 @@
+{
+  "model": {
+    "vocab_size": 256,
+    "num_languages": 7,
+    "num_speakers": 1,
+    "spec_channels": 513,
+    "hidden_channels": 128,
+    "latent_channels": 128,
+    "conditioning_channels": 128,
+    "language_embedding_channels": 32,
+    "speaker_embedding_channels": 64,
+    "text_encoder_layers": 4,
+    "text_encoder_heads": 4,
+    "flow_layers": 4,
+    "decoder_initial_channels": 256,
+    "upsample_rates": [8, 8, 2, 2],
+    "upsample_kernel_sizes": [16, 16, 4, 4],
+    "segment_frames": 32
+  },
+  "audio": {
+    "sample_rate": 22050,
+    "n_fft": 1024,
+    "hop_length": 256,
+    "win_length": 1024,
+    "n_mels": 80
+  },
+  "frontend": {
+    "require_phonemes": true,
+    "format": "whitespace-separated UTF-8 codepoints; serialize a space as <space>"
+  }
+}

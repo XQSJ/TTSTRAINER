@@ -1,0 +1,44 @@
+{
+  "extends": "../system/vits_mobile_architecture.json",
+  "generation": {
+    "enabled": true,
+    "qwen_runtime": "installed",
+    "qwen_source_path": null,
+    "auto_download_models": true,
+    "text_manifest": null,
+    "raw_metadata": null,
+    "include_metadata": [],
+    "overwrite": false,
+    "batch_size": 4,
+    "candidates_per_text": 1,
+    "models": {
+      "voice_design": "voice-design-1.7b",
+      "voice_clone": "base-1.7b"
+    },
+    "runtime": {
+      "device": "auto",
+      "dtype": "auto",
+      "attention": "auto"
+    },
+    "generation_kwargs": {
+      "max_new_tokens": 2048,
+      "do_sample": true,
+      "top_k": 50,
+      "top_p": 1.0,
+      "temperature": 0.9,
+      "repetition_penalty": 1.05,
+      "subtalker_dosample": true,
+      "subtalker_top_k": 50,
+      "subtalker_top_p": 1.0,
+      "subtalker_temperature": 0.9
+    }
+  },
+  "pipeline": {
+    "generate_samples": true,
+    "phonemize": true,
+    "validate": true,
+    "train": true,
+    "export": true,
+    "validate_onnx": true
+  }
+}

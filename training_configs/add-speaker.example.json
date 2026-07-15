@@ -1,0 +1,42 @@
+{
+  "_comment": "在旧模型中增加新音色的示例 / Example: add a new voice to an existing model",
+  "extends": "../configs/internal/pipeline_defaults.json",
+  "experiment": {
+    "_comment": "languages 及顺序必须与旧模型一致；使用新 name 保留旧模型 / Keep languages and order identical; use a new name to preserve the old model",
+    "name": "model_1_voice02",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "auto",
+    "initialization": {
+      "_comment": "expand_speakers 保留旧权重并扩展 speaker embedding / expand_speakers preserves old weights and expands the speaker embedding",
+      "mode": "expand_speakers",
+      "checkpoint": "runs/model_1/checkpoints/last"
+    }
+  },
+  "generation": {
+    "_comment": "include_metadata 合并旧音色样本，降低灾难性遗忘 / include_metadata merges old-voice samples to reduce catastrophic forgetting",
+    "enabled": true,
+    "qwen_runtime": "installed",
+    "text_manifest": "datasets/texts.example.csv",
+    "include_metadata": [
+      "datasets/model_1/metadata.csv"
+    ],
+    "voice": {
+      "_comment": "新 speaker 名称不能与旧 speaker 重复 / The new speaker name must not duplicate an existing speaker",
+      "mode": "design",
+      "speaker": "voice_02",
+      "prompt": "A clear, confident adult voice that is distinct from voice_01, with natural pacing and neutral emotion.",
+      "reference_text": "Hello, this reference creates the second multilingual speaker.",
+      "reference_language": "en"
+    }
+  },
+  "training": {
+    "_comment": "扩音色使用较小学习率进行微调 / Fine-tune added voices with a smaller learning rate",
+    "batch_size": 8,
+    "learning_rate_generator": 0.0001,
+    "learning_rate_discriminator": 0.0001,
+    "epochs": 300,
+    "checkpoint_every_steps": 2000,
+    "num_workers": 0,
+    "seed": 1337
+  }
+}

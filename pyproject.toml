@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tts-trainer"
+version = "0.1.0"
+description = "Seven-language, single-voice mobile TTS training pipeline"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "XQSJ" }]
+dependencies = [
+  "numpy>=1.26",
+  "PyYAML>=6.0",
+  "soundfile>=0.12",
+  "huggingface_hub>=0.34,<1",
+  "torch>=2.3",
+  "torchaudio>=2.3",
+]
+
+[project.optional-dependencies]
+export = ["onnx>=1.16", "onnxruntime>=1.18"]
+qwen = ["qwen-tts==0.1.1"]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+tts-trainer = "tts_trainer.cli:main"
+
+[project.urls]
+Repository = "https://github.com/XQSJ/TTSTRAINER"
+Issues = "https://github.com/XQSJ/TTSTRAINER/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

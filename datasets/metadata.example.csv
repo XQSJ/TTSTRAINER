@@ -1,0 +1,8 @@
+audio,text,language,speaker
+wavs/zh_0001.wav,你好世界,zh,voice_01
+wavs/en_0001.wav,Hello world,en,voice_01
+wavs/ja_0001.wav,こんにちは世界,ja,voice_01
+wavs/ko_0001.wav,안녕하세요 세계,ko,voice_01
+wavs/fr_0001.wav,Bonjour le monde,fr,voice_01
+wavs/es_0001.wav,Hola mundo,es,voice_01
+wavs/pt_0001.wav,Olá mundo,pt,voice_01

@@ -1,0 +1,40 @@
+{
+  "_comment": "示例一：一个配置文件训练一个独立模型 / Example 1: one config file trains one independent model",
+  "extends": "../configs/internal/pipeline_defaults.json",
+  "experiment": {
+    "_comment": "模型身份、语言和启动方式；name 自动决定 datasets/runs/artifacts 目录 / Model identity, languages and initialization; name automatically determines datasets/runs/artifacts directories",
+    "name": "model_1",
+    "_comment_languages": "可选 zh/en/ja/ko/fr/es/pt；顺序决定 language ID / Choose from zh/en/ja/ko/fr/es/pt; order defines language IDs",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "auto",
+    "initialization": {
+      "_comment": "scratch=从零训练，resume=续训，expand_speakers=增加音色 / scratch=new model, resume=continue training, expand_speakers=add voices",
+      "mode": "scratch",
+      "checkpoint": null
+    }
+  },
+  "generation": {
+    "_comment": "Qwen 样本生成；enabled=false 时使用自己准备的 WAV/metadata / Qwen sample generation; set enabled=false to use your own WAV/metadata",
+    "enabled": true,
+    "qwen_runtime": "installed",
+    "text_manifest": "datasets/texts.example.csv",
+    "voice": {
+      "_comment": "design 使用文字描述设计音色 / design creates a voice from a natural-language description",
+      "mode": "design",
+      "speaker": "voice_01",
+      "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, steady pace, and calm friendly delivery.",
+      "reference_text": "Hello, this is the reference voice used to create a consistent multilingual speaker.",
+      "reference_language": "en"
+    }
+  },
+  "training": {
+    "_comment": "常用微调参数；显存不足时先降低 batch_size / Common tuning options; reduce batch_size first when GPU memory is insufficient",
+    "batch_size": 8,
+    "learning_rate_generator": 0.0002,
+    "learning_rate_discriminator": 0.0002,
+    "epochs": 1000,
+    "checkpoint_every_steps": 5000,
+    "num_workers": 0,
+    "seed": 1337
+  }
+}
