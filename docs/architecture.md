@@ -20,6 +20,18 @@ Embedding 参数和 `speaker_map.json`，保证 checkpoint 格式以后不变。
 
 ## 训练图
 
+训练前先固定文本前端：
+
+```text
+原始文本 -> NFKC/空白规范化 -> language 对应的 eSpeak voice
+        -> IPA UTF-8 codepoint -> metadata.phonemes.csv
+        -> frontend.lock.json
+```
+
+`frontend.lock.json` 记录 provider、引擎版本、逐语言 voice、规范化规则和 token
+规则。训练会校验它与配置、已有 checkpoint 是否兼容，避免同一个 token ID 在
+继续训练后表示不同读音。G2P 本身不参与 VITS 训练；默认调用现有 eSpeak-ng。
+
 训练态包含 Text Encoder、Duration Predictor、Posterior Encoder、MAS、Flow、
 Waveform Decoder、Multi-Period/Scale Discriminator。损失包括 Mel、KL、Duration、
 Adversarial 和 Feature Matching。
@@ -49,7 +61,8 @@ runs/<model-name>/
 ```
 
 每个训练 checkpoint 包含 generator、discriminator、两个 optimizer、训练步数、
-模型配置、token、language map 和 speaker map。ONNX 只是部署产物，不能替代它。
+模型配置、token、language map、speaker map 和文本前端契约。ONNX 只是部署产物，
+不能替代它。
 
 ## 压缩顺序
 
@@ -78,3 +91,5 @@ sid = speaker_id * num_languages + language_id
 
 导出目录的 `model.onnx.json` 会列出所有 profile，App 不需要自行计算。每次
 增加内置 speaker 后需要从保留的 PyTorch checkpoint 继续训练并重新导出 ONNX。
+同目录的 `frontend.json` 告诉 App 每种语言应调用哪个 eSpeak voice；移动端必须
+得到与训练 metadata 相同的 UTF-8 codepoint token 后，再调用 ONNX。

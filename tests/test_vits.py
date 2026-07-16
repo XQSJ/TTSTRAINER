@@ -18,6 +18,7 @@ from tts_trainer.vits.trainer import _load_expanded_generator
 from tts_trainer.vits.exporter import (PiperInferenceWrapper, export_vits_onnx,
                                        validate_onnx_runtime, voice_profiles)
 from tts_trainer.vits.runtime import OnnxTTS
+from tts_trainer.frontend import frontend_contract_from_config
 
 
 def tiny_config():
@@ -153,9 +154,15 @@ class VitsTests(unittest.TestCase):
                               "fr": 4, "es": 5, "pt": 6},
                 speaker_map={"voice_01": 0, "voice_02": 1, "voice_03": 2},
                 tokens=["_", "^", "$", " ", "<unk>", "a"],
+                frontend=frontend_contract_from_config(
+                    {}, ("zh", "en", "ja", "ko", "fr", "es", "pt"),
+                    engine_version="eSpeak NG test",
+                ).to_dict(),
             )
             target = export_vits_onnx(checkpoint, Path(directory) / "export", sample_rate=8000)
             self.assertTrue(target.is_file())
+            frontend = json.loads((target.parent / "frontend.json").read_text(encoding="utf-8"))
+            self.assertEqual(frontend["engine_version"], "eSpeak NG test")
             shape = validate_onnx_runtime(target)
             self.assertEqual(shape[0:2], (1, 1))
             runtime = OnnxTTS(target.parent)

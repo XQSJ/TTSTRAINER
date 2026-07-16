@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from ..checkpoints import CHECKPOINT_FORMAT
-from ..constants import LANGUAGES
+from ..frontend import frontend_contract_from_config
 from .config import VitsConfig
 from .model import MultilingualVITS
 
@@ -86,6 +86,9 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     )
     model = onnx.load(str(target)); onnx.checker.check_model(model)
     profiles = voice_profiles(metadata["speaker_map"], metadata["language_map"])
+    frontend = metadata.get("frontend") or frontend_contract_from_config(
+        {}, tuple(metadata["language_map"])
+    ).to_dict()
     deployment = {
         "format": 1,
         "model_type": "multilingual-vits-piper-shaped",
@@ -94,12 +97,14 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         "inputs": ["input", "input_lengths", "scales", "sid"],
         "scales_default": [0.667, 1.0, 1.0],
         "sid_formula": "speaker_id * num_languages + language_id",
-        "frontend": "application supplies Piper-compatible phoneme ids; stock sherpa multilingual switching requires an adapter",
+        "frontend": frontend,
+        "frontend_note": "application supplies matching phoneme ids; stock sherpa multilingual switching requires an adapter",
         "num_languages": config.num_languages,
         "num_speakers": config.num_speakers,
         "voice_profiles": profiles,
     }
     (output_dir / "model.onnx.json").write_text(json.dumps(deployment, ensure_ascii=False, indent=2), encoding="utf-8")
+    (output_dir / "frontend.json").write_text(json.dumps(frontend, ensure_ascii=False, indent=2), encoding="utf-8")
     (output_dir / "tokens.json").write_text(json.dumps({"tokens": metadata["tokens"]}, ensure_ascii=False, indent=2), encoding="utf-8")
     tokens_text = "".join(f"{token} {index}\n" for index, token in enumerate(metadata["tokens"]))
     (output_dir / "tokens.txt").write_text(tokens_text, encoding="utf-8")

@@ -12,7 +12,7 @@ from .text import Vocabulary
 from .train import train
 from .vits.trainer import train_vits
 from .vits.exporter import export_vits_onnx, validate_onnx_runtime
-from .frontend import EspeakFrontend, phonemize_manifest
+from .frontend import EspeakFrontend, espeak_frontend_from_config, phonemize_manifest
 from .vits.runtime import OnnxTTS, write_wav
 from .batch_training import train_many
 from .experiments import prepare_experiment, resolve_experiment
@@ -31,6 +31,9 @@ def main(argv=None) -> int:
     vocab = sub.add_parser("vocab"); vocab.add_argument("metadata"); vocab.add_argument("output")
     phonemize = sub.add_parser("phonemize", help="freeze eSpeak phonemes into metadata")
     phonemize.add_argument("metadata"); phonemize.add_argument("output")
+    phonemize.add_argument("--config", help="use frontend voices and strictness from a training config")
+    frontend_info = sub.add_parser("frontend-info", help="show the resolved eSpeak frontend contract")
+    frontend_info.add_argument("--config", default="training_configs/train1.json")
     training = sub.add_parser("train"); training.add_argument("--config", required=True)
     vits_training = sub.add_parser("train-vits", help="train waveform VITS generator and discriminators")
     vits_training.add_argument("--config", default="training_configs/train1.json")
@@ -79,9 +82,17 @@ def main(argv=None) -> int:
     elif args.command == "vocab":
         result = Vocabulary.build(read_manifest(args.metadata)); result.save(args.output); print(f"wrote {len(result.tokens)} tokens to {args.output}")
     elif args.command == "phonemize":
-        frontend = EspeakFrontend()
+        if args.config:
+            raw, _ = resolve_experiment(args.config)
+            frontend = espeak_frontend_from_config(raw.get("frontend"))
+        else:
+            frontend = EspeakFrontend()
         print(f"frontend: {frontend.version()}")
         print(phonemize_manifest(args.metadata, args.output, frontend))
+    elif args.command == "frontend-info":
+        raw, layout = resolve_experiment(args.config)
+        frontend = espeak_frontend_from_config(raw.get("frontend"))
+        print(json.dumps(frontend.contract(layout.languages).to_dict(), ensure_ascii=False, indent=2))
     elif args.command == "train":
         load_config(args.config); print(train(args.config))
     elif args.command == "train-vits":

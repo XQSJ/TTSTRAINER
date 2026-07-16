@@ -26,6 +26,18 @@
   },
   "frontend": {
     "require_phonemes": true,
+    "provider": "espeak-ng",
+    "strict_language_switches": true,
+    "executable": null,
+    "voices": {
+      "zh": "cmn",
+      "en": "en-us",
+      "ja": "ja",
+      "ko": "ko",
+      "fr": "fr-fr",
+      "es": "es",
+      "pt": "pt-br"
+    },
     "format": "whitespace-separated UTF-8 codepoints; serialize a space as <space>"
   }
 }

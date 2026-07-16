@@ -13,6 +13,8 @@ from torch.nn import functional as F
 
 from ..checkpoints import CHECKPOINT_FORMAT, load_training_checkpoint, save_training_checkpoint
 from ..experiments import prepare_experiment, resolve_experiment
+from ..frontend import (FrontendContract, frontend_contract_from_config,
+                        frontend_lock_path, load_frontend_contract)
 from ..manifest import validate_manifest
 from ..text import Vocabulary
 from .config import load_vits_config
@@ -85,6 +87,28 @@ def _optimizer_to(optimizer, device: torch.device) -> None:
                 state[key] = value.to(device)
 
 
+def _resolve_frontend_contract(raw: dict, metadata: Path, languages: tuple[str, ...],
+                               previous: dict | None) -> dict:
+    declared = frontend_contract_from_config(raw.get("frontend"), languages)
+    lock = frontend_lock_path(metadata)
+    current = load_frontend_contract(lock) if lock.is_file() else declared
+    if set(current.languages) != set(languages):
+        raise ValueError("frontend contract languages differ from experiment.languages")
+    if current.compatibility_key() != declared.compatibility_key():
+        raise ValueError(
+            "frontend.lock.json differs from the configured provider/voices; "
+            "re-run phonemize or restore the matching frontend config"
+        )
+    previous_raw = previous.get("frontend") if previous else None
+    if previous_raw:
+        old = FrontendContract.from_dict(previous_raw)
+        if old.compatibility_key() != current.compatibility_key():
+            raise ValueError("frontend contract differs from the checkpoint; start a new model or re-phonemize compatibly")
+        if current.engine_version is None:
+            current = old
+    return current.to_dict()
+
+
 def train_vits(config_path: str, metadata_path: str | None = None,
                output_dir: str | None = None, *, device_name: str | None = None,
                max_steps: int | None = None):
@@ -100,6 +124,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                                require_phonemes=require_phonemes)
     items = list(report.items)
     previous = _checkpoint_metadata(layout.initialization_checkpoint) if layout.initialization_checkpoint else None
+    frontend_contract = _resolve_frontend_contract(raw, layout.metadata, layout.languages, previous)
     language_map = {language: index for index, language in enumerate(layout.languages)}
     data_languages = {item.language for item in items}
     outside = sorted(data_languages - set(language_map))
@@ -214,6 +239,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     discriminator=discriminator, optimizer_g=optimizer_g, optimizer_d=optimizer_d,
                     epoch=epoch, global_step=global_step, config=config,
                     language_map=language_map, speaker_map=speaker_map, tokens=vocabulary.tokens,
+                    frontend=frontend_contract,
                     metrics={"generator": loss_g.item(), "discriminator": loss_d.item(), "mel": loss_mel.item()},
                 )
             if max_steps is not None and global_step >= max_steps:
@@ -222,7 +248,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             destination / "last", generator=generator, discriminator=discriminator,
             optimizer_g=optimizer_g, optimizer_d=optimizer_d, epoch=epoch,
             global_step=global_step, config=config, language_map=language_map,
-            speaker_map=speaker_map, tokens=vocabulary.tokens,
+            speaker_map=speaker_map, tokens=vocabulary.tokens, frontend=frontend_contract,
         )
         if max_steps is not None and global_step >= max_steps: break
     return destination / "last"

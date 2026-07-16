@@ -12,6 +12,7 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
                              optimizer_g, optimizer_d, epoch: int, global_step: int,
                              config, language_map: dict, speaker_map: dict,
                              tokens: list[str], metrics: dict | None = None,
+                             frontend: dict | None = None,
                              scheduler_g=None, scheduler_d=None, scaler=None) -> Path:
     import torch
     destination = Path(directory)
@@ -39,6 +40,7 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
         "language_map": language_map,
         "speaker_map": speaker_map,
         "tokens": tokens,
+        "frontend": frontend,
         "metrics": metrics or {},
     }
     metadata_tmp = destination / "metadata.json.tmp"

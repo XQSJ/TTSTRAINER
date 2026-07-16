@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..frontend import EspeakFrontend
+from ..frontend import ESPEAK_VOICES, EspeakFrontend, FrontendContract
 
 
 class OnnxTTS:
@@ -21,6 +21,8 @@ class OnnxTTS:
         tokens = json.loads((self.model_dir / "tokens.json").read_text(encoding="utf-8"))["tokens"]
         self.token_ids = {token: index for index, token in enumerate(tokens)}
         self.sample_rate = int(config["sample_rate"])
+        frontend_raw = config.get("frontend")
+        self.frontend_contract = FrontendContract.from_dict(frontend_raw) if isinstance(frontend_raw, dict) else None
         self.profiles = {(row["speaker"], row["language"]): row["sid"] for row in config["voice_profiles"]}
         self.session = ort.InferenceSession(str(self.model_dir / "model.onnx"), providers=["CPUExecutionProvider"])
 
@@ -46,8 +48,26 @@ class OnnxTTS:
         })[0][0, 0]
 
     def synthesize_text(self, text: str, *, language: str, speaker: str,
-                        frontend: EspeakFrontend | None = None, **scales) -> np.ndarray:
+                        frontend: EspeakFrontend | None = None,
+                        allow_frontend_version_mismatch: bool = False,
+                        **scales) -> np.ndarray:
+        if frontend is None and self.frontend_contract:
+            if self.frontend_contract.provider != "espeak-ng":
+                raise RuntimeError(f"unsupported runtime frontend: {self.frontend_contract.provider}")
+            voices = {
+                **ESPEAK_VOICES,
+                **{key: value["voice"] for key, value in self.frontend_contract.languages.items()},
+            }
+            frontend = EspeakFrontend(voices=voices)
         frontend = frontend or EspeakFrontend()
+        expected = self.frontend_contract.engine_version if self.frontend_contract else None
+        if expected and not allow_frontend_version_mismatch:
+            actual = frontend.version()
+            if actual != expected:
+                raise RuntimeError(
+                    f"frontend version mismatch: model expects {expected!r}, runtime has {actual!r}; "
+                    "use the matching eSpeak-ng build or explicitly allow the mismatch"
+                )
         return self.synthesize_units(frontend.phonemize(text, language), language=language,
                                      speaker=speaker, **scales)
 

@@ -9,17 +9,12 @@ from pathlib import Path
 from ..constants import LANGUAGES
 from ..manifest import format_phonemes, read_manifest
 from ..text import normalize
+from .contract import (DEFAULT_ESPEAK_VOICES, FrontendContract,
+                       frontend_contract_from_config, frontend_lock_path,
+                       save_frontend_contract)
 
 
-ESPEAK_VOICES = {
-    "zh": "cmn",
-    "en": "en-us",
-    "ja": "ja",
-    "ko": "ko",
-    "fr": "fr-fr",
-    "es": "es",
-    "pt": "pt-br",
-}
+ESPEAK_VOICES = DEFAULT_ESPEAK_VOICES
 ZERO_WIDTH = re.compile("[\u200b-\u200f\u2060\ufeff]")
 
 
@@ -47,7 +42,19 @@ class EspeakFrontend:
     def version(self) -> str:
         result = subprocess.run([self.executable, "--version"], check=True, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        return result.stdout.splitlines()[0].strip()
+        # The trailing data-directory path is machine-specific and is not part
+        # of the phonemizer version contract.
+        return result.stdout.splitlines()[0].split("  Data at:", 1)[0].strip()
+
+    def contract(self, languages: tuple[str, ...] | list[str]) -> FrontendContract:
+        missing = set(languages) - set(self.voices)
+        if missing:
+            raise ValueError(f"missing eSpeak voices for: {', '.join(sorted(missing))}")
+        return frontend_contract_from_config(
+            {"provider": "espeak-ng", "voices": self.voices},
+            languages,
+            engine_version=self.version(),
+        )
 
     def phonemize(self, text: str, language: str) -> tuple[str, ...]:
         if language not in self.voices:
@@ -71,11 +78,13 @@ class EspeakFrontend:
 
 
 def phonemize_manifest(source: str | Path, destination: str | Path,
-                       frontend: EspeakFrontend | None = None) -> Path:
+                       frontend: EspeakFrontend | None = None,
+                       *, lock_path: str | Path | None = None) -> Path:
     source = Path(source); destination = Path(destination)
     frontend = frontend or EspeakFrontend()
     items = read_manifest(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    languages = tuple(dict.fromkeys(item.language for item in items))
     with destination.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=["audio", "text", "language", "speaker", "phonemes"])
         writer.writeheader()
@@ -89,4 +98,19 @@ def phonemize_manifest(source: str | Path, destination: str | Path,
                 "audio": str(audio), "text": item.text, "language": item.language,
                 "speaker": item.speaker, "phonemes": format_phonemes(phones),
             })
+    if hasattr(frontend, "contract"):
+        save_frontend_contract(frontend.contract(languages), lock_path or frontend_lock_path(destination))
     return destination
+
+
+def espeak_frontend_from_config(config: dict | None = None) -> EspeakFrontend:
+    config = config or {}
+    provider = config.get("provider", "espeak-ng")
+    if provider != "espeak-ng":
+        raise ValueError(f"unsupported frontend provider: {provider!r}; currently available: espeak-ng")
+    voices = {**ESPEAK_VOICES, **config.get("voices", {})}
+    return EspeakFrontend(
+        executable=config.get("executable"),
+        voices=voices,
+        allow_language_switches=not bool(config.get("strict_language_switches", True)),
+    )

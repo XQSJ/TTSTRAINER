@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .experiments import prepare_experiment, resolve_experiment
-from .frontend import EspeakFrontend, phonemize_manifest
+from .frontend import espeak_frontend_from_config, phonemize_manifest
 from .manifest import validate_manifest
 from .sample_generation import generate_samples
 from .vits.exporter import export_vits_onnx, validate_onnx_runtime
@@ -33,7 +33,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
         report["stages"]["generate_samples"] = "skipped"
 
     if stages.get("phonemize", True):
-        frontend = EspeakFrontend()
+        frontend = espeak_frontend_from_config(raw.get("frontend"))
         phonemize_manifest(raw_metadata, layout.metadata, frontend)
         report["stages"]["phonemize"] = str(layout.metadata.resolve())
     else:
