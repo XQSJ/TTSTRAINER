@@ -13,6 +13,16 @@ SPEC.loader.exec_module(build_bundle)
 
 
 class DeploymentBundleTests(unittest.TestCase):
+    def test_wheelhouse_includes_pyopenjtalk_version_build_dependency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            commands = []
+            with patch.object(build_bundle, "run",
+                              side_effect=lambda *args, **kwargs: commands.append(args)):
+                build_bundle.download_wheels(Path(directory))
+            command = commands[0]
+            self.assertIn("setuptools_scm>=8", command)
+            self.assertIn("pyopenjtalk>=0.4.1,<0.5", command)
+
     def test_downloaded_models_use_runtime_project_layout(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

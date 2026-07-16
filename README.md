@@ -99,6 +99,21 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer language-check --config training_
 PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline --config training_configs/my_model.json
 ```
 
+这里不要给整条安装命令增加 `--no-build-isolation`。日语依赖 `pyopenjtalk`
+目前从源码构建，并通过隔离构建环境中的 `setuptools_scm` 生成版本号；禁用隔离但
+没有预装该构建依赖时，pip 会把 0.4.1 错误识别为 0.0.0。若已经遇到
+`expected '0.4.1', but metadata has '0.0.0'`，执行：
+
+```bash
+.venv/bin/pip install 'setuptools_scm>=8' 'cython>=0.29.16' cmake
+.venv/bin/pip install 'pyopenjtalk==0.4.1'
+.venv/bin/pip install -e '.[qwen,export,japanese,asian]'
+```
+
+Linux 没有可用的预编译 wheel 时还需要系统 C/C++ 编译器。Conda 用户应直接将
+上面的 `.venv/bin/pip` 替换为 `python -m pip`，不要在 Conda 环境内再创建一层
+venv。
+
 训练结果在 `runs/my_model/checkpoints/best/`，移动端资源在
 `artifacts/my_model/`。Windows 请将 `.venv/bin/python` 换成
 `.venv\Scripts\python.exe`。更换音色、自动生成文本、续训、增加音色和专家参数见

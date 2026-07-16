@@ -72,3 +72,6 @@ PYTHONPATH=src /path/to/new/venv/bin/python -m tts_trainer verify-frontend \
 Python 和 CUDA 环境中重新运行构建脚本；模型目录可以直接复用，不必重新下载。
 pyopenjtalk 在没有上游 wheel 的平台会在“构建离线包的机器”上编译成 wheel，因此
 构建机需要系统 C/C++ 编译器；目标离线机器不需要编译器。
+构建器会显式准备 `setuptools_scm`；不要对 pyopenjtalk 的源码构建使用一个缺少
+`setuptools_scm` 的 `--no-build-isolation` 环境，否则其 0.4.1 元数据会退化为
+0.0.0 并被 pip 拒绝。

@@ -50,7 +50,8 @@ def download_wheels(output: Path, *, include_quality: bool = False) -> None:
     # Resolve all transitive dependencies and build source-only packages (notably
     # pyopenjtalk) into platform-specific wheels so the target stays compiler-free.
     requirements = [
-        "pip", "setuptools>=68", "wheel", "build", "cmake", "ninja", "cython",
+        "pip", "setuptools>=68", "setuptools_scm>=8", "wheel", "build",
+        "cmake", "ninja", "cython",
         "huggingface_hub[cli]>=0.34,<2", "onnx>=1.16", "onnxruntime>=1.18",
         "qwen-tts==0.1.1", "pyopenjtalk>=0.4.1,<0.5",
         "piper-plus-g2p[zh,ko]==0.2.0", "python-mecab-ko>=1.3,<2",
