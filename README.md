@@ -990,6 +990,9 @@ export TEXT_LLM_API_KEY="..."
 `api_key_env` 填的是环境变量名称，不是密钥值。为兼容常见服务配置，也接受
 `openai_compatible` 子对象和其中的 `base_url` 别名，但推荐使用上面的扁平写法；
 启动流水线时会在生成文本或下载模型前检查这些必填项，并拒绝疑似直接写入的密钥。
+HTTP 401/403 通常表示 Key 无效，或者 Key 所属套餐与 endpoint 不匹配；TLS/EOF
+错误则应检查服务器的 `HTTPS_PROXY` 和 `NO_PROXY`。程序会保留服务端错误摘要，
+但不会把请求中的 Key 写入日志。
 
 无需认证的本地 OpenAI-compatible 服务可以设置 `"api_key_env": null`。接口应
 提供 `/chat/completions`，并返回标准 `choices[0].message.content`；内容必须是

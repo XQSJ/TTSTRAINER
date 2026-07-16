@@ -1,10 +1,15 @@
 import csv
+import io
 import json
+import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
+from unittest.mock import patch
 
-from tts_trainer.text_generation import generate_texts, validate_text_generation_config
+from tts_trainer.text_generation import (_openai_compatible_request, generate_texts,
+                                         validate_text_generation_config)
 
 
 class TextGenerationTests(unittest.TestCase):
@@ -131,6 +136,37 @@ class TextGenerationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "environment variable name") as raised:
             validate_text_generation_config(config)
         self.assertNotIn(secret, str(raised.exception))
+
+    def test_http_auth_error_is_actionable_and_does_not_echo_key(self):
+        config = {
+            "provider": "openai_compatible",
+            "endpoint": "https://llm.example/v1",
+            "model": "text-model",
+            "api_key_env": "TEXT_LLM_API_KEY",
+        }
+        error = urllib.error.HTTPError(
+            config["endpoint"], 401, "Unauthorized", {},
+            io.BytesIO(b'{"error":"invalid token"}'),
+        )
+        with patch.dict(os.environ, {"TEXT_LLM_API_KEY": "private-key"}), \
+                patch("tts_trainer.text_generation.urllib.request.urlopen",
+                      side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 401") as raised:
+                _openai_compatible_request(config, "prompt")
+        self.assertIn("endpoint and plan", str(raised.exception))
+        self.assertNotIn("private-key", str(raised.exception))
+
+    def test_tls_url_error_has_proxy_hint(self):
+        config = {
+            "provider": "openai_compatible",
+            "endpoint": "https://llm.example/v1",
+            "model": "text-model",
+            "api_key_env": None,
+        }
+        with patch("tts_trainer.text_generation.urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("TLS failed")):
+            with self.assertRaisesRegex(RuntimeError, "HTTPS_PROXY/NO_PROXY"):
+                _openai_compatible_request(config, "prompt")
 
 
 if __name__ == "__main__":

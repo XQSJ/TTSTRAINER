@@ -7,6 +7,7 @@ import logging
 import os
 import random
 import re
+import urllib.error
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass
@@ -308,8 +309,28 @@ def _openai_compatible_request(config: dict, prompt: str) -> str:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(endpoint + "/chat/completions", data=payload,
                                      headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=float(resolved.get("timeout_seconds", 120))) as response:
-        raw = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(
+            request, timeout=float(resolved.get("timeout_seconds", 120)),
+        ) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read(2048).decode("utf-8", errors="replace").strip()
+        except Exception:
+            detail = ""
+        suffix = f": {detail}" if detail else ""
+        hint = " Check that the API key belongs to this endpoint and plan." \
+            if exc.code in {401, 403} else ""
+        raise RuntimeError(
+            f"text LLM request failed with HTTP {exc.code}{suffix}.{hint}"
+        ) from None
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            "text LLM request failed before receiving an HTTP response: "
+            f"{exc.reason}. Check text_generation.endpoint and the server's "
+            "HTTPS_PROXY/NO_PROXY settings."
+        ) from None
     return str(raw["choices"][0]["message"]["content"])
 
 
