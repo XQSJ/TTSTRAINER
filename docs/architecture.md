@@ -25,6 +25,18 @@ G2P 输出，失败时不会创建错误的训练 token。
 
 ## 训练图
 
+可选的文本生成阶段发生在音频生成之前：
+
+```text
+builtin templates / source CSV / OpenAI-compatible text model
+        -> normalize / script check / deduplicate / optional G2P
+        -> texts.generated.csv + text-generation-report.json
+        -> Qwen Teacher 生成 WAV
+```
+
+文本生成只负责构造输入语句，不参与 VITS 梯度训练。固定 `seed` 的 builtin
+provider 是确定性的；LLM provider 的输出必须经过同一过滤器并保留来源字段。
+
 训练前先固定文本前端：
 
 ```text

@@ -11,6 +11,7 @@ from .language_check import check_language_support
 from .logging_utils import configure_logging
 from .manifest import validate_manifest
 from .sample_generation import generate_samples
+from .text_generation import generate_texts
 from .vits.exporter import export_vits_onnx, validate_onnx_runtime
 from .vits.trainer import train_vits
 
@@ -26,6 +27,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
     logger.info("pipeline start model=%s languages=%s", layout.name, ",".join(layout.languages))
     stages = raw.get("pipeline", {})
     generation = raw.get("generation", {})
+    text_generation = raw.get("text_generation", {})
     statuses = check_language_support(
         raw, layout,
         run_smoke=bool(stages.get("phonemize", True)),
@@ -52,10 +54,19 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
         "stages": {},
     }
 
+    text_manifest = Path(generation.get("text_manifest") or layout.dataset_dir / "texts.csv")
+    if stages.get("generate_texts", True) and text_generation.get("enabled", False):
+        logger.info("stage=generate_texts status=started")
+        text_manifest = generate_texts(config_path)
+        report["stages"]["generate_texts"] = str(text_manifest.resolve())
+        logger.info("stage=generate_texts status=completed output=%s", text_manifest)
+    else:
+        report["stages"]["generate_texts"] = "skipped"
+
     raw_metadata = Path(generation.get("raw_metadata") or layout.dataset_dir / "metadata.csv")
     if stages.get("generate_samples", True) and generation.get("enabled", True):
         logger.info("stage=generate_samples status=started")
-        raw_metadata = generate_samples(config_path)
+        raw_metadata = generate_samples(config_path, text_manifest_path=text_manifest)
         report["stages"]["generate_samples"] = str(raw_metadata.resolve())
         logger.info("stage=generate_samples status=completed output=%s", raw_metadata)
     else:

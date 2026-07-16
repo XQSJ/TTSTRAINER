@@ -1,5 +1,34 @@
 {
   "extends": "../system/vits_mobile_architecture.json",
+  "text_generation": {
+    "enabled": false,
+    "provider": "builtin",
+    "output": null,
+    "input": null,
+    "sentences_per_language": 100,
+    "seed": 1337,
+    "allow_fewer": false,
+    "categories": {
+      "daily": 0.35,
+      "question": 0.10,
+      "number": 0.10,
+      "date_time": 0.10,
+      "money_unit": 0.10,
+      "names_places": 0.10,
+      "long_sentence": 0.10,
+      "domain": 0.05
+    },
+    "domain": {
+      "name": "mobile_assistant"
+    },
+    "filters": {
+      "min_characters": 5,
+      "max_characters": 180,
+      "deduplicate": true,
+      "reject_mixed_language": true,
+      "require_g2p_pass": false
+    }
+  },
   "generation": {
     "enabled": true,
     "qwen_runtime": "installed",
@@ -34,6 +63,7 @@
     }
   },
   "pipeline": {
+    "generate_texts": true,
     "generate_samples": true,
     "phonemize": true,
     "validate": true,

@@ -39,6 +39,7 @@ VITS 训练、checkpoint 保存和 ONNX 导出。
 | 用 Prompt 设计一个新音色并从零训练 | `training_configs/train1.json` |
 | 再训练一个互不影响的模型 | `training_configs/train2.json` |
 | 训练包含德语、俄语和意大利语的模型 | `training_configs/european.example.json` |
+| 自动生成文本后训练 | `training_configs/auto-text.example.json` |
 | 上传一段录音克隆音色 | `training_configs/clone.example.json` |
 | 从旧 checkpoint 继续训练 | `training_configs/resume.example.json` |
 | 给旧模型增加新音色 | `training_configs/add-speaker.example.json` |
@@ -80,10 +81,24 @@ my_reader
   └── artifacts/my_reader/   # 最终 ONNX 发布资源
 ```
 
-### 第 3 步：准备要朗读的文本
+### 第 3 步：选择文本来源
 
-编辑 `datasets/texts.example.csv`，或者新建 CSV 并把路径填入
-`generation.text_manifest`：
+最简单的流程验证可以直接启用内置文本生成器：
+
+```json
+"text_generation": {
+  "enabled": true,
+  "provider": "builtin",
+  "sentences_per_language": 100
+}
+```
+
+完整示例见
+[auto-text.example.json](training_configs/auto-text.example.json)。内置模板不需要
+下载文本模型，但只适合烟雾测试和覆盖种子，不应作为产品语料的唯一来源。
+
+也可以编辑 `datasets/texts.example.csv`，或者新建 CSV 并把路径填入
+`generation.text_manifest`，同时保持 `text_generation.enabled=false`：
 
 ```csv
 text,language
@@ -151,6 +166,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline --config training_co
 
 ```text
 创建命名目录
+  → 按配置生成/导入训练文本和质检报告（可跳过）
   → 检查逐语言 Teacher/G2P/voice 并显示结果
   → 检查/按需下载项目内 Qwen 权重
   → 生成 PCM16 训练 WAV 和 metadata.csv
@@ -228,6 +244,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer --help
 | checkpoint 续训与新音色扩展 | 已完成 |
 | Qwen VoiceDesign/上传音色批量生成 | 已完成 |
 | 单配置自动生成→训练→导出 | 已完成 |
+| builtin/file/OpenAI-compatible 自动文本生成 | 已完成 |
 | 配置化 eSpeak-ng 路由、烟雾测试与前端版本契约 | 已完成 |
 | 中日韩产品级专用 G2P | 进行中 |
 | 验证集、best checkpoint、自动音质评测 | 待完成 |
@@ -242,6 +259,7 @@ tts_trainer/
 │   ├── train1.json             # 训练 model_1
 │   ├── train2.json             # 训练 model_2
 │   ├── european.example.json   # 德/俄/意等欧洲语言组合
+│   ├── auto-text.example.json  # 自动生成文本后训练
 │   ├── clone.example.json      # 上传参考音色
 │   ├── resume.example.json     # 恢复完整训练状态
 │   └── add-speaker.example.json # 扩展新音色
@@ -253,6 +271,7 @@ tts_trainer/
 │   ├── texts.example.csv      # 给 Qwen 生成的文本清单
 │   └── metadata.example.csv
 ├── scripts/
+│   ├── generate_texts.py       # 只执行自动文本阶段
 │   ├── generate_samples.py
 │   └── run_pipeline.py
 ├── docs/
@@ -687,6 +706,101 @@ cp configs/system/vits_mobile_architecture.json \
 
 再创建单独的用户配置继承它，不要直接修改公共预设。
 
+## 自动生成训练文本
+
+只执行文本阶段，不会下载 Qwen-TTS 权重或生成音频：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m tts_trainer generate-texts \
+  --config training_configs/auto-text.example.json
+```
+
+也可运行脚本：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/generate_texts.py \
+  --config training_configs/auto-text.example.json
+```
+
+输出位于模型自己的数据目录：
+
+```text
+datasets/<name>/
+├── texts.generated.csv
+└── text-generation-report.json
+```
+
+报告记录逐语言目标数、通过数、拒绝原因和最多 20 条拒绝示例。过滤项包括长度、
+精确去重、基础文字脚本检查，以及可选的实际 G2P 检查。
+
+### `builtin`：内置确定性模板
+
+```json
+"text_generation": {
+  "enabled": true,
+  "provider": "builtin",
+  "sentences_per_language": 100,
+  "seed": 1337
+}
+```
+
+相同配置和 seed 会得到相同文本，适合 CI、烟雾训练和补充数字/日期/金额覆盖。
+它不是自然语料替代品；正式模型不要只使用模板数据。
+
+### `file`：导入并清洗已有 CSV
+
+```json
+"text_generation": {
+  "enabled": true,
+  "provider": "file",
+  "input": "datasets/my_source_texts.csv",
+  "sentences_per_language": 5000
+}
+```
+
+输入至少需要 `text,language` 两列，可以额外提供 `category,source`。程序只保留
+`experiment.languages` 中的语言，并进行统一过滤、去重和限额。
+
+### `openai_compatible`：调用文本大模型
+
+```json
+"text_generation": {
+  "enabled": true,
+  "provider": "openai_compatible",
+  "endpoint": "https://your-text-service.example/v1",
+  "model": "your-text-model",
+  "api_key_env": "TEXT_LLM_API_KEY",
+  "sentences_per_language": 5000,
+  "batch_size": 50
+}
+```
+
+密钥只从环境变量读取，不要写进 JSON：
+
+```bash
+export TEXT_LLM_API_KEY="..."
+```
+
+无需认证的本地 OpenAI-compatible 服务可以设置 `"api_key_env": null`。接口应
+提供 `/chat/completions`，并返回标准 `choices[0].message.content`；内容必须是
+由 `text` 和 `category` 组成的 JSON 数组。
+
+常用质量参数：
+
+```json
+"filters": {
+  "min_characters": 5,
+  "max_characters": 180,
+  "deduplicate": true,
+  "reject_mixed_language": true,
+  "require_g2p_pass": false
+}
+```
+
+`reject_mixed_language` 只做基础 Unicode 文字脚本检查，不是完整语言识别。
+`require_g2p_pass=true` 会逐句实际调用 G2P，准确但明显更慢；日语汉字会受到当前
+eSpeak-ng 限制。产品数据仍需独立语言识别、版权检查和母语者抽检。
+
 ## 用 Qwen 生成训练样本
 
 生成文本 CSV 只需两列：
@@ -697,7 +811,7 @@ text,language
 Hello, welcome to the multilingual speech system.,en
 ```
 
-支持 `zh en ja ko fr es pt`。使用一个参考音色生成全部语言，生成器会写入：
+支持 `zh en ja ko de fr ru pt es it`。使用一个参考音色生成全部语言，生成器会写入：
 
 ```text
 datasets/<name>/
@@ -807,6 +921,7 @@ PYTHONPATH=src .venv/bin/python scripts/run_pipeline.py \
 
 ```json
 "pipeline": {
+  "generate_texts": true,
   "generate_samples": true,
   "phonemize": true,
   "validate": true,
@@ -826,6 +941,8 @@ runs/<name>/pipeline-report.json
 
 ```text
 INFO | pipeline | language ready code=de teacher=qwen:German g2p=espeak-ng:de
+INFO | pipeline | stage=generate_texts status=started
+INFO | text_generation | text generation completed ...
 INFO | pipeline | stage=generate_samples status=started
 INFO | sample_generation | generation jobs total=1000 pending=960 cached=40
 INFO | trainer | epoch=1 step=10 generator=... discriminator=... mel=...

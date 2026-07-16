@@ -126,7 +126,7 @@ def _copy_reference(source: Path, destination: Path) -> Path:
     return destination
 
 
-def generate_samples(config_path: str | Path, *,
+def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path | None = None,
                      model_loader: Callable = load_qwen_teacher) -> Path:
     """Generate a named VITS dataset using the official Qwen teacher runtime.
 
@@ -143,7 +143,14 @@ def generate_samples(config_path: str | Path, *,
     if not generation.get("enabled", True):
         raise ValueError("sample generation is disabled in this config")
 
-    text_manifest = Path(generation.get("text_manifest") or layout.dataset_dir / "texts.csv")
+    text_generation = raw.get("text_generation", {})
+    generated_default = None
+    if text_generation.get("enabled", False):
+        generated_default = text_generation.get("output") or layout.dataset_dir / "texts.generated.csv"
+    text_manifest = Path(
+        text_manifest_path or generation.get("text_manifest")
+        or generated_default or layout.dataset_dir / "texts.csv"
+    )
     output_metadata = Path(generation.get("raw_metadata") or layout.dataset_dir / "metadata.csv")
     all_texts = read_generation_texts(text_manifest, registry)
     texts = [item for item in all_texts if item.language in layout.languages]

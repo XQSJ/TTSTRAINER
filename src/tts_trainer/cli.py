@@ -19,6 +19,7 @@ from .batch_training import train_many
 from .experiments import prepare_experiment, resolve_experiment
 from .pipeline import run_pipeline
 from .sample_generation import generate_samples
+from .text_generation import generate_texts
 from .qwen_teacher import inspect_qwen_runtime
 from .language_check import check_language_support, format_language_statuses
 from .logging_utils import configure_logging
@@ -56,6 +57,8 @@ def main(argv=None) -> int:
     initialize.add_argument("--config", required=True)
     generate = sub.add_parser("generate-samples", help="generate training WAV files with Qwen VoiceDesign or voice clone")
     generate.add_argument("--config", required=True)
+    generate_text = sub.add_parser("generate-texts", help="generate and validate multilingual training text")
+    generate_text.add_argument("--config", required=True)
     pipeline = sub.add_parser("run-pipeline", help="run all enabled stages from a single config")
     pipeline.add_argument("--config", default="training_configs/train1.json")
     pipeline.add_argument("--max-steps", type=int)
@@ -135,6 +138,8 @@ def main(argv=None) -> int:
         print(layout.run_dir / "run-layout.json")
     elif args.command == "generate-samples":
         print(generate_samples(args.config))
+    elif args.command == "generate-texts":
+        print(generate_texts(args.config))
     elif args.command == "run-pipeline":
         print(run_pipeline(args.config, max_steps=args.max_steps))
     elif args.command == "train-many":

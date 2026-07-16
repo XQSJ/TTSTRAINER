@@ -47,6 +47,9 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(load_vits_config("training_configs/train1.json").hop_length, 256)
         european = load_project_config("training_configs/european.example.json")
         self.assertEqual(european["experiment"]["languages"], ["en", "de", "fr", "ru", "es", "pt", "it"])
+        auto_text = load_project_config("training_configs/auto-text.example.json")
+        self.assertTrue(auto_text["text_generation"]["enabled"])
+        self.assertEqual(auto_text["text_generation"]["provider"], "builtin")
 
     def test_public_configs_keep_valid_bilingual_json_comments(self):
         config_paths = sorted(Path("training_configs").glob("*.json"))

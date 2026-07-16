@@ -24,18 +24,25 @@ class PipelineTests(unittest.TestCase):
                 },
                 "audio": {"sample_rate": 22050},
                 "frontend": {"require_phonemes": True},
+                "text_generation": {"enabled": True},
                 "generation": {"enabled": True},
-                "pipeline": {"generate_samples": True, "phonemize": True, "validate": True,
+                "pipeline": {"generate_texts": True, "generate_samples": True,
+                             "phonemize": True, "validate": True,
                              "train": True, "export": True, "validate_onnx": True},
             }
             config_path = root / "train.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
             raw_metadata = dataset / "metadata.csv"
+            text_manifest = dataset / "texts.generated.csv"
             checkpoint = root / "runs/automatic/checkpoints/last"
             onnx = root / "artifacts/automatic/model.onnx"
             calls = []
 
-            def fake_generate(_):
+            def fake_generate_texts(_):
+                calls.append("generate_texts"); return text_manifest
+
+            def fake_generate(_, **kwargs):
+                self.assertEqual(kwargs["text_manifest_path"], text_manifest)
                 calls.append("generate"); return raw_metadata
 
             def fake_phonemize(source, destination, frontend):
@@ -54,7 +61,8 @@ class PipelineTests(unittest.TestCase):
                 onnx.parent.mkdir(parents=True, exist_ok=True); onnx.write_bytes(b"onnx")
                 return onnx
 
-            with patch("tts_trainer.pipeline.generate_samples", fake_generate), \
+            with patch("tts_trainer.pipeline.generate_texts", fake_generate_texts), \
+                    patch("tts_trainer.pipeline.generate_samples", fake_generate), \
                     patch("tts_trainer.pipeline.check_language_support", return_value=[]), \
                     patch("tts_trainer.pipeline.espeak_frontend_from_config", return_value=object()), \
                     patch("tts_trainer.pipeline.phonemize_manifest", fake_phonemize), \
@@ -64,7 +72,7 @@ class PipelineTests(unittest.TestCase):
                     patch("tts_trainer.pipeline.validate_onnx_runtime", return_value=(1, 1, 100)):
                 report_path = run_pipeline(config_path, max_steps=3)
 
-            self.assertEqual(calls, ["generate", "phonemize", "validate", "train", "export"])
+            self.assertEqual(calls, ["generate_texts", "generate", "phonemize", "validate", "train", "export"])
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report["name"], "automatic")
             self.assertEqual(report["stages"]["validate_onnx"], [1, 1, 100])
