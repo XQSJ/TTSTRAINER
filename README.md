@@ -8,6 +8,56 @@
 cp training_configs/train1.json training_configs/my_model.json
 ```
 
+### 训练文本从哪里来
+
+有两种最常用的方式。
+
+方式一，先用项目内置模板自动生成，用来验证整个流程。`train1.json` 默认已经开启：
+
+```json
+"text_generation": {
+  "enabled": true,
+  "provider": "builtin",
+  "sentences_per_language": 20
+}
+```
+
+执行完整流水线时会自动生成；安装下面的依赖后，也可以先单独生成并查看：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m tts_trainer generate-texts --config training_configs/my_model.json
+```
+
+生成位置是 `datasets/my_model/texts.generated.csv`。内置模板不需要下载文本大模型，
+但内容只是覆盖数字、日期、问句等流程种子，不足以训练产品级声音。
+
+方式二，正式训练使用自己的业务文案、已获得许可的语料或人工整理文本，保存为
+UTF-8 CSV。每种启用语言至少准备足够多的句子：
+
+```csv
+text,language
+你好，欢迎使用语音助手。,zh
+今天下午三点有一场会议。,zh
+Hello, welcome to the voice assistant.,en
+Your meeting starts at three this afternoon.,en
+```
+
+例如保存为 `datasets/my_texts.csv`，然后在配置中改为：
+
+```json
+"text_generation": {
+  "enabled": false
+},
+"generation": {
+  "text_manifest": "datasets/my_texts.csv"
+}
+```
+
+CSV 里的语言必须包含 `experiment.languages` 选择的每一种语言。项目也支持从已有
+CSV 或 OpenAI-compatible 文本服务自动扩写，配置示例见
+`training_configs/auto-text.example.json`；无论文本来源是什么，正式数据都应经过
+版权确认、去重和母语者审核。
+
 打开 `training_configs/my_model.json`，第一次只改下面这些内容：
 
 ```json
@@ -37,9 +87,6 @@ cp training_configs/train1.json training_configs/my_model.json
 不要用上面的片段覆盖整个文件，只修改原配置中的同名字段。`name` 是模型和输出
 目录名，`languages` 是训练语言，`text_generation` 自动准备流程验证文本，`voice` 决定音色；
 显存不足时把 `batch_size` 改成 `4` 或 `2`。
-
-内置自动文本只适合跑通流程。正式训练时准备自己的 `text,language` CSV，将
-`text_generation.enabled` 改为 `false`，并填写 `generation.text_manifest`。
 
 安装并开始训练：
 
