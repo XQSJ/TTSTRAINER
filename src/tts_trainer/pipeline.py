@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,8 +29,35 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
     stages = raw.get("pipeline", {})
     generation = raw.get("generation", {})
     text_generation = raw.get("text_generation", {})
+    active_stages = ["preflight"]
+    if stages.get("generate_texts", True) and text_generation.get("enabled", False):
+        active_stages.append("generate_texts")
+    if stages.get("generate_samples", True) and generation.get("enabled", True):
+        active_stages.append("generate_samples")
+    for name in ("phonemize", "validate", "train", "export"):
+        if stages.get(name, True):
+            active_stages.append(name)
+    stage_numbers = {name: index for index, name in enumerate(active_stages, 1)}
+    pipeline_started = time.monotonic()
+
+    def stage_started(name: str, description: str) -> float:
+        logger.info(
+            "pipeline progress=%d/%d stage=%s status=started detail=%s",
+            stage_numbers[name], len(active_stages), name, description,
+        )
+        return time.monotonic()
+
+    def stage_completed(name: str, started: float, detail: str) -> None:
+        logger.info(
+            "pipeline progress=%d/%d stage=%s status=completed elapsed=%.1fs %s",
+            stage_numbers[name], len(active_stages), name,
+            time.monotonic() - started, detail,
+        )
+
+    logger.info("pipeline plan total_stages=%d stages=%s", len(active_stages), ",".join(active_stages))
     if stages.get("generate_texts", True) and text_generation.get("enabled", False):
         validate_text_generation_config(text_generation)
+    stage_time = stage_started("preflight", "check language, teacher and G2P readiness")
     statuses = check_language_support(
         raw, layout,
         run_smoke=bool(stages.get("phonemize", True)),
@@ -49,6 +77,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
         raise RuntimeError("language preflight failed: " + "; ".join(
             f"{status.code}: {status.error}" for status in failed
         ))
+    stage_completed("preflight", stage_time, f"languages={len(statuses)} ready={len(statuses)}")
     report = {
         "name": layout.name,
         "config": str(Path(config_path).resolve()),
@@ -58,36 +87,36 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
 
     text_manifest = Path(generation.get("text_manifest") or layout.dataset_dir / "texts.csv")
     if stages.get("generate_texts", True) and text_generation.get("enabled", False):
-        logger.info("stage=generate_texts status=started")
+        stage_time = stage_started("generate_texts", "prepare or reuse multilingual training texts")
         text_manifest = generate_texts(config_path)
         report["stages"]["generate_texts"] = str(text_manifest.resolve())
-        logger.info("stage=generate_texts status=completed output=%s", text_manifest)
+        stage_completed("generate_texts", stage_time, f"output={text_manifest}")
     else:
         report["stages"]["generate_texts"] = "skipped"
 
     raw_metadata = Path(generation.get("raw_metadata") or layout.dataset_dir / "metadata.csv")
     if stages.get("generate_samples", True) and generation.get("enabled", True):
-        logger.info("stage=generate_samples status=started")
+        stage_time = stage_started("generate_samples", "generate or reuse teacher WAV samples")
         raw_metadata = generate_samples(config_path, text_manifest_path=text_manifest)
         report["stages"]["generate_samples"] = str(raw_metadata.resolve())
-        logger.info("stage=generate_samples status=completed output=%s", raw_metadata)
+        stage_completed("generate_samples", stage_time, f"output={raw_metadata}")
     else:
         report["stages"]["generate_samples"] = "skipped"
 
     if stages.get("phonemize", True):
-        logger.info("stage=phonemize status=started")
+        stage_time = stage_started("phonemize", "normalize text and convert it to language-specific phonemes")
         frontend = frontend_from_config(
             raw.get("frontend"), languages=layout.languages,
             language_registry=raw.get("language_registry"),
         )
         phonemize_manifest(raw_metadata, layout.metadata, frontend)
         report["stages"]["phonemize"] = str(layout.metadata.resolve())
-        logger.info("stage=phonemize status=completed output=%s", layout.metadata)
+        stage_completed("phonemize", stage_time, f"output={layout.metadata}")
     else:
         report["stages"]["phonemize"] = "skipped"
 
     if stages.get("validate", True):
-        logger.info("stage=validate status=started")
+        stage_time = stage_started("validate", "validate audio, metadata, languages and phonemes")
         validation = validate_manifest(
             layout.metadata,
             int(raw["audio"]["sample_rate"]),
@@ -108,21 +137,24 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
             "enabled_languages": list(layout.languages),
             "languages": validation.language_counts,
         }
-        logger.info("stage=validate status=completed samples=%d counts=%s", len(validation.items), validation.language_counts)
+        stage_completed(
+            "validate", stage_time,
+            f"samples={len(validation.items)} counts={validation.language_counts}",
+        )
     else:
         report["stages"]["validate"] = "skipped"
 
     checkpoint = layout.checkpoints_dir / "last"
     if stages.get("train", True):
-        logger.info("stage=train status=started")
+        stage_time = stage_started("train", "quality gate, dataset split and VITS optimization")
         checkpoint = train_vits(str(config_path), max_steps=max_steps)
         report["stages"]["train"] = str(checkpoint.resolve())
-        logger.info("stage=train status=completed checkpoint=%s", checkpoint)
+        stage_completed("train", stage_time, f"checkpoint={checkpoint}")
     else:
         report["stages"]["train"] = "skipped"
 
     if stages.get("export", True):
-        logger.info("stage=export status=started")
+        stage_time = stage_started("export", "load checkpoint, export ONNX and validate runtime")
         requested_checkpoint = raw.get("validation", {}).get("export_checkpoint", "best")
         if requested_checkpoint not in {"best", "last"}:
             raise ValueError("validation.export_checkpoint must be best or last")
@@ -137,12 +169,15 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
         report["stages"]["export_checkpoint"] = str(checkpoint.resolve())
         if stages.get("validate_onnx", True):
             report["stages"]["validate_onnx"] = list(validate_onnx_runtime(model))
-        logger.info("stage=export status=completed model=%s", model)
+        stage_completed("export", stage_time, f"model={model}")
     else:
         report["stages"]["export"] = "skipped"
 
     report["finished_at"] = datetime.now(timezone.utc).isoformat()
     destination = layout.run_dir / "pipeline-report.json"
     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("pipeline completed report=%s", destination)
+    logger.info(
+        "pipeline completed status=success elapsed=%.1fs report=%s",
+        time.monotonic() - pipeline_started, destination,
+    )
     return destination

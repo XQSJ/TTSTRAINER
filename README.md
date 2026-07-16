@@ -1159,14 +1159,18 @@ runs/<name>/pipeline-report.json
 终端会持续显示阶段和训练状态，例如：
 
 ```text
+INFO | pipeline | pipeline plan total_stages=7 stages=preflight,generate_texts,...,export
+INFO | pipeline | pipeline progress=1/7 stage=preflight status=started ...
 INFO | pipeline | language ready code=de teacher=qwen:German g2p=espeak-ng:de
-INFO | pipeline | stage=generate_texts status=started
+INFO | pipeline | pipeline progress=2/7 stage=generate_texts status=started ...
 INFO | text_generation | text generation completed ...
-INFO | pipeline | stage=generate_samples status=started
+INFO | pipeline | pipeline progress=3/7 stage=generate_samples status=started ...
 INFO | sample_generation | generation jobs total=1000 pending=960 cached=40
-INFO | trainer | epoch=1 step=10 generator=... discriminator=... mel=...
+INFO | trainer | training plan epochs=1000 max_steps=unlimited log_every_steps=10 ...
+INFO | trainer | train progress=... epoch=1 batch=10/125 step=10 step_time=... eta=... mel=...
 INFO | trainer | checkpoint step=5000 status=saving
-INFO | pipeline | stage=export status=completed model=artifacts/.../model.onnx
+INFO | exporter | ONNX export step=2/5 action=build_graph ...
+INFO | pipeline | pipeline progress=7/7 stage=export status=completed ...
 ```
 
 日志级别由内部默认配置的 `logging.level` 控制，也可临时使用环境变量：
@@ -1177,6 +1181,10 @@ TTS_TRAINER_LOG_LEVEL=DEBUG PYTHONPATH=src .venv/bin/python -m tts_trainer \
 ```
 
 训练损失输出频率由外层配置的 `training.log_every_steps` 控制。
+使用 `--max-steps 10` 这类短流程验证时，程序会自动逐步显示训练进度；正式训练仍按
+`training.log_every_steps` 输出，避免数十万步训练刷满终端。`progress` 是当前短任务进度，
+`batch` 是本轮 epoch 的批次位置，`step_time` 是最近若干步平均耗时，`eta` 是传入
+`--max-steps` 时的粗略剩余时间估计。
 
 调试整条流水线时可限制 VITS 步数：
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import warnings
 from pathlib import Path
 
 import torch
@@ -11,6 +13,9 @@ from ..frontend import frontend_contract_from_config
 from ..frontend.conformance import save_frontend_conformance
 from .config import VitsConfig
 from .model import MultilingualVITS
+
+
+logger = logging.getLogger(__name__)
 
 
 class PiperInferenceWrapper(nn.Module):
@@ -67,6 +72,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     if metadata["format"] != CHECKPOINT_FORMAT:
         raise ValueError("unsupported checkpoint format")
     config = _config_from_metadata(metadata)
+    logger.info("ONNX export step=1/5 action=load_checkpoint path=%s", checkpoint_dir)
     generator = MultilingualVITS(config)
     state = torch.load(checkpoint_dir / "training-state.pt", map_location="cpu", weights_only=False)
     generator.load_state_dict(state["generator"])
@@ -76,15 +82,22 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     lengths = torch.tensor([4], dtype=torch.long)
     scales = torch.tensor([0.0, 1.0, 1.0], dtype=torch.float32)
     sid = torch.tensor([0], dtype=torch.long)
-    torch.onnx.export(
-        wrapper, (tokens, lengths, scales, sid), str(target),
-        input_names=["input", "input_lengths", "scales", "sid"],
-        output_names=["output"], opset_version=opset, do_constant_folding=True,
-        dynamic_axes={"input": {0: "batch", 1: "text_length"},
-                      "input_lengths": {0: "batch"}, "sid": {0: "batch"},
-                      "output": {0: "batch", 2: "audio_length"}},
-        dynamo=False,
-    )
+    logger.info("ONNX export step=2/5 action=build_graph opset=%d output=%s", opset, target)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="Constant folding - Only steps=1 can be constant folded.*",
+            category=UserWarning,
+        )
+        torch.onnx.export(
+            wrapper, (tokens, lengths, scales, sid), str(target),
+            input_names=["input", "input_lengths", "scales", "sid"],
+            output_names=["output"], opset_version=opset, do_constant_folding=True,
+            dynamic_axes={"input": {0: "batch", 1: "text_length"},
+                          "input_lengths": {0: "batch"}, "sid": {0: "batch"},
+                          "output": {0: "batch", 2: "audio_length"}},
+            dynamo=False,
+        )
+    logger.info("ONNX export step=3/5 action=check_model size_bytes=%d", target.stat().st_size)
     model = onnx.load(str(target)); onnx.checker.check_model(model)
     profiles = voice_profiles(metadata["speaker_map"], metadata["language_map"])
     frontend = metadata.get("frontend") or frontend_contract_from_config(
@@ -112,12 +125,18 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     conformance = metadata.get("frontend_conformance")
     if conformance:
         save_frontend_conformance(conformance, output_dir / "frontend.conformance.json")
+    logger.info(
+        "ONNX export step=4/5 action=write_resources profiles=%d directory=%s",
+        len(profiles), output_dir,
+    )
+    logger.info("ONNX export step=5/5 action=completed model=%s", target)
     return target
 
 
 def validate_onnx_runtime(model_path: str | Path) -> tuple[int, ...]:
     import numpy as np
     import onnxruntime as ort
+    logger.info("ONNX runtime validation status=started provider=CPUExecutionProvider model=%s", model_path)
     session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
     output = session.run(None, {
         "input": np.asarray([[2, 3]], dtype=np.int64),
@@ -127,4 +146,5 @@ def validate_onnx_runtime(model_path: str | Path) -> tuple[int, ...]:
     })[0]
     if output.ndim != 3 or output.shape[1] != 1 or output.shape[2] <= 0:
         raise RuntimeError(f"unexpected ONNX output shape: {output.shape}")
+    logger.info("ONNX runtime validation status=completed output_shape=%s", tuple(output.shape))
     return tuple(output.shape)
