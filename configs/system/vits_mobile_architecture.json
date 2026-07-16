@@ -27,10 +27,19 @@
   },
   "frontend": {
     "require_phonemes": true,
-    "provider": "espeak-ng",
+    "provider": "language-router",
     "strict_language_switches": true,
     "executable": null,
     "voices": {},
-    "format": "whitespace-separated UTF-8 codepoints; serialize a space as <space>"
+    "openjtalk": {
+      "dictionary_root": null,
+      "auto_download_dictionary": true,
+      "user_dictionary": null
+    },
+    "piper_plus": {
+      "resource_root": null,
+      "auto_download_resources": true
+    },
+    "format": "whitespace-separated routed phoneme units; serialize a space as <space>"
   }
 }

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .experiments import prepare_experiment, resolve_experiment
-from .frontend import espeak_frontend_from_config
+from .frontend import frontend_from_config
 from .logging_utils import configure_logging
 from .text import normalize
 
@@ -364,7 +364,7 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     max_chars = int(filters.get("max_characters", 180))
     reject_mixed = bool(filters.get("reject_mixed_language", True))
     require_g2p = bool(filters.get("require_g2p_pass", False))
-    frontend = espeak_frontend_from_config(
+    frontend = frontend_from_config(
         raw.get("frontend"), languages=layout.languages,
         language_registry=raw.get("language_registry"),
     ) if require_g2p else None

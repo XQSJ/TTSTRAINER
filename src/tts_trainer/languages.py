@@ -19,8 +19,13 @@ class LanguageSpec:
     teacher_provider: str | None
     teacher_language: str | None
     frontend_provider: str
-    frontend_voice: str
+    frontend_profile: dict[str, str]
     smoke_text: str
+
+    @property
+    def frontend_voice(self) -> str:
+        """Compatibility label used by logs and older callers."""
+        return self.frontend_profile.get("voice", self.frontend_profile.get("dictionary", ""))
 
     @classmethod
     def from_dict(cls, code: str, raw: dict) -> "LanguageSpec":
@@ -39,11 +44,28 @@ class LanguageSpec:
             raise ValueError(f"language {code}: unsupported teacher provider {teacher_provider!r}")
         frontend = raw.get("frontend") or {}
         provider = str(frontend.get("provider", "espeak-ng"))
-        voice = str(frontend.get("voice", "")).strip()
-        if provider != "espeak-ng":
+        if provider not in {"espeak-ng", "openjtalk", "piper-plus-g2p"}:
             raise ValueError(f"language {code}: unsupported frontend provider {provider!r}")
-        if not voice:
+        profile = {
+            str(key): str(value).strip()
+            for key, value in frontend.items()
+            if key != "provider" and value is not None and str(value).strip()
+        }
+        if provider == "espeak-ng" and not profile.get("voice"):
             raise ValueError(f"language {code}: frontend.voice must not be empty")
+        if provider == "openjtalk":
+            profile.setdefault("dictionary", "open_jtalk_dic_utf_8-1.11")
+        if provider == "piper-plus-g2p":
+            if code not in {"zh", "ko"}:
+                raise ValueError(
+                    f"language {code}: piper-plus-g2p is currently routed only for zh and ko"
+                )
+            defaults = {
+                "zh": {"profile": "mandarin-ipa-v1", "resource": "pypinyin-rules-v1"},
+                "ko": {"profile": "korean-ipa-v1", "resource": "nltk-cmudict-v1"},
+            }[code]
+            for key, value in defaults.items():
+                profile.setdefault(key, value)
         smoke_text = str(raw.get("smoke_text", "")).strip()
         if not smoke_text:
             raise ValueError(f"language {code}: smoke_text must not be empty")
@@ -53,7 +75,7 @@ class LanguageSpec:
             teacher_provider=teacher_provider,
             teacher_language=teacher_language or None,
             frontend_provider=provider,
-            frontend_voice=voice,
+            frontend_profile=profile,
             smoke_text=smoke_text,
         )
 
@@ -66,7 +88,7 @@ class LanguageSpec:
             },
             "frontend": {
                 "provider": self.frontend_provider,
-                "voice": self.frontend_voice,
+                **self.frontend_profile,
             },
             "smoke_text": self.smoke_text,
         }
@@ -74,13 +96,13 @@ class LanguageSpec:
 
 BUILTIN_LANGUAGE_REGISTRY_RAW = {
     "zh": {"name": "Chinese", "teacher": {"provider": "qwen", "language": "Chinese"},
-           "frontend": {"provider": "espeak-ng", "voice": "cmn"}, "smoke_text": "你好，欢迎使用语音系统。"},
+           "frontend": {"provider": "piper-plus-g2p", "profile": "mandarin-ipa-v1", "resource": "pypinyin-rules-v1"}, "smoke_text": "你好，欢迎使用语音系统。"},
     "en": {"name": "English", "teacher": {"provider": "qwen", "language": "English"},
            "frontend": {"provider": "espeak-ng", "voice": "en-us"}, "smoke_text": "Hello, welcome to the speech system."},
     "ja": {"name": "Japanese", "teacher": {"provider": "qwen", "language": "Japanese"},
-           "frontend": {"provider": "espeak-ng", "voice": "ja"}, "smoke_text": "こんにちは、音声システムへようこそ。"},
+           "frontend": {"provider": "openjtalk", "dictionary": "open_jtalk_dic_utf_8-1.11"}, "smoke_text": "こんにちは、音声システムへようこそ。"},
     "ko": {"name": "Korean", "teacher": {"provider": "qwen", "language": "Korean"},
-           "frontend": {"provider": "espeak-ng", "voice": "ko"}, "smoke_text": "안녕하세요. 음성 시스템에 오신 것을 환영합니다."},
+           "frontend": {"provider": "piper-plus-g2p", "profile": "korean-ipa-v1", "resource": "nltk-cmudict-v1"}, "smoke_text": "안녕하세요. 음성 시스템에 오신 것을 환영합니다."},
     "de": {"name": "German", "teacher": {"provider": "qwen", "language": "German"},
            "frontend": {"provider": "espeak-ng", "voice": "de"}, "smoke_text": "Guten Morgen, willkommen beim Sprachsystem."},
     "fr": {"name": "French", "teacher": {"provider": "qwen", "language": "French"},

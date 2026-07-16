@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import json
 import logging
+import math
 import warnings
 from collections import Counter
 from dataclasses import replace
@@ -15,9 +16,12 @@ from torch.nn import functional as F
 from ..checkpoints import CHECKPOINT_FORMAT, load_training_checkpoint, save_training_checkpoint
 from ..experiments import prepare_experiment, resolve_experiment
 from ..frontend import (FrontendContract, frontend_contract_from_config,
-                        frontend_lock_path, load_frontend_contract)
+                        frontend_lock_path, load_frontend_contract,
+                        build_frontend_conformance)
 from ..manifest import validate_manifest
 from ..logging_utils import configure_logging
+from ..quality import run_audio_quality_gate
+from ..semantic_quality import run_semantic_quality_gate
 from ..text import Vocabulary
 from .config import load_vits_config
 from .data import AudioConfig, VitsDataset, collate_vits, slice_waveforms
@@ -25,6 +29,8 @@ from .discriminators import VitsDiscriminator
 from .losses import (discriminator_loss, feature_matching_loss,
                      generator_adversarial_loss, kl_loss)
 from .model import MultilingualVITS
+from .validation import (evaluate_validation, save_split_artifacts,
+                         split_train_validation)
 
 
 logger = logging.getLogger(__name__)
@@ -102,7 +108,7 @@ def _resolve_frontend_contract(raw: dict, metadata: Path, languages: tuple[str, 
     current = load_frontend_contract(lock) if lock.is_file() else declared
     if set(current.languages) != set(languages):
         raise ValueError("frontend contract languages differ from experiment.languages")
-    if current.compatibility_key() != declared.compatibility_key():
+    if current.declaration_key() != declared.declaration_key():
         raise ValueError(
             "frontend.lock.json differs from the configured provider/voices; "
             "re-run phonemize or restore the matching frontend config"
@@ -110,9 +116,18 @@ def _resolve_frontend_contract(raw: dict, metadata: Path, languages: tuple[str, 
     previous_raw = previous.get("frontend") if previous else None
     if previous_raw:
         old = FrontendContract.from_dict(previous_raw)
-        if old.compatibility_key() != current.compatibility_key():
+        if lock.is_file() and old.compatibility_key() != current.compatibility_key():
             raise ValueError("frontend contract differs from the checkpoint; start a new model or re-phonemize compatibly")
-        if current.engine_version is None:
+        if not lock.is_file():
+            # A resumed run may point at the already frozen metadata while its
+            # adjacent lock file was not copied. The checkpoint is the stronger
+            # source of truth, but only after its declarable routing still
+            # matches the current user config.
+            if old.declaration_key() != declared.declaration_key():
+                raise ValueError(
+                    "checkpoint frontend differs from the configured provider/voices; "
+                    "restore the matching config or start a new model"
+                )
             current = old
     return current.to_dict()
 
@@ -164,6 +179,84 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 stacklevel=2,
             )
     vocabulary = _vocabulary_for_initialization(items, layout.initialization_mode, previous)
+    frontend_conformance = (
+        build_frontend_conformance(items, vocabulary, language_map)
+        if all(item.phonemes for item in items) else None
+    )
+    quality_config = raw.get("quality", {})
+    quality_summary = None
+    if quality_config.get("enabled", False):
+        logger.info("audio quality gate status=started items=%d", len(items))
+        quality_report = run_audio_quality_gate(
+            items, quality_config, layout.run_dir / "quality" / "audio-quality-report.json",
+        )
+        quality_summary = {"signal": {
+            key: quality_report[key]
+            for key in ("provider", "items", "passed", "failed", "failure_counts")
+        }}
+        logger.info(
+            "audio quality gate status=completed passed=%d failed=%d",
+            quality_report["passed"], quality_report["failed"],
+        )
+        semantic_config = quality_config.get("semantic", {})
+        if semantic_config.get("enabled", False):
+            logger.info("semantic quality gate status=started items=%d", len(items))
+            semantic_report = run_semantic_quality_gate(
+                items, semantic_config,
+                layout.run_dir / "quality" / "semantic-quality-report.json",
+                reference_root=layout.dataset_dir / "references",
+            )
+            quality_summary["semantic"] = {
+                key: semantic_report[key]
+                for key in ("provider", "items", "passed", "failed", "failure_counts")
+            }
+            logger.info(
+                "semantic quality gate status=completed passed=%d failed=%d",
+                semantic_report["passed"], semantic_report["failed"],
+            )
+
+    validation_config = raw.get("validation", {})
+    validation_enabled = bool(validation_config.get("enabled", False))
+    split_report = None
+    if validation_enabled:
+        train_items, validation_items, split_report = split_train_validation(
+            items,
+            fraction=float(validation_config.get("fraction", 0.05)),
+            seed=int(validation_config.get("seed", raw["training"].get("seed", 1337))),
+            minimum_per_profile=int(validation_config.get("minimum_per_profile", 1)),
+            maximum_per_profile=validation_config.get("maximum_per_profile", 100),
+        )
+        if validation_config.get("require_every_profile", True) \
+                and split_report["profiles_without_validation"]:
+            missing_profiles = ", ".join(
+                f"{row['language']}/{row['speaker']}"
+                for row in split_report["profiles_without_validation"]
+            )
+            raise ValueError(
+                "validation requires at least two samples for every language/speaker profile; "
+                f"profiles without validation: {missing_profiles}"
+            )
+        if not validation_items:
+            raise ValueError(
+                "validation is enabled but no validation rows can be selected; "
+                "provide more data or set validation.enabled=false for a smoke test"
+            )
+        if previous and layout.initialization_mode == "resume" and previous.get("data_split"):
+            old_split = previous["data_split"]
+            for key in ("train_fingerprint", "validation_fingerprint"):
+                if old_split.get(key) != split_report.get(key):
+                    raise ValueError(
+                        "validation split differs from the resumed checkpoint; "
+                        "restore the same data and validation settings"
+                    )
+        save_split_artifacts(layout.run_dir, train_items, validation_items, split_report)
+        logger.info(
+            "dataset split train=%d validation=%d profiles=%d",
+            len(train_items), len(validation_items), len(split_report["profiles"]),
+        )
+    else:
+        train_items = items
+        validation_items = []
     config = load_vits_config(config_path, vocab_size=len(vocabulary.tokens))
     config = replace(config, num_languages=len(language_map), num_speakers=len(speaker_map),
                      spec_channels=audio_config.n_fft // 2 + 1)
@@ -178,15 +271,26 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     random.seed(seed); torch.manual_seed(seed)
     device = select_device(layout.device)
     logger.info("selected device=%s", device)
-    dataset = VitsDataset(items, vocabulary, speaker_map, language_map, audio_config)
-    language_counts = Counter(item.language for item in items)
-    speaker_counts = Counter(item.speaker for item in items)
-    weights = [1.0 / (language_counts[item.language] * speaker_counts[item.speaker]) ** 0.5 for item in items]
-    sampler = torch.utils.data.WeightedRandomSampler(weights, len(items), replacement=True)
+    dataset = VitsDataset(train_items, vocabulary, speaker_map, language_map, audio_config)
+    language_counts = Counter(item.language for item in train_items)
+    speaker_counts = Counter(item.speaker for item in train_items)
+    weights = [
+        1.0 / (language_counts[item.language] * speaker_counts[item.speaker]) ** 0.5
+        for item in train_items
+    ]
+    sampler = torch.utils.data.WeightedRandomSampler(weights, len(train_items), replacement=True)
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=raw["training"]["batch_size"], sampler=sampler,
         num_workers=raw["training"].get("num_workers", 0), collate_fn=collate_vits,
     )
+    validation_loader = None
+    if validation_items:
+        validation_loader = torch.utils.data.DataLoader(
+            VitsDataset(validation_items, vocabulary, speaker_map, language_map, audio_config),
+            batch_size=int(validation_config.get("batch_size", raw["training"]["batch_size"])),
+            shuffle=False, num_workers=raw["training"].get("num_workers", 0),
+            collate_fn=collate_vits,
+        )
     generator = MultilingualVITS(config).to(device)
     discriminator = VitsDiscriminator().to(device)
     optimizer_g = torch.optim.AdamW(generator.parameters(), lr=raw["training"]["learning_rate_generator"], betas=(0.8, 0.99))
@@ -217,8 +321,23 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     log_every = int(raw["training"].get("log_every_steps", 10))
     if log_every < 1:
         raise ValueError("training.log_every_steps must be at least 1")
+    selection_metric = str(validation_config.get("metric", "mel"))
+    if selection_metric not in {"mel", "duration", "kl", "total"}:
+        raise ValueError("validation.metric must be mel, duration, kl, or total")
+    previous_selection = previous.get("selection") if previous else None
+    best_value = float("inf")
+    best_epoch = None
+    if previous_selection and previous_selection.get("metric") == selection_metric:
+        best_value = float(previous_selection.get("best_value", best_value))
+        best_epoch = previous_selection.get("best_epoch")
+    evaluation_every = int(validation_config.get("every_epochs", 1))
+    if evaluation_every < 1:
+        raise ValueError("validation.every_epochs must be at least 1")
+
     for epoch in range(start_epoch, raw["training"]["epochs"] + 1):
         logger.info("epoch=%d status=started", epoch)
+        epoch_totals = Counter()
+        epoch_steps = 0
         for batch in loader:
             batch = {key: value.to(device) for key, value in batch.items()}
             output = generator(
@@ -251,6 +370,14 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             loss_g.backward(); torch.nn.utils.clip_grad_norm_(generator.parameters(), 5.0); optimizer_g.step()
             for parameter in discriminator.parameters(): parameter.requires_grad_(True)
             global_step += 1
+            epoch_steps += 1
+            epoch_totals.update({
+                "generator": float(loss_g.item()),
+                "discriminator": float(loss_d.item()),
+                "mel": float(loss_mel.item()),
+                "duration": float(output.duration_loss.item()),
+                "kl": float(loss_kl.item()),
+            })
             if global_step == 1 or global_step % log_every == 0:
                 logger.info(
                     "epoch=%d step=%d generator=%.4f discriminator=%.4f mel=%.4f",
@@ -265,15 +392,77 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     epoch=epoch, global_step=global_step, config=config,
                     language_map=language_map, speaker_map=speaker_map, tokens=vocabulary.tokens,
                     frontend=frontend_contract,
+                    frontend_conformance=frontend_conformance,
+                    selection={
+                        "metric": selection_metric,
+                        "best_value": best_value if math.isfinite(best_value) else None,
+                        "best_epoch": best_epoch,
+                    },
+                    data_split=split_report,
+                    quality_summary=quality_summary,
                     metrics={"generator": loss_g.item(), "discriminator": loss_d.item(), "mel": loss_mel.item()},
                 )
             if max_steps is not None and global_step >= max_steps:
                 break
+        train_metrics = {
+            key: value / max(epoch_steps, 1) for key, value in epoch_totals.items()
+        }
+        validation_metrics = None
+        should_evaluate = validation_loader is not None and (
+            epoch == start_epoch or epoch % evaluation_every == 0
+            or (max_steps is not None and global_step >= max_steps)
+        )
+        if should_evaluate:
+            logger.info("validation epoch=%d status=started", epoch)
+            validation_metrics = evaluate_validation(
+                generator, validation_loader, mel_transform, audio_config, config, device,
+                seed=int(validation_config.get("seed", seed)),
+            )
+            current_value = float(validation_metrics[selection_metric])
+            logger.info(
+                "validation epoch=%d mel=%.4f duration=%.4f kl=%.4f total=%.4f",
+                epoch, validation_metrics["mel"], validation_metrics["duration"],
+                validation_metrics["kl"], validation_metrics["total"],
+            )
+            if current_value < best_value:
+                best_value = current_value
+                best_epoch = epoch
+                selection = {
+                    "metric": selection_metric,
+                    "best_value": best_value,
+                    "best_epoch": best_epoch,
+                    "mode": "min",
+                }
+                save_training_checkpoint(
+                    destination / "best", generator=generator, discriminator=discriminator,
+                    optimizer_g=optimizer_g, optimizer_d=optimizer_d, epoch=epoch,
+                    global_step=global_step, config=config, language_map=language_map,
+                    speaker_map=speaker_map, tokens=vocabulary.tokens,
+                    frontend=frontend_contract,
+                    frontend_conformance=frontend_conformance,
+                    selection=selection, data_split=split_report,
+                    quality_summary=quality_summary,
+                    metrics={"train": train_metrics, "validation": validation_metrics},
+                )
+                logger.info(
+                    "best checkpoint updated epoch=%d metric=%s value=%.6f path=%s",
+                    epoch, selection_metric, best_value, destination / "best",
+                )
+        selection = {
+            "metric": selection_metric,
+            "best_value": best_value if math.isfinite(best_value) else None,
+            "best_epoch": best_epoch,
+            "mode": "min",
+        } if validation_enabled else {"enabled": False}
         save_training_checkpoint(
             destination / "last", generator=generator, discriminator=discriminator,
             optimizer_g=optimizer_g, optimizer_d=optimizer_d, epoch=epoch,
             global_step=global_step, config=config, language_map=language_map,
             speaker_map=speaker_map, tokens=vocabulary.tokens, frontend=frontend_contract,
+            frontend_conformance=frontend_conformance,
+            selection=selection, data_split=split_report,
+            quality_summary=quality_summary,
+            metrics={"train": train_metrics, "validation": validation_metrics},
         )
         logger.info("epoch=%d status=completed step=%d checkpoint=%s", epoch, global_step, destination / "last")
         if max_steps is not None and global_step >= max_steps: break

@@ -8,6 +8,7 @@ from torch import nn
 
 from ..checkpoints import CHECKPOINT_FORMAT
 from ..frontend import frontend_contract_from_config
+from ..frontend.conformance import save_frontend_conformance
 from .config import VitsConfig
 from .model import MultilingualVITS
 
@@ -108,6 +109,9 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     (output_dir / "tokens.json").write_text(json.dumps({"tokens": metadata["tokens"]}, ensure_ascii=False, indent=2), encoding="utf-8")
     tokens_text = "".join(f"{token} {index}\n" for index, token in enumerate(metadata["tokens"]))
     (output_dir / "tokens.txt").write_text(tokens_text, encoding="utf-8")
+    conformance = metadata.get("frontend_conformance")
+    if conformance:
+        save_frontend_conformance(conformance, output_dir / "frontend.conformance.json")
     return target
 
 

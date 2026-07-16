@@ -13,7 +13,13 @@ from .text import Vocabulary
 from .train import train
 from .vits.trainer import train_vits
 from .vits.exporter import export_vits_onnx, validate_onnx_runtime
-from .frontend import EspeakFrontend, espeak_frontend_from_config, phonemize_manifest
+from .frontend import (EspeakFrontend, ensure_korean_cmudict,
+                       ensure_openjtalk_dictionary,
+                       frontend_from_config, frontend_from_contract,
+                       inspect_korean_cmudict, inspect_openjtalk_dictionary,
+                       load_frontend_conformance,
+                       load_frontend_contract, phonemize_manifest,
+                       verify_frontend_conformance)
 from .vits.runtime import OnnxTTS, write_wav
 from .batch_training import train_many
 from .experiments import prepare_experiment, resolve_experiment
@@ -23,6 +29,10 @@ from .text_generation import generate_texts
 from .qwen_teacher import inspect_qwen_runtime
 from .language_check import check_language_support, format_language_statuses
 from .logging_utils import configure_logging
+from .quality import run_audio_quality_gate
+from .quality_models import (QUALITY_MODEL_SPECS, ensure_quality_model,
+                             inspect_quality_model, quality_model_path)
+from .semantic_quality import run_semantic_quality_gate
 
 
 def main(argv=None) -> int:
@@ -35,12 +45,15 @@ def main(argv=None) -> int:
     validate.add_argument("--require-phonemes", action="store_true")
     validate.add_argument("--config", help="validate against languages registered by this config")
     vocab = sub.add_parser("vocab"); vocab.add_argument("metadata"); vocab.add_argument("output")
-    phonemize = sub.add_parser("phonemize", help="freeze eSpeak phonemes into metadata")
+    phonemize = sub.add_parser("phonemize", help="freeze routed language phonemes into metadata")
     phonemize.add_argument("metadata"); phonemize.add_argument("output")
     phonemize.add_argument("--config", help="use frontend voices and strictness from a training config")
-    frontend_info = sub.add_parser("frontend-info", help="show the resolved eSpeak frontend contract")
+    frontend_info = sub.add_parser("frontend-info", help="show the resolved multilingual frontend contract")
     frontend_info.add_argument("--config", default="training_configs/train1.json")
-    languages = sub.add_parser("languages", help="check every configured language without downloading models")
+    languages = sub.add_parser(
+        "languages",
+        help="check every configured language without downloading Qwen models",
+    )
     languages.add_argument("--config", default="training_configs/train1.json")
     languages.add_argument("--selected-only", action="store_true")
     language_check = sub.add_parser("language-check", help="check selected language G2P and teacher mappings")
@@ -85,6 +98,34 @@ def main(argv=None) -> int:
     qwen_runtime = sub.add_parser("qwen-runtime", help="check the Qwen Python runtime without downloading models")
     qwen_runtime.add_argument("--mode", choices=("installed", "source"), default="installed")
     qwen_runtime.add_argument("--source-path")
+    frontends = sub.add_parser("frontends", help="manage project-local text frontend resources")
+    frontend_sub = frontends.add_subparsers(dest="frontend_command", required=True)
+    frontend_keys = ("openjtalk", "korean")
+    frontend_sub.add_parser("status").add_argument("key", choices=frontend_keys)
+    frontend_sub.add_parser("ensure").add_argument("key", choices=frontend_keys)
+    verify_frontend = sub.add_parser(
+        "verify-frontend",
+        help="verify exported text frontend versions, phonemes and token IDs",
+    )
+    verify_frontend.add_argument("--model-dir", required=True)
+    verify_frontend.add_argument("--user-dictionary")
+    quality_check = sub.add_parser(
+        "quality-check", help="run signal-level audio quality checks without training",
+    )
+    quality_check.add_argument("--config", default="training_configs/train1.json")
+    quality_check.add_argument("--metadata")
+    quality_models = sub.add_parser(
+        "quality-models", help="manage project-local ASR and speaker quality models",
+    )
+    quality_model_sub = quality_models.add_subparsers(
+        dest="quality_model_command", required=True,
+    )
+    quality_status = quality_model_sub.add_parser("status")
+    quality_status.add_argument("key", nargs="?", choices=QUALITY_MODEL_SPECS)
+    quality_ensure = quality_model_sub.add_parser("ensure")
+    quality_ensure.add_argument("key", choices=QUALITY_MODEL_SPECS)
+    quality_path = quality_model_sub.add_parser("path")
+    quality_path.add_argument("key", choices=QUALITY_MODEL_SPECS)
     args = parser.parse_args(argv)
     if args.command == "validate":
         supported = None
@@ -103,7 +144,7 @@ def main(argv=None) -> int:
     elif args.command == "phonemize":
         if args.config:
             raw, layout = resolve_experiment(args.config)
-            frontend = espeak_frontend_from_config(
+            frontend = frontend_from_config(
                 raw.get("frontend"), languages=layout.languages,
                 language_registry=raw.get("language_registry"),
             )
@@ -113,7 +154,7 @@ def main(argv=None) -> int:
         print(phonemize_manifest(args.metadata, args.output, frontend))
     elif args.command == "frontend-info":
         raw, layout = resolve_experiment(args.config)
-        frontend = espeak_frontend_from_config(
+        frontend = frontend_from_config(
             raw.get("frontend"), languages=layout.languages,
             language_registry=raw.get("language_registry"),
         )
@@ -151,7 +192,12 @@ def main(argv=None) -> int:
     elif args.command == "export-vits":
         if args.config:
             raw, layout = resolve_experiment(args.config)
-            checkpoint = layout.checkpoints_dir / "last"
+            checkpoint_name = raw.get("validation", {}).get("export_checkpoint", "best")
+            if checkpoint_name not in {"best", "last"}:
+                raise ValueError("validation.export_checkpoint must be best or last")
+            checkpoint = layout.checkpoints_dir / checkpoint_name
+            if checkpoint_name == "best" and not checkpoint.is_dir():
+                checkpoint = layout.checkpoints_dir / "last"
             output = Path(args.output) if args.output else layout.artifacts_dir
             sample_rate = args.sample_rate or raw["audio"]["sample_rate"]
         else:
@@ -169,6 +215,96 @@ def main(argv=None) -> int:
         status = inspect_qwen_runtime(args.mode, args.source_path)
         print(json.dumps(status, ensure_ascii=False, indent=2))
         return 0 if status["ready"] else 1
+    elif args.command == "frontends":
+        if args.frontend_command == "ensure":
+            ensure_resource = {
+                "openjtalk": ensure_openjtalk_dictionary,
+                "korean": ensure_korean_cmudict,
+            }[args.key]
+            print(ensure_resource())
+        else:
+            inspect_resource = {
+                "openjtalk": inspect_openjtalk_dictionary,
+                "korean": inspect_korean_cmudict,
+            }[args.key]
+            status = inspect_resource()
+            print(json.dumps({
+                "key": status.key,
+                "ready": status.ready,
+                "path": str(status.path),
+                "size_bytes": status.size_bytes,
+                "missing": status.missing,
+            }, ensure_ascii=False, indent=2))
+            return 0 if status.ready else 1
+    elif args.command == "verify-frontend":
+        model_dir = Path(args.model_dir)
+        contract = load_frontend_contract(model_dir / "frontend.json")
+        conformance = load_frontend_conformance(model_dir / "frontend.conformance.json")
+        frontend_config = {}
+        if args.user_dictionary:
+            frontend_config["openjtalk"] = {"user_dictionary": args.user_dictionary}
+        frontend = frontend_from_contract(contract, frontend_config)
+        vocabulary = Vocabulary.load(model_dir / "tokens.json")
+        mismatches = verify_frontend_conformance(conformance, frontend, vocabulary)
+        version_mismatches = []
+        for language, profile in contract.languages.items():
+            expected = profile.get("engine_version") or contract.engine_version
+            actual = frontend.version_for(language)
+            if expected and actual != expected:
+                version_mismatches.append({
+                    "language": language, "expected": expected, "actual": actual,
+                })
+        result = {
+            "ready": not mismatches and not version_mismatches,
+            "cases": len(conformance["cases"]),
+            "version_mismatches": version_mismatches,
+            "content_mismatches": mismatches,
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["ready"] else 1
+    elif args.command == "quality-check":
+        raw, layout = resolve_experiment(args.config, metadata_override=args.metadata)
+        report = validate_manifest(
+            layout.metadata, int(raw["audio"]["sample_rate"]),
+            require_single_speaker=False,
+            require_phonemes=bool(raw.get("frontend", {}).get("require_phonemes", True)),
+            supported_languages=layout.language_specs,
+        )
+        quality_config = raw.get("quality", {})
+        destination = layout.run_dir / "quality" / "audio-quality-report.json"
+        result = run_audio_quality_gate(list(report.items), quality_config, destination)
+        print(json.dumps({
+            key: result[key]
+            for key in ("provider", "items", "passed", "failed", "failure_counts")
+        }, ensure_ascii=False, indent=2))
+        semantic_config = quality_config.get("semantic", {})
+        if semantic_config.get("enabled", False):
+            semantic_result = run_semantic_quality_gate(
+                list(report.items), semantic_config,
+                layout.run_dir / "quality" / "semantic-quality-report.json",
+                reference_root=layout.dataset_dir / "references",
+            )
+            print(json.dumps({
+                key: semantic_result[key]
+                for key in ("provider", "items", "passed", "failed", "failure_counts")
+            }, ensure_ascii=False, indent=2))
+        print(destination)
+    elif args.command == "quality-models":
+        if args.quality_model_command == "ensure":
+            print(ensure_quality_model(args.key))
+        elif args.quality_model_command == "path":
+            print(quality_model_path(args.key))
+        else:
+            keys = [args.key] if args.key else list(QUALITY_MODEL_SPECS)
+            statuses = [inspect_quality_model(key) for key in keys]
+            print(json.dumps([{
+                "key": status.spec.key,
+                "ready": status.ready,
+                "path": str(status.path),
+                "size_bytes": status.size_bytes,
+                "missing": status.missing,
+            } for status in statuses], ensure_ascii=False, indent=2))
+            return 0 if all(status.ready for status in statuses) else 1
     elif args.model_command == "ensure":
         print(ensure_model(args.key))
     elif args.model_command == "path":

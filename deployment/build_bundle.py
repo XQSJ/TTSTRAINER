@@ -44,15 +44,23 @@ def copy_sources(output: Path) -> None:
         shutil.copy2(ROOT / "datasets" / name, examples / name)
 
 
-def download_wheels(output: Path) -> None:
+def download_wheels(output: Path, *, include_quality: bool = False) -> None:
     wheelhouse = output / "wheelhouse"
     wheelhouse.mkdir(parents=True, exist_ok=True)
-    # Download all transitive dependencies plus build tools so installation can
-    # run with --no-index on an empty environment.
+    # Resolve all transitive dependencies and build source-only packages (notably
+    # pyopenjtalk) into platform-specific wheels so the target stays compiler-free.
+    requirements = [
+        "pip", "setuptools>=68", "wheel", "build", "cmake", "ninja", "cython",
+        "huggingface_hub[cli]>=0.34,<2", "onnx>=1.16", "onnxruntime>=1.18",
+        "qwen-tts==0.1.1", "pyopenjtalk>=0.4.1,<0.5",
+        "piper-plus-g2p[zh,ko]==0.2.0", "python-mecab-ko>=1.3,<2",
+    ]
+    if include_quality:
+        requirements.extend(("faster-whisper>=1.2,<2", "speechbrain>=1.1,<2"))
+    requirements.append(str(ROOT))
     run(
-        sys.executable, "-m", "pip", "download", "--dest", str(wheelhouse),
-        "pip", "setuptools>=68", "wheel", "build", "huggingface_hub[cli]>=0.34,<2",
-        "onnx>=1.16", "qwen-tts==0.1.1", str(ROOT),
+        sys.executable, "-m", "pip", "wheel", "--wheel-dir", str(wheelhouse),
+        *requirements,
     )
 
 
@@ -72,9 +80,22 @@ def download_models(output: Path, model_ids: tuple[str, ...]) -> None:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(bootstrap) + os.pathsep + env.get("PYTHONPATH", "")
     for model_id in model_ids:
-        target = output / "models" / model_id.rsplit("/", 1)[-1]
+        # Keep the same project-local layout used by model_registry.py inside
+        # the copied source tree. The bundle must not rely on a global HF cache.
+        target = output / "source" / "models" / "qwen" / model_id.rsplit("/", 1)[-1]
         target.mkdir(parents=True, exist_ok=True)
         run(sys.executable, "-c", code, model_id, str(target), env=env)
+
+
+def download_frontend_resources(output: Path) -> None:
+    sys.path.insert(0, str(ROOT / "src"))
+    try:
+        from tts_trainer.frontend.resources import (ensure_korean_cmudict,
+                                                     ensure_openjtalk_dictionary)
+        ensure_openjtalk_dictionary(output / "source" / "models" / "frontends")
+        ensure_korean_cmudict(output / "source" / "models" / "frontends")
+    finally:
+        sys.path.pop(0)
 
 
 def sha256(path: Path) -> str:
@@ -85,14 +106,15 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def write_support_files(output: Path, model_ids: tuple[str, ...]) -> None:
-    install = """#!/bin/sh
+def write_support_files(output: Path, model_ids: tuple[str, ...], *, include_quality: bool = False) -> None:
+    quality_packages = " faster-whisper speechbrain" if include_quality else ""
+    install = f"""#!/bin/sh
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-VENV=${1:-"$HERE/.venv"}
+VENV=${{1:-"$HERE/.venv"}}
 python3 -m venv "$VENV"
 "$VENV/bin/python" -m pip install --no-index --find-links "$HERE/wheelhouse" --upgrade pip setuptools wheel
-"$VENV/bin/python" -m pip install --no-index --find-links "$HERE/wheelhouse" qwen-tts==0.1.1 tts-trainer onnx
+"$VENV/bin/python" -m pip install --no-index --find-links "$HERE/wheelhouse" qwen-tts==0.1.1 pyopenjtalk piper-plus-g2p python-mecab-ko tts-trainer onnx onnxruntime{quality_packages}
 printf 'Installed offline environment at %s\n' "$VENV"
 """
     (output / "install_offline.sh").write_text(install, encoding="utf-8")
@@ -117,7 +139,8 @@ print(f"Bundle OK: {len(manifest['files'])} files, Python {sys.version.split()[0
         "# TTS Trainer offline bundle\n\n"
         f"Models: {', '.join(model_ids)}\n\n"
         "Install: `./install_offline.sh /path/to/venv`\n\n"
-        "Model paths are under `models/`. The wheelhouse is platform-specific; see bundle-manifest.json.\n"
+        "Model paths are under `source/models/qwen/`. Frontend resources are under "
+        "`source/models/frontends/`. The wheelhouse is platform-specific; see bundle-manifest.json.\n"
     )
     (output / "README.md").write_text(readme, encoding="utf-8")
 
@@ -156,6 +179,9 @@ def main() -> int:
     parser.add_argument("--model", action="append", dest="models")
     parser.add_argument("--download-models", action="store_true", help="opt in to downloading model weights")
     parser.add_argument("--skip-wheels", action="store_true")
+    parser.add_argument("--skip-frontend-resources", action="store_true")
+    parser.add_argument("--include-quality", action="store_true",
+                        help="include optional ASR/speaker QC Python dependencies, not weights")
     parser.add_argument("--skip-download", action="store_true")
     parser.add_argument("--archive", action="store_true")
     args = parser.parse_args()
@@ -163,9 +189,10 @@ def main() -> int:
     models = tuple(args.models or DEFAULT_MODELS)
     copy_sources(output)
     if not args.skip_download:
-        if not args.skip_wheels: download_wheels(output)
+        if not args.skip_wheels: download_wheels(output, include_quality=args.include_quality)
+        if not args.skip_frontend_resources: download_frontend_resources(output)
         if args.download_models: download_models(output, models)
-    write_support_files(output, models)
+    write_support_files(output, models, include_quality=args.include_quality)
     write_manifest(output, models)
     if args.archive: print(f"archive: {create_archive(output)}")
     print(f"bundle: {output}")

@@ -25,5 +25,7 @@ artifacts/
 datasets/wavs/
 datasets/*/
 models/qwen/
+models/frontends/
+models/quality/
 dist/
 build/

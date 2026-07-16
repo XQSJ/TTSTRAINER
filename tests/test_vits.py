@@ -14,11 +14,14 @@ from tts_trainer.vits import MultilingualVITS, VitsConfig, VitsDiscriminator
 from tts_trainer.vits.data import slice_waveforms
 from tts_trainer.vits.losses import discriminator_loss, generator_adversarial_loss
 from tts_trainer.vits.trainer import train_vits
-from tts_trainer.vits.trainer import _load_expanded_generator
+from tts_trainer.vits.trainer import (_load_expanded_generator,
+                                      _resolve_frontend_contract)
 from tts_trainer.vits.exporter import (PiperInferenceWrapper, export_vits_onnx,
                                        validate_onnx_runtime, voice_profiles)
 from tts_trainer.vits.runtime import OnnxTTS
+from tts_trainer.vits.validation import split_train_validation
 from tts_trainer.frontend import frontend_contract_from_config
+from tts_trainer.manifest import Item
 
 
 def tiny_config():
@@ -140,6 +143,34 @@ class VitsTests(unittest.TestCase):
                 self.model.text_encoder.embedding.weight,
             ))
 
+    def test_resume_uses_checkpoint_frontend_when_lock_was_not_copied(self):
+        previous_contract = frontend_contract_from_config({}, ("en",)).to_dict()
+        previous_contract["languages"]["en"]["engine_version"] = "eSpeak NG frozen"
+        with tempfile.TemporaryDirectory() as directory:
+            result = _resolve_frontend_contract(
+                {}, Path(directory) / "metadata.phonemes.csv", ("en",),
+                {"frontend": previous_contract},
+            )
+        self.assertEqual(
+            result["languages"]["en"]["engine_version"], "eSpeak NG frozen",
+        )
+
+    def test_validation_split_is_deterministic_and_stratified(self):
+        items = [
+            Item(Path(f"{language}-{index}.wav"), f"text {index}", language,
+                 "voice_01", ("a",))
+            for language in ("en", "fr") for index in range(4)
+        ]
+        first = split_train_validation(
+            items, fraction=0.25, seed=7, minimum_per_profile=1,
+        )
+        second = split_train_validation(
+            list(reversed(items)), fraction=0.25, seed=7, minimum_per_profile=1,
+        )
+        self.assertEqual(first[2]["validation_fingerprint"], second[2]["validation_fingerprint"])
+        self.assertEqual(len(first[0]), 6)
+        self.assertEqual(len(first[1]), 2)
+
     def test_onnx_export_and_runtime(self):
         discriminator = VitsDiscriminator(periods=(2,))
         optimizer_g = torch.optim.AdamW(self.model.parameters())
@@ -158,11 +189,25 @@ class VitsTests(unittest.TestCase):
                     {}, ("zh", "en", "ja", "ko", "fr", "es", "pt"),
                     engine_version="eSpeak NG test",
                 ).to_dict(),
+                frontend_conformance={
+                    "format": 1,
+                    "cases_per_language": 1,
+                    "languages": ["en"],
+                    "cases": [{
+                        "language": "en", "language_id": 1, "text": "a",
+                        "phonemes": ["a"], "token_ids": [1, 5, 2],
+                    }],
+                },
             )
             target = export_vits_onnx(checkpoint, Path(directory) / "export", sample_rate=8000)
             self.assertTrue(target.is_file())
             frontend = json.loads((target.parent / "frontend.json").read_text(encoding="utf-8"))
             self.assertEqual(frontend["engine_version"], "eSpeak NG test")
+            self.assertEqual(frontend["provider"], "language-router")
+            self.assertEqual(frontend["languages"]["ja"]["provider"], "openjtalk")
+            self.assertEqual(frontend["languages"]["en"]["provider"], "espeak-ng")
+            self.assertEqual(list(target.parent.glob("*.onnx")), [target])
+            self.assertTrue((target.parent / "frontend.conformance.json").is_file())
             shape = validate_onnx_runtime(target)
             self.assertEqual(shape[0:2], (1, 1))
             runtime = OnnxTTS(target.parent)
@@ -198,6 +243,50 @@ class VitsTests(unittest.TestCase):
             saved = json.loads((checkpoint / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["language_map"], {"en": 0})
             self.assertEqual(saved["config"]["num_languages"], 1)
+
+    def test_validation_creates_best_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rows = []
+            for index in range(2):
+                audio = root / f"sample-{index}.wav"
+                samples = [int(math.sin((i + index) / 8) * 8000) for i in range(192)]
+                with wave.open(str(audio), "wb") as stream:
+                    stream.setnchannels(1); stream.setsampwidth(2); stream.setframerate(8000)
+                    stream.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+                rows.append({"audio": audio.name, "text": f"hello {index}",
+                             "language": "en", "speaker": "voice_01"})
+            metadata = root / "metadata.csv"
+            with metadata.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(
+                    stream, fieldnames=["audio", "text", "language", "speaker"],
+                )
+                writer.writeheader(); writer.writerows(rows)
+            config = {
+                "experiment": {"name": "tiny-best", "languages": ["en"]},
+                "model": tiny_config().to_dict(),
+                "audio": {"sample_rate": 8000, "n_fft": 16, "hop_length": 4,
+                          "win_length": 16, "n_mels": 4},
+                "frontend": {"require_phonemes": False},
+                "validation": {"enabled": True, "fraction": 0.5,
+                               "minimum_per_profile": 1, "batch_size": 1,
+                               "metric": "mel", "seed": 7},
+                "training": {"batch_size": 1, "learning_rate_generator": 0.0002,
+                             "learning_rate_discriminator": 0.0002, "epochs": 1,
+                             "checkpoint_every_steps": 50, "seed": 7},
+            }
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            last = train_vits(
+                str(config_path), str(metadata), str(root / "run"),
+                device_name="cpu", max_steps=1,
+            )
+            best = last.parent / "best"
+            self.assertTrue((best / "training-state.pt").is_file())
+            saved = json.loads((best / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["selection"]["best_epoch"], 1)
+            self.assertIn("validation", saved["metrics"])
+            self.assertTrue((root / "run" / "splits" / "validation.csv").is_file())
 
 
 if __name__ == "__main__":

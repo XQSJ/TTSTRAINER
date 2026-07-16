@@ -4,7 +4,7 @@
   "experiment": {
     "_comment": "修改 name 和 languages 即可创建独立任务 / Change name and languages to create an isolated job",
     "name": "auto_text_reader",
-    "_comment_languages": "此示例避开当前汉字日语 G2P 限制 / This example avoids the current Japanese Kanji G2P limitation",
+    "_comment_languages": "按需选择内置语言；中日韩会自动路由到专用 G2P / Select built-in languages as needed; Chinese, Japanese and Korean use dedicated G2P routes",
     "languages": ["en", "de", "fr", "ru", "it"],
     "device": "auto",
     "initialization": {

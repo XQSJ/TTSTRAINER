@@ -14,6 +14,9 @@ class FakeFrontend:
     def version(self):
         return "eSpeak NG test"
 
+    def version_for(self, language):
+        return self.version()
+
     def phonemize(self, text, language):
         if language == "pl":
             raise ValueError("missing voice data")
@@ -32,7 +35,7 @@ class LanguageCheckTests(unittest.TestCase):
     def test_reports_ready_teacher_and_g2p(self):
         with tempfile.TemporaryDirectory() as directory:
             raw, layout = resolve_experiment(self._config(Path(directory)))
-            with patch("tts_trainer.language_check.espeak_frontend_from_config", return_value=FakeFrontend()):
+            with patch("tts_trainer.language_check.frontend_from_config", return_value=FakeFrontend()):
                 statuses = check_language_support(raw, layout)
             self.assertTrue(statuses[0].ready)
             self.assertEqual(statuses[0].teacher, "qwen:German")
@@ -54,7 +57,7 @@ class LanguageCheckTests(unittest.TestCase):
                 "generation": {"enabled": False},
             }), encoding="utf-8")
             raw, layout = resolve_experiment(path)
-            with patch("tts_trainer.language_check.espeak_frontend_from_config", return_value=FakeFrontend()):
+            with patch("tts_trainer.language_check.frontend_from_config", return_value=FakeFrontend()):
                 status = check_language_support(raw, layout)[0]
             self.assertEqual(status.teacher, "external-data")
             self.assertFalse(status.ready)

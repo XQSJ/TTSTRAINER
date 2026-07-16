@@ -62,6 +62,54 @@
       "subtalker_temperature": 0.9
     }
   },
+  "validation": {
+    "enabled": true,
+    "fraction": 0.05,
+    "minimum_per_profile": 1,
+    "maximum_per_profile": 100,
+    "require_every_profile": true,
+    "batch_size": 4,
+    "every_epochs": 1,
+    "metric": "mel",
+    "export_checkpoint": "best",
+    "seed": 1337
+  },
+  "quality": {
+    "enabled": true,
+    "fail_on_error": true,
+    "minimum_duration_seconds": 0.4,
+    "maximum_duration_seconds": 30.0,
+    "minimum_rms_dbfs": -45.0,
+    "maximum_rms_dbfs": -6.0,
+    "clipping_amplitude": 0.999,
+    "maximum_clipping_ratio": 0.001,
+    "maximum_dc_offset": 0.05,
+    "silence_threshold_dbfs": -45.0,
+    "maximum_edge_silence_seconds": 1.5,
+    "minimum_units_per_second": 0.5,
+    "maximum_units_per_second": 40.0,
+    "semantic": {
+      "enabled": false,
+      "fail_on_error": true,
+      "asr": {
+        "enabled": true,
+        "model": "asr-small",
+        "auto_download_model": false,
+        "device": "cpu",
+        "compute_type": "int8",
+        "beam_size": 5,
+        "maximum_error_rate": 0.15
+      },
+      "speaker": {
+        "enabled": true,
+        "model": "speaker-ecapa",
+        "auto_download_model": false,
+        "device": "cpu",
+        "minimum_similarity": 0.25,
+        "references": {}
+      }
+    }
+  },
   "pipeline": {
     "generate_texts": true,
     "generate_samples": true,

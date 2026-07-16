@@ -10,8 +10,7 @@ from ..languages import resolve_language_registry
 from ..manifest import format_phonemes, read_manifest
 from ..text import normalize
 from .contract import (DEFAULT_ESPEAK_VOICES, FrontendContract,
-                       frontend_contract_from_config, frontend_lock_path,
-                       save_frontend_contract)
+                       frontend_lock_path, save_frontend_contract)
 
 
 ESPEAK_VOICES = DEFAULT_ESPEAK_VOICES
@@ -48,10 +47,12 @@ class EspeakFrontend:
         missing = set(languages) - set(self.voices)
         if missing:
             raise ValueError(f"missing eSpeak voices for: {', '.join(sorted(missing))}")
-        return frontend_contract_from_config(
-            {"provider": "espeak-ng", "voices": self.voices},
-            languages,
+        return FrontendContract(
+            provider="espeak-ng",
             engine_version=self.version(),
+            languages={language: {
+                "provider": "espeak-ng", "voice": self.voices[language],
+            } for language in languages},
         )
 
     def phonemize(self, text: str, language: str) -> tuple[str, ...]:

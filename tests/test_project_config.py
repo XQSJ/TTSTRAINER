@@ -27,6 +27,9 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(config["experiment"]["name"], "model_1")
         self.assertEqual(config["experiment"]["languages"], ["zh", "en", "ja", "ko", "fr", "es", "pt"])
         self.assertEqual(config["language_registry"]["de"]["teacher"]["language"], "German")
+        self.assertTrue(config["validation"]["enabled"])
+        self.assertEqual(config["validation"]["export_checkpoint"], "best")
+        self.assertTrue(config["quality"]["enabled"])
 
     def test_training_config_keeps_expert_defaults_internal(self):
         config = load_project_config("training_configs/train2.json")

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .experiments import prepare_experiment, resolve_experiment
-from .frontend import espeak_frontend_from_config, phonemize_manifest
+from .frontend import frontend_from_config, phonemize_manifest
 from .language_check import check_language_support
 from .logging_utils import configure_logging
 from .manifest import validate_manifest
@@ -74,7 +74,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
 
     if stages.get("phonemize", True):
         logger.info("stage=phonemize status=started")
-        frontend = espeak_frontend_from_config(
+        frontend = frontend_from_config(
             raw.get("frontend"), languages=layout.languages,
             language_registry=raw.get("language_registry"),
         )
@@ -121,9 +121,18 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
 
     if stages.get("export", True):
         logger.info("stage=export status=started")
+        requested_checkpoint = raw.get("validation", {}).get("export_checkpoint", "best")
+        if requested_checkpoint not in {"best", "last"}:
+            raise ValueError("validation.export_checkpoint must be best or last")
+        preferred = layout.checkpoints_dir / requested_checkpoint
+        if preferred.is_dir():
+            checkpoint = preferred
+        elif requested_checkpoint == "best":
+            logger.warning("best checkpoint is unavailable; exporting last checkpoint")
         model = export_vits_onnx(checkpoint, layout.artifacts_dir,
                                  sample_rate=int(raw["audio"]["sample_rate"]))
         report["stages"]["export"] = str(model.resolve())
+        report["stages"]["export_checkpoint"] = str(checkpoint.resolve())
         if stages.get("validate_onnx", True):
             report["stages"]["validate_onnx"] = list(validate_onnx_runtime(model))
         logger.info("stage=export status=completed model=%s", model)

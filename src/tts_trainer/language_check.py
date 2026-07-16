@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from .experiments import ExperimentLayout
-from .frontend import espeak_frontend_from_config
+from .frontend import frontend_from_config
 
 
 @dataclass(frozen=True)
@@ -32,21 +32,14 @@ def check_language_support(raw: dict, layout: ExperimentLayout, codes=None,
     if unknown:
         raise ValueError("languages are not selected or registered in this experiment: " + ", ".join(unknown))
     if run_smoke:
-        frontend = espeak_frontend_from_config(
+        frontend = frontend_from_config(
             raw.get("frontend"), languages=requested,
             language_registry=raw.get("language_registry"),
         )
-        try:
-            frontend_version = frontend.version()
-        except Exception as exc:  # subprocess errors need to be reported per language
-            frontend_version = None
-            frontend_error = str(exc)
-        else:
-            frontend_error = None
+        frontend_error = None
     else:
         frontend = None
         frontend_error = None
-        frontend_version = None
     generation_enabled = bool(raw.get("generation", {}).get("enabled", True)) \
         if require_teacher is None else require_teacher
     statuses = []
@@ -60,10 +53,12 @@ def check_language_support(raw: dict, layout: ExperimentLayout, codes=None,
             if spec.teacher_provider and spec.teacher_language else "missing"
         )
         preview = None
+        frontend_version = None
         error = frontend_error
         if error is None and run_smoke:
             try:
-                preview = "".join(frontend.phonemize(spec.smoke_text, code))[:80]
+                frontend_version = frontend.version_for(code)
+                preview = " ".join(frontend.phonemize(spec.smoke_text, code))[:100]
             except Exception as exc:
                 error = str(exc)
         if not teacher_ready and error is None:
@@ -85,10 +80,10 @@ def check_language_support(raw: dict, layout: ExperimentLayout, codes=None,
 
 
 def format_language_statuses(statuses: list[LanguageStatus]) -> str:
-    header = f"{'CODE':<7} {'TEACHER':<24} {'G2P VOICE':<14} {'STATUS':<8} DETAILS"
+    header = f"{'CODE':<7} {'TEACHER':<24} {'G2P PROFILE':<26} {'STATUS':<8} DETAILS"
     rows = [header, "-" * len(header)]
     for row in statuses:
         status = "ready" if row.ready else "failed"
         details = row.phoneme_preview or row.error or "declaration only"
-        rows.append(f"{row.code:<7} {row.teacher:<24} {row.voice:<14} {status:<8} {details}")
+        rows.append(f"{row.code:<7} {row.teacher:<24} {row.voice:<26} {status:<8} {details}")
     return "\n".join(rows)

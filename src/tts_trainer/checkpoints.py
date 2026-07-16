@@ -13,6 +13,10 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
                              config, language_map: dict, speaker_map: dict,
                              tokens: list[str], metrics: dict | None = None,
                              frontend: dict | None = None,
+                             frontend_conformance: dict | None = None,
+                             selection: dict | None = None,
+                             data_split: dict | None = None,
+                             quality_summary: dict | None = None,
                              scheduler_g=None, scheduler_d=None, scaler=None) -> Path:
     import torch
     destination = Path(directory)
@@ -41,6 +45,10 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
         "speaker_map": speaker_map,
         "tokens": tokens,
         "frontend": frontend,
+        "frontend_conformance": frontend_conformance,
+        "selection": selection,
+        "data_split": data_split,
+        "quality_summary": quality_summary,
         "metrics": metrics or {},
     }
     metadata_tmp = destination / "metadata.json.tmp"

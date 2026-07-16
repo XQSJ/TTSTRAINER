@@ -13,11 +13,16 @@
       "checkpoint": null
     }
   },
+  "text_generation": {
+    "_comment": "默认自动生成少量流程验证文本；产品训练请关闭并提供人工审核 CSV / Generates a small smoke-test corpus by default; disable it and provide reviewed CSV text for production",
+    "enabled": true,
+    "provider": "builtin",
+    "sentences_per_language": 20
+  },
   "generation": {
     "_comment": "Qwen 样本生成；enabled=false 时使用自己准备的 WAV/metadata / Qwen sample generation; set enabled=false to use your own WAV/metadata",
     "enabled": true,
     "qwen_runtime": "installed",
-    "text_manifest": "datasets/texts.example.csv",
     "voice": {
       "_comment": "design 使用文字描述设计音色 / design creates a voice from a natural-language description",
       "mode": "design",
@@ -37,5 +42,20 @@
     "log_every_steps": 10,
     "num_workers": 0,
     "seed": 1337
+  },
+  "validation": {
+    "_comment": "自动留出验证集并导出最佳模型；通常只需调整 fraction / Automatically hold out validation data and export the best model; normally only tune fraction",
+    "enabled": true,
+    "fraction": 0.05,
+    "metric": "mel",
+    "export_checkpoint": "best"
+  },
+  "quality": {
+    "_comment": "基础信号质检默认开启且不下载模型；semantic=true 时需先安装 quality extra 并下载 ASR/声纹模型 / Signal checks are model-free; semantic=true requires the quality extra and explicit ASR/speaker model downloads",
+    "enabled": true,
+    "fail_on_error": true,
+    "semantic": {
+      "enabled": false
+    }
   }
 }

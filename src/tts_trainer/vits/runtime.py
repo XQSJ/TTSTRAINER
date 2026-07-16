@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..frontend import ESPEAK_VOICES, EspeakFrontend, FrontendContract
+from ..frontend import FrontendContract, FrontendRouter, frontend_from_contract
 
 
 class OnnxTTS:
@@ -48,21 +48,19 @@ class OnnxTTS:
         })[0][0, 0]
 
     def synthesize_text(self, text: str, *, language: str, speaker: str,
-                        frontend: EspeakFrontend | None = None,
+                        frontend: FrontendRouter | None = None,
                         allow_frontend_version_mismatch: bool = False,
                         **scales) -> np.ndarray:
-        if frontend is None and self.frontend_contract:
-            if self.frontend_contract.provider != "espeak-ng":
-                raise RuntimeError(f"unsupported runtime frontend: {self.frontend_contract.provider}")
-            voices = {
-                **ESPEAK_VOICES,
-                **{key: value["voice"] for key, value in self.frontend_contract.languages.items()},
-            }
-            frontend = EspeakFrontend(voices=voices)
-        frontend = frontend or EspeakFrontend()
-        expected = self.frontend_contract.engine_version if self.frontend_contract else None
+        if frontend is None:
+            if not self.frontend_contract:
+                raise RuntimeError("model has no frontend contract; supply a FrontendRouter")
+            frontend = frontend_from_contract(self.frontend_contract)
+        profile = self.frontend_contract.languages.get(language, {}) if self.frontend_contract else {}
+        expected = profile.get("engine_version") or (
+            self.frontend_contract.engine_version if self.frontend_contract else None
+        )
         if expected and not allow_frontend_version_mismatch:
-            actual = frontend.version()
+            actual = frontend.version_for(language)
             if actual != expected:
                 raise RuntimeError(
                     f"frontend version mismatch: model expects {expected!r}, runtime has {actual!r}; "
