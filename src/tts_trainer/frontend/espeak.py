@@ -64,14 +64,22 @@ class EspeakFrontend:
             check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         cleaned = ZERO_WIDTH.sub("", result.stdout)
-        switches = sorted({
-            value for value in re.findall(r"\(([a-z][a-z-]*)\)", cleaned)
-            if value != language and value != self.voices[language]
-        })
-        if switches and not self.allow_language_switches:
+        markers = re.findall(r"\(([a-z][a-z-]*)\)", cleaned)
+        expected = {
+            language, language.split("-", 1)[0], self.voices[language],
+            self.voices[language].split("-", 1)[0],
+        }
+        unbalanced = []
+        for index, value in enumerate(markers):
+            if value in expected:
+                continue
+            if not any(later in expected for later in markers[index + 1:]):
+                unbalanced.append(value)
+        if unbalanced and not self.allow_language_switches:
             raise ValueError(
-                f"eSpeak changed language while phonemizing {language}: {', '.join(switches)}; "
-                "use a language-specific frontend instead of accepting fallback pronunciation"
+                f"eSpeak did not return to {language} after switching to: "
+                f"{', '.join(sorted(set(unbalanced)))}; use a language-specific frontend "
+                "instead of accepting fallback pronunciation"
             )
         # eSpeak emits language-switch markers such as `(en)` as control
         # annotations; they are not phonemes and must never enter the token set.

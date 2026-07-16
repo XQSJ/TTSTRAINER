@@ -14,7 +14,7 @@ from tts_trainer.frontend import (FrontendContract, frontend_contract_from_confi
                                   frontend_lock_path, load_frontend_contract,
                                   save_frontend_contract,
                                   verify_frontend_conformance)
-from tts_trainer.frontend.espeak import (espeak_frontend_from_config,
+from tts_trainer.frontend.espeak import (EspeakFrontend, espeak_frontend_from_config,
                                          parse_espeak_ipa, phonemize_manifest)
 from tts_trainer.frontend.openjtalk import OpenJTalkFrontend
 from tts_trainer.frontend.piper_plus import PiperPlusFrontend
@@ -47,6 +47,24 @@ class FrontendTests(unittest.TestCase):
 
     def test_language_switch_annotations_are_not_tokens(self):
         self.assertEqual(parse_espeak_ipa("(en)h|ə|(fr)l|o"), tuple("həlo"))
+
+    @patch("tts_trainer.frontend.espeak.subprocess.run")
+    def test_balanced_loanword_language_switch_is_allowed(self, run):
+        run.return_value = SimpleNamespace(
+            stdout="b|ɔ̃|ʒ|u|ʁ (en)|ɡ|uː|ɡ|əl|(fr) o|ʒ|u|ʁ|d|ɥ|i",
+            stderr="",
+        )
+        frontend = EspeakFrontend(executable="espeak-ng", voices={"fr": "fr-fr"})
+        phones = frontend.phonemize("Bonjour Google aujourd'hui", "fr")
+        self.assertNotIn("(", phones)
+        self.assertIn("ɡ", phones)
+
+    @patch("tts_trainer.frontend.espeak.subprocess.run")
+    def test_unbalanced_language_fallback_is_rejected(self, run):
+        run.return_value = SimpleNamespace(stdout="(en)|h|ə|l|o", stderr="")
+        frontend = EspeakFrontend(executable="espeak-ng", voices={"fr": "fr-fr"})
+        with self.assertRaisesRegex(ValueError, "did not return to fr"):
+            frontend.phonemize("Hello", "fr")
 
     def test_manifest_freezes_phonemes_and_vocab_uses_them(self):
         with tempfile.TemporaryDirectory() as directory:
