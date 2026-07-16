@@ -114,6 +114,66 @@ class TextGenerationTests(unittest.TestCase):
             self.assertEqual(calls[0][0], "text-model")
             self.assertEqual({row["source"] for row in rows}, {"openai_compatible"})
 
+    def test_openai_provider_refills_rows_rejected_by_filters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._config(root, {
+                "provider": "openai_compatible", "endpoint": "http://local/v1",
+                "model": "text-model", "sentences_per_language": 2,
+                "batch_size": 2,
+            }, languages=("en",))
+            calls = []
+
+            def requester(_raw, _prompt):
+                calls.append(1)
+                if len(calls) == 1:
+                    return json.dumps([
+                        {"text": "A", "category": "short"},
+                        {"text": "This sentence is valid.", "category": "daily"},
+                    ])
+                return json.dumps([
+                    {"text": f"Refill sentence {index} is valid.", "category": "daily"}
+                    for index in range(4)
+                ])
+
+            output = generate_texts(config, requester=requester)
+            self.assertEqual(len(self._rows(output)), 2)
+            self.assertEqual(len(calls), 2)
+            report = json.loads(output.with_suffix(".report.json").read_text())
+            self.assertEqual(report["accepted"], {"en": 2})
+            self.assertEqual(report["rejected"]["length"], 1)
+
+    def test_openai_provider_resumes_partial_shared_corpus(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._config(root, {
+                "provider": "openai_compatible", "endpoint": "http://local/v1",
+                "model": "text-model", "sentences_per_language": 2,
+                "batch_size": 2,
+            }, languages=("en",))
+
+            def incomplete_requester(_raw, _prompt):
+                return json.dumps([
+                    {"text": "This sentence survives filtering.", "category": "daily"},
+                    {"text": "A", "category": "short"},
+                ])
+
+            with self.assertRaisesRegex(RuntimeError, "en missing 1"):
+                generate_texts(config, requester=incomplete_requester)
+
+            calls = []
+
+            def refill_requester(_raw, _prompt):
+                calls.append(1)
+                return json.dumps([
+                    {"text": f"Recovered sentence {index} is valid.", "category": "daily"}
+                    for index in range(4)
+                ])
+
+            output = generate_texts(config, requester=refill_requester)
+            self.assertEqual(len(self._rows(output)), 2)
+            self.assertEqual(len(calls), 1)
+
     def test_nested_openai_compatible_config_accepts_base_url_alias(self):
         config = {
             "provider": "openai_compatible",

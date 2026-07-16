@@ -463,10 +463,10 @@ def text_corpus_path(config: dict, layout) -> Path:
     return output
 
 
-def _reuse_cached_corpus(output: Path, report_path: Path, fingerprint: str,
-                         languages: tuple[str, ...], target: int) -> bool:
+def _cached_corpus_status(output: Path, report_path: Path, fingerprint: str,
+                          languages: tuple[str, ...], target: int) -> str:
     if not output.is_file() and not report_path.is_file():
-        return False
+        return "missing"
     if not output.is_file() or not report_path.is_file():
         raise RuntimeError(
             f"shared text corpus cache is incomplete at {output.parent}; "
@@ -481,11 +481,8 @@ def _reuse_cached_corpus(output: Path, report_path: Path, fingerprint: str,
     accepted = report.get("accepted", {})
     missing = [language for language in languages if int(accepted.get(language, 0)) < target]
     if missing:
-        raise RuntimeError(
-            f"shared text corpus {output} is incomplete for: {', '.join(missing)}; "
-            "set text_generation.overwrite=true after fixing the source"
-        )
-    return True
+        return "partial"
+    return "complete"
 
 
 def generate_texts(config_path: str | Path, *, requester=_openai_compatible_request) -> Path:
@@ -506,12 +503,26 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     )
     reuse = bool(config.get("reuse", True))
     overwrite = bool(config.get("overwrite", False))
-    if reuse and not overwrite and _reuse_cached_corpus(
-        output, report_path, fingerprint, layout.languages, total,
-    ):
+    cache_status = "missing"
+    if reuse and not overwrite:
+        cache_status = _cached_corpus_status(
+            output, report_path, fingerprint, layout.languages, total,
+        )
+    if cache_status == "complete":
         logger.info("text corpus cache hit corpus=%s output=%s", corpus_id, output)
         return output
-    if provider == "builtin":
+    if cache_status == "partial" and provider != "openai_compatible":
+        raise RuntimeError(
+            f"shared text corpus {output} is incomplete; set "
+            "text_generation.overwrite=true after fixing the source"
+        )
+    if cache_status == "partial":
+        candidates = _file_rows(output, layout.language_specs)
+        logger.info(
+            "text corpus partial cache resume corpus=%s accepted=%d",
+            corpus_id, len(candidates),
+        )
+    elif provider == "builtin":
         candidates = []
         for language in layout.languages:
             logger.info("builtin text generation language=%s count=%d", language, total)
@@ -541,46 +552,79 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     ) if require_g2p else None
     accepted = []
     seen = set()
-    rejected = Counter()
-    rejected_examples = []
+    previous_report = json.loads(report_path.read_text(encoding="utf-8")) \
+        if cache_status == "partial" else {}
+    rejected = Counter(previous_report.get("rejected", {}))
+    rejected_examples = list(previous_report.get("rejected_examples", []))[:20]
     per_language = Counter()
-    for row in candidates:
-        if row.language not in layout.language_specs:
-            rejected["language"] += 1
-            if len(rejected_examples) < 20:
-                rejected_examples.append({"reason": "language", "language": row.language, "text": row.text})
-            continue
-        text = normalize(row.text, row.language)
-        key = (row.language, text.casefold())
-        if not text or len(text) < min_chars or len(text) > max_chars:
-            rejected["length"] += 1
-            reason = "length"
-        elif bool(filters.get("deduplicate", True)) and key in seen:
-            rejected["duplicate"] += 1
-            reason = "duplicate"
-        elif reject_mixed and not _script_matches(text, row.language):
-            rejected["script"] += 1
-            reason = "script"
-        else:
-            reason = None
-            if frontend is not None:
-                try:
-                    frontend.phonemize(text, row.language)
-                except Exception as exc:
-                    rejected["g2p"] += 1
-                    reason = "g2p"
-                    if len(rejected_examples) < 20:
-                        rejected_examples.append({
-                            "reason": reason, "language": row.language,
-                            "text": text, "error": str(exc),
-                        })
-                    continue
-            seen.add(key)
-            if per_language[row.language] < total:
-                accepted.append(GeneratedText(text, row.language, row.category, row.source))
-                per_language[row.language] += 1
-        if reason and len(rejected_examples) < 20:
-            rejected_examples.append({"reason": reason, "language": row.language, "text": text})
+
+    def filter_candidates(rows: list[GeneratedText]) -> None:
+        for row in rows:
+            if row.language not in layout.language_specs:
+                rejected["language"] += 1
+                if len(rejected_examples) < 20:
+                    rejected_examples.append({
+                        "reason": "language", "language": row.language, "text": row.text,
+                    })
+                continue
+            text = normalize(row.text, row.language)
+            key = (row.language, text.casefold())
+            if not text or len(text) < min_chars or len(text) > max_chars:
+                rejected["length"] += 1
+                reason = "length"
+            elif bool(filters.get("deduplicate", True)) and key in seen:
+                rejected["duplicate"] += 1
+                reason = "duplicate"
+            elif reject_mixed and not _script_matches(text, row.language):
+                rejected["script"] += 1
+                reason = "script"
+            else:
+                reason = None
+                if frontend is not None:
+                    try:
+                        frontend.phonemize(text, row.language)
+                    except Exception as exc:
+                        rejected["g2p"] += 1
+                        reason = "g2p"
+                        if len(rejected_examples) < 20:
+                            rejected_examples.append({
+                                "reason": reason, "language": row.language,
+                                "text": text, "error": str(exc),
+                            })
+                        continue
+                seen.add(key)
+                if per_language[row.language] < total:
+                    accepted.append(GeneratedText(
+                        text, row.language, row.category, row.source,
+                    ))
+                    per_language[row.language] += 1
+            if reason and len(rejected_examples) < 20:
+                rejected_examples.append({
+                    "reason": reason, "language": row.language, "text": text,
+                })
+
+    filter_candidates(candidates)
+    if provider == "openai_compatible":
+        for refill_round in range(max(0, int(config.get("refill_rounds", 5)))):
+            missing = {
+                language: total - per_language[language]
+                for language in layout.languages if per_language[language] < total
+            }
+            if not missing:
+                break
+            refill = []
+            configured_batch = max(1, int(config.get("batch_size", 50)))
+            for language, count in missing.items():
+                request_count = max(count, min(configured_batch, max(4, count * 2)))
+                logger.info(
+                    "LLM text refill language=%s round=%d missing=%d requesting=%d",
+                    language, refill_round + 1, count, request_count,
+                )
+                refill.extend(_llm_rows(
+                    language, layout.language_specs[language].name,
+                    request_count, config, requester,
+                ))
+            filter_candidates(refill)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
