@@ -1,0 +1,14 @@
+{
+  "language_registry": {
+    "zh": {"name": "Chinese", "teacher": {"provider": "qwen", "language": "Chinese"}, "frontend": {"provider": "espeak-ng", "voice": "cmn"}, "smoke_text": "你好，欢迎使用语音系统。"},
+    "en": {"name": "English", "teacher": {"provider": "qwen", "language": "English"}, "frontend": {"provider": "espeak-ng", "voice": "en-us"}, "smoke_text": "Hello, welcome to the speech system."},
+    "ja": {"name": "Japanese", "teacher": {"provider": "qwen", "language": "Japanese"}, "frontend": {"provider": "espeak-ng", "voice": "ja"}, "smoke_text": "こんにちは、音声システムへようこそ。"},
+    "ko": {"name": "Korean", "teacher": {"provider": "qwen", "language": "Korean"}, "frontend": {"provider": "espeak-ng", "voice": "ko"}, "smoke_text": "안녕하세요. 음성 시스템에 오신 것을 환영합니다."},
+    "de": {"name": "German", "teacher": {"provider": "qwen", "language": "German"}, "frontend": {"provider": "espeak-ng", "voice": "de"}, "smoke_text": "Guten Morgen, willkommen beim Sprachsystem."},
+    "fr": {"name": "French", "teacher": {"provider": "qwen", "language": "French"}, "frontend": {"provider": "espeak-ng", "voice": "fr-fr"}, "smoke_text": "Bonjour et bienvenue dans le système vocal."},
+    "ru": {"name": "Russian", "teacher": {"provider": "qwen", "language": "Russian"}, "frontend": {"provider": "espeak-ng", "voice": "ru"}, "smoke_text": "Здравствуйте, добро пожаловать в голосовую систему."},
+    "pt": {"name": "Portuguese", "teacher": {"provider": "qwen", "language": "Portuguese"}, "frontend": {"provider": "espeak-ng", "voice": "pt-br"}, "smoke_text": "Olá, bem-vindo ao sistema de voz."},
+    "es": {"name": "Spanish", "teacher": {"provider": "qwen", "language": "Spanish"}, "frontend": {"provider": "espeak-ng", "voice": "es"}, "smoke_text": "Hola, bienvenido al sistema de voz."},
+    "it": {"name": "Italian", "teacher": {"provider": "qwen", "language": "Italian"}, "frontend": {"provider": "espeak-ng", "voice": "it"}, "smoke_text": "Buongiorno, benvenuto nel sistema vocale."}
+  }
+}

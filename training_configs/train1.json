@@ -4,7 +4,7 @@
   "experiment": {
     "_comment": "模型身份、语言和启动方式；name 自动决定 datasets/runs/artifacts 目录 / Model identity, languages and initialization; name automatically determines datasets/runs/artifacts directories",
     "name": "model_1",
-    "_comment_languages": "可选 zh/en/ja/ko/fr/es/pt；顺序决定 language ID / Choose from zh/en/ja/ko/fr/es/pt; order defines language IDs",
+    "_comment_languages": "内置可选 zh/en/ja/ko/de/fr/ru/pt/es/it；顺序决定 language ID / Built-ins: zh/en/ja/ko/de/fr/ru/pt/es/it; order defines language IDs",
     "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
     "device": "auto",
     "initialization": {
@@ -34,6 +34,7 @@
     "learning_rate_discriminator": 0.0002,
     "epochs": 1000,
     "checkpoint_every_steps": 5000,
+    "log_every_steps": 10,
     "num_workers": 0,
     "seed": 1337
   }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import json
+import logging
 import warnings
 from collections import Counter
 from dataclasses import replace
@@ -16,6 +17,7 @@ from ..experiments import prepare_experiment, resolve_experiment
 from ..frontend import (FrontendContract, frontend_contract_from_config,
                         frontend_lock_path, load_frontend_contract)
 from ..manifest import validate_manifest
+from ..logging_utils import configure_logging
 from ..text import Vocabulary
 from .config import load_vits_config
 from .data import AudioConfig, VitsDataset, collate_vits, slice_waveforms
@@ -23,6 +25,9 @@ from .discriminators import VitsDiscriminator
 from .losses import (discriminator_loss, feature_matching_loss,
                      generator_adversarial_loss, kl_loss)
 from .model import MultilingualVITS
+
+
+logger = logging.getLogger(__name__)
 
 
 def select_device(requested: str = "auto") -> torch.device:
@@ -89,7 +94,10 @@ def _optimizer_to(optimizer, device: torch.device) -> None:
 
 def _resolve_frontend_contract(raw: dict, metadata: Path, languages: tuple[str, ...],
                                previous: dict | None) -> dict:
-    declared = frontend_contract_from_config(raw.get("frontend"), languages)
+    declared = frontend_contract_from_config(
+        raw.get("frontend"), languages,
+        language_registry=raw.get("language_registry"),
+    )
     lock = frontend_lock_path(metadata)
     current = load_frontend_contract(lock) if lock.is_file() else declared
     if set(current.languages) != set(languages):
@@ -116,12 +124,15 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         config_path, metadata_override=metadata_path,
         output_override=output_dir, device_override=device_name,
     )
+    configure_logging(raw.get("logging", {}).get("level", "INFO"))
     prepare_experiment(layout, raw, config_path)
+    logger.info("training setup model=%s languages=%s", layout.name, ",".join(layout.languages))
     audio_config = AudioConfig(**raw["audio"])
     require_phonemes = raw.get("frontend", {}).get("require_phonemes", True)
     report = validate_manifest(layout.metadata, audio_config.sample_rate,
                                require_single_speaker=False,
-                               require_phonemes=require_phonemes)
+                               require_phonemes=require_phonemes,
+                               supported_languages=layout.language_specs)
     items = list(report.items)
     previous = _checkpoint_metadata(layout.initialization_checkpoint) if layout.initialization_checkpoint else None
     frontend_contract = _resolve_frontend_contract(raw, layout.metadata, layout.languages, previous)
@@ -138,6 +149,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             "configured languages or their order differ from the checkpoint; "
             "keep experiment.languages unchanged when resuming or expanding speakers"
         )
+    logger.info("language map=%s", language_map)
     current_speakers = {item.speaker for item in items}
     if previous is None:
         speaker_map = {speaker: index for index, speaker in enumerate(sorted(current_speakers))}
@@ -155,12 +167,17 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     config = load_vits_config(config_path, vocab_size=len(vocabulary.tokens))
     config = replace(config, num_languages=len(language_map), num_speakers=len(speaker_map),
                      spec_channels=audio_config.n_fft // 2 + 1)
+    logger.info(
+        "dataset samples=%d speakers=%d vocabulary=%d device=%s",
+        len(items), len(speaker_map), len(vocabulary.tokens), layout.device,
+    )
     if config.hop_length != audio_config.hop_length:
         raise ValueError(f"decoder hop length {config.hop_length} != audio hop length {audio_config.hop_length}")
 
     seed = int(raw["training"].get("seed", 1337))
     random.seed(seed); torch.manual_seed(seed)
     device = select_device(layout.device)
+    logger.info("selected device=%s", device)
     dataset = VitsDataset(items, vocabulary, speaker_map, language_map, audio_config)
     language_counts = Counter(item.language for item in items)
     speaker_counts = Counter(item.speaker for item in items)
@@ -197,7 +214,11 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         raise ValueError(
             f"checkpoint already reached epoch {start_epoch - 1}; set training.epochs to at least {start_epoch}"
         )
+    log_every = int(raw["training"].get("log_every_steps", 10))
+    if log_every < 1:
+        raise ValueError("training.log_every_steps must be at least 1")
     for epoch in range(start_epoch, raw["training"]["epochs"] + 1):
+        logger.info("epoch=%d status=started", epoch)
         for batch in loader:
             batch = {key: value.to(device) for key, value in batch.items()}
             output = generator(
@@ -230,10 +251,14 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             loss_g.backward(); torch.nn.utils.clip_grad_norm_(generator.parameters(), 5.0); optimizer_g.step()
             for parameter in discriminator.parameters(): parameter.requires_grad_(True)
             global_step += 1
-            if global_step % 10 == 0:
-                print(f"epoch={epoch} step={global_step} g={loss_g.item():.4f} d={loss_d.item():.4f} mel={loss_mel.item():.4f}")
+            if global_step == 1 or global_step % log_every == 0:
+                logger.info(
+                    "epoch=%d step=%d generator=%.4f discriminator=%.4f mel=%.4f",
+                    epoch, global_step, loss_g.item(), loss_d.item(), loss_mel.item(),
+                )
             checkpoint_every = raw["training"].get("checkpoint_every_steps", 5000)
             if global_step % checkpoint_every == 0:
+                logger.info("checkpoint step=%d status=saving", global_step)
                 save_training_checkpoint(
                     destination / f"step-{global_step:09d}", generator=generator,
                     discriminator=discriminator, optimizer_g=optimizer_g, optimizer_d=optimizer_d,
@@ -250,5 +275,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             global_step=global_step, config=config, language_map=language_map,
             speaker_map=speaker_map, tokens=vocabulary.tokens, frontend=frontend_contract,
         )
+        logger.info("epoch=%d status=completed step=%d checkpoint=%s", epoch, global_step, destination / "last")
         if max_steps is not None and global_step >= max_steps: break
+    logger.info("training completed checkpoint=%s", destination / "last")
     return destination / "last"

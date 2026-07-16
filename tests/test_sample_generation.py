@@ -32,6 +32,9 @@ class FakeCloneModel:
         self.calls.append(("clone", kwargs))
         return [np.linspace(-0.2, 0.2, 160, dtype=np.float32) for _ in kwargs["text"]], 16000
 
+    def get_supported_languages(self):
+        return ["Chinese", "English", "French"]
+
 
 class SampleGenerationTests(unittest.TestCase):
     def _base(self, root: Path, mode: str) -> tuple[Path, list]:

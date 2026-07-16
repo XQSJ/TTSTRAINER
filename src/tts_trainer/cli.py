@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .config import load_config
@@ -19,21 +20,31 @@ from .experiments import prepare_experiment, resolve_experiment
 from .pipeline import run_pipeline
 from .sample_generation import generate_samples
 from .qwen_teacher import inspect_qwen_runtime
+from .language_check import check_language_support, format_language_statuses
+from .logging_utils import configure_logging
 
 
 def main(argv=None) -> int:
+    configure_logging(os.environ.get("TTS_TRAINER_LOG_LEVEL", "INFO"))
     parser = argparse.ArgumentParser(prog="tts-trainer")
     sub = parser.add_subparsers(dest="command", required=True)
     validate = sub.add_parser("validate", help="validate metadata and PCM WAV files")
     validate.add_argument("metadata"); validate.add_argument("--sample-rate", type=int)
     validate.add_argument("--multi-speaker", action="store_true")
     validate.add_argument("--require-phonemes", action="store_true")
+    validate.add_argument("--config", help="validate against languages registered by this config")
     vocab = sub.add_parser("vocab"); vocab.add_argument("metadata"); vocab.add_argument("output")
     phonemize = sub.add_parser("phonemize", help="freeze eSpeak phonemes into metadata")
     phonemize.add_argument("metadata"); phonemize.add_argument("output")
     phonemize.add_argument("--config", help="use frontend voices and strictness from a training config")
     frontend_info = sub.add_parser("frontend-info", help="show the resolved eSpeak frontend contract")
     frontend_info.add_argument("--config", default="training_configs/train1.json")
+    languages = sub.add_parser("languages", help="check every configured language without downloading models")
+    languages.add_argument("--config", default="training_configs/train1.json")
+    languages.add_argument("--selected-only", action="store_true")
+    language_check = sub.add_parser("language-check", help="check selected language G2P and teacher mappings")
+    language_check.add_argument("codes", nargs="*")
+    language_check.add_argument("--config", default="training_configs/train1.json")
     training = sub.add_parser("train"); training.add_argument("--config", required=True)
     vits_training = sub.add_parser("train-vits", help="train waveform VITS generator and discriminators")
     vits_training.add_argument("--config", default="training_configs/train1.json")
@@ -73,26 +84,46 @@ def main(argv=None) -> int:
     qwen_runtime.add_argument("--source-path")
     args = parser.parse_args(argv)
     if args.command == "validate":
+        supported = None
+        if args.config:
+            _, layout = resolve_experiment(args.config)
+            supported = layout.language_specs
         report = validate_manifest(
             args.metadata, args.sample_rate,
             require_single_speaker=not args.multi_speaker,
             require_phonemes=args.require_phonemes,
+            supported_languages=supported,
         )
         print(json.dumps({"items": len(report.items), "languages": report.language_counts, "sample_rates": report.sample_rates}, ensure_ascii=False, indent=2))
     elif args.command == "vocab":
         result = Vocabulary.build(read_manifest(args.metadata)); result.save(args.output); print(f"wrote {len(result.tokens)} tokens to {args.output}")
     elif args.command == "phonemize":
         if args.config:
-            raw, _ = resolve_experiment(args.config)
-            frontend = espeak_frontend_from_config(raw.get("frontend"))
+            raw, layout = resolve_experiment(args.config)
+            frontend = espeak_frontend_from_config(
+                raw.get("frontend"), languages=layout.languages,
+                language_registry=raw.get("language_registry"),
+            )
         else:
             frontend = EspeakFrontend()
         print(f"frontend: {frontend.version()}")
         print(phonemize_manifest(args.metadata, args.output, frontend))
     elif args.command == "frontend-info":
         raw, layout = resolve_experiment(args.config)
-        frontend = espeak_frontend_from_config(raw.get("frontend"))
+        frontend = espeak_frontend_from_config(
+            raw.get("frontend"), languages=layout.languages,
+            language_registry=raw.get("language_registry"),
+        )
         print(json.dumps(frontend.contract(layout.languages).to_dict(), ensure_ascii=False, indent=2))
+    elif args.command in {"languages", "language-check"}:
+        raw, layout = resolve_experiment(args.config)
+        if args.command == "languages":
+            codes = layout.languages if args.selected_only else tuple(layout.language_registry)
+        else:
+            codes = tuple(args.codes) if args.codes else layout.languages
+        statuses = check_language_support(raw, layout, codes)
+        print(format_language_statuses(statuses))
+        return 0 if all(status.ready for status in statuses) else 1
     elif args.command == "train":
         load_config(args.config); print(train(args.config))
     elif args.command == "train-vits":

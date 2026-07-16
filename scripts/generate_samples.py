@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 
 from tts_trainer.sample_generation import generate_samples
+from tts_trainer.logging_utils import configure_logging
 
 
 def main() -> int:
+    configure_logging()
     parser = argparse.ArgumentParser(description="Generate a VITS training dataset with Qwen3-TTS")
     parser.add_argument("--config", default="training_configs/train1.json")
     args = parser.parse_args()

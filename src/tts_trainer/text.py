@@ -5,7 +5,6 @@ import re
 import unicodedata
 from pathlib import Path
 
-from .constants import LANGUAGES
 from .manifest import Item
 
 PAD, BOS, EOS, SPACE, UNK = "_", "^", "$", " ", "<unk>"
@@ -13,8 +12,8 @@ SPECIAL_TOKENS = [PAD, BOS, EOS, SPACE, UNK]
 
 
 def normalize(text: str, language: str) -> str:
-    if language not in LANGUAGES:
-        raise ValueError(f"unsupported language: {language}")
+    if not language or not isinstance(language, str):
+        raise ValueError("language must be a non-empty string")
     text = unicodedata.normalize("NFKC", text).strip()
     return re.sub(r"\s+", " ", text)
 

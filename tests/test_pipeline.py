@@ -55,6 +55,7 @@ class PipelineTests(unittest.TestCase):
                 return onnx
 
             with patch("tts_trainer.pipeline.generate_samples", fake_generate), \
+                    patch("tts_trainer.pipeline.check_language_support", return_value=[]), \
                     patch("tts_trainer.pipeline.espeak_frontend_from_config", return_value=object()), \
                     patch("tts_trainer.pipeline.phonemize_manifest", fake_phonemize), \
                     patch("tts_trainer.pipeline.validate_manifest", fake_validate), \

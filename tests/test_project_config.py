@@ -26,6 +26,7 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(config["training"]["batch_size"], 8)
         self.assertEqual(config["experiment"]["name"], "model_1")
         self.assertEqual(config["experiment"]["languages"], ["zh", "en", "ja", "ko", "fr", "es", "pt"])
+        self.assertEqual(config["language_registry"]["de"]["teacher"]["language"], "German")
 
     def test_training_config_keeps_expert_defaults_internal(self):
         config = load_project_config("training_configs/train2.json")
@@ -44,6 +45,8 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(expand["experiment"]["initialization"]["mode"], "expand_speakers")
         self.assertEqual(expand["generation"]["include_metadata"], ["datasets/model_1/metadata.csv"])
         self.assertEqual(load_vits_config("training_configs/train1.json").hop_length, 256)
+        european = load_project_config("training_configs/european.example.json")
+        self.assertEqual(european["experiment"]["languages"], ["en", "de", "fr", "ru", "es", "pt", "it"])
 
     def test_public_configs_keep_valid_bilingual_json_comments(self):
         config_paths = sorted(Path("training_configs").glob("*.json"))

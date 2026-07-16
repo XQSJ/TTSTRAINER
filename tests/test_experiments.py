@@ -55,8 +55,40 @@ class ExperimentTests(unittest.TestCase):
             _, layout = resolve_experiment(config)
             self.assertEqual(layout.languages, ("en",))
             config.write_text(json.dumps({"experiment": {"name": "bad", "languages": ["en", "xx"]}}))
-            with self.assertRaisesRegex(ValueError, "unsupported configured"):
+            with self.assertRaisesRegex(ValueError, "unregistered configured"):
                 resolve_experiment(config)
+
+    def test_builtin_registry_supports_all_qwen_languages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "model.json"
+            config.write_text(json.dumps({
+                "experiment": {
+                    "name": "qwen-ten",
+                    "languages": ["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"],
+                }
+            }))
+            _, layout = resolve_experiment(config)
+            self.assertEqual(layout.language_specs["de"].frontend_voice, "de")
+            self.assertEqual(layout.language_specs["ru"].teacher_language, "Russian")
+
+    def test_custom_registered_language_can_use_external_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "model.json"
+            config.write_text(json.dumps({
+                "language_registry": {
+                    "pl": {
+                        "name": "Polish",
+                        "teacher": None,
+                        "frontend": {"provider": "espeak-ng", "voice": "pl"},
+                        "smoke_text": "Dzień dobry.",
+                    }
+                },
+                "experiment": {"name": "polish", "languages": ["pl"]},
+                "generation": {"enabled": False},
+            }))
+            _, layout = resolve_experiment(config)
+            self.assertEqual(layout.languages, ("pl",))
+            self.assertIsNone(layout.language_specs["pl"].teacher_provider)
 
     def test_resolved_config_records_dynamic_language_count(self):
         with tempfile.TemporaryDirectory() as directory:

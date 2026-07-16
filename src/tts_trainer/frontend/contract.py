@@ -4,18 +4,14 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..languages import resolve_language_registry
+
 
 FRONTEND_CONTRACT_FORMAT = 1
 NORMALIZATION_CONTRACT = "unicode-nfkc-collapse-whitespace-v1"
 TOKEN_CONTRACT = "piper-utf8-codepoints-v1"
 DEFAULT_ESPEAK_VOICES = {
-    "zh": "cmn",
-    "en": "en-us",
-    "ja": "ja",
-    "ko": "ko",
-    "fr": "fr-fr",
-    "es": "es",
-    "pt": "pt-br",
+    code: spec.frontend_voice for code, spec in resolve_language_registry().items()
 }
 
 
@@ -80,12 +76,15 @@ def load_frontend_contract(path: str | Path) -> FrontendContract:
 
 
 def frontend_contract_from_config(config: dict | None, languages,
-                                  *, engine_version: str | None = None) -> FrontendContract:
+                                  *, engine_version: str | None = None,
+                                  language_registry: dict | None = None) -> FrontendContract:
     config = config or {}
     provider = config.get("provider", "espeak-ng")
     if provider != "espeak-ng":
         raise ValueError(f"unsupported frontend provider: {provider!r}; currently available: espeak-ng")
-    voices = {**DEFAULT_ESPEAK_VOICES, **config.get("voices", {})}
+    registry = resolve_language_registry(language_registry)
+    registry_voices = {code: spec.frontend_voice for code, spec in registry.items()}
+    voices = {**DEFAULT_ESPEAK_VOICES, **registry_voices, **config.get("voices", {})}
     missing = set(languages) - set(voices)
     if missing:
         raise ValueError(f"missing eSpeak voices for: {', '.join(sorted(missing))}")

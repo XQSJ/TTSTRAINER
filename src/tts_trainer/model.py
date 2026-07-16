@@ -3,7 +3,7 @@ from __future__ import annotations
 from .optional import require_training_dependencies
 
 
-def build_model(vocab_size: int, n_mels: int, config):
+def build_model(vocab_size: int, n_mels: int, config, *, num_languages: int = 7):
     torch, _ = require_training_dependencies()
     nn = torch.nn
 
@@ -18,7 +18,7 @@ def build_model(vocab_size: int, n_mels: int, config):
             super().__init__()
             h = config.hidden_size
             self.token_embedding = nn.Embedding(vocab_size, h, padding_idx=0)
-            self.language_embedding = nn.Embedding(7, config.language_embedding_size)
+            self.language_embedding = nn.Embedding(num_languages, config.language_embedding_size)
             self.language_projection = nn.Linear(config.language_embedding_size, h)
             layer = nn.TransformerEncoderLayer(
                 d_model=h, nhead=config.encoder_heads, dim_feedforward=h * 4,

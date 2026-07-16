@@ -4,7 +4,6 @@ import random
 from pathlib import Path
 
 from .config import load_config
-from .constants import LANG_TO_ID
 from .manifest import read_manifest, validate_manifest
 from .model import build_model
 from .optional import require_training_dependencies
@@ -16,6 +15,7 @@ def train(config_path: str) -> Path:
     config = load_config(config_path)
     report = validate_manifest(config.data.metadata, config.data.sample_rate)
     items = list(report.items)
+    language_map = {language: index for index, language in enumerate(sorted(report.language_counts))}
     vocab = Vocabulary.build(items)
     output = Path(config.training.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -35,7 +35,7 @@ def train(config_path: str) -> Path:
                 sample_rate=sr, n_fft=config.data.n_fft,
                 hop_length=config.data.hop_length, n_mels=config.data.n_mels,
             )(waveform).clamp_min(1e-5).log()
-            return torch.tensor(vocab.encode_item(item)), LANG_TO_ID[item.language], mel
+            return torch.tensor(vocab.encode_item(item)), language_map[item.language], mel
 
     def collate(batch):
         # Baseline aligns text positions to uniformly resampled Mel frames. M2
@@ -55,7 +55,10 @@ def train(config_path: str) -> Path:
     sampler = torch.utils.data.WeightedRandomSampler(weights, len(items), replacement=True)
     loader = torch.utils.data.DataLoader(Dataset(), batch_size=config.data.batch_size, sampler=sampler,
                                          num_workers=config.data.num_workers, collate_fn=collate)
-    model = build_model(len(vocab.tokens), config.data.n_mels, config.model)
+    model = build_model(
+        len(vocab.tokens), config.data.n_mels, config.model,
+        num_languages=len(language_map),
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.training.learning_rate)
     best = float("inf")
     for epoch in range(1, config.training.epochs + 1):
@@ -66,7 +69,8 @@ def train(config_path: str) -> Path:
             loss = torch.nn.functional.l1_loss(prediction[valid], target[valid])
             optimizer.zero_grad(); loss.backward(); optimizer.step(); total += loss.item()
         mean = total / max(len(loader), 1)
-        checkpoint = {"model": model.state_dict(), "config": config, "vocab_size": len(vocab.tokens), "epoch": epoch, "loss": mean}
+        checkpoint = {"model": model.state_dict(), "config": config, "vocab_size": len(vocab.tokens),
+                      "language_map": language_map, "epoch": epoch, "loss": mean}
         torch.save(checkpoint, output / "last.pt")
         if mean < best:
             best = mean; torch.save(checkpoint, output / "best.pt")

@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from .constants import LANGUAGES
+from .languages import resolve_language_registry
 
 
 def parse_phonemes(value: str) -> tuple[str, ...] | None:
@@ -56,7 +56,8 @@ def read_manifest(path: str | Path) -> list[Item]:
 
 def validate_manifest(path: str | Path, expected_sample_rate: int | None = None,
                       *, require_single_speaker: bool = True,
-                      require_phonemes: bool = False) -> ValidationReport:
+                      require_phonemes: bool = False,
+                      supported_languages=None) -> ValidationReport:
     items = read_manifest(path)
     if not items:
         raise ValueError("metadata contains no samples")
@@ -67,8 +68,9 @@ def validate_manifest(path: str | Path, expected_sample_rate: int | None = None,
         errors.append("speaker must not be empty")
     elif require_single_speaker and len(speakers) != 1:
         errors.append(f"expected exactly one speaker, got {sorted(speakers)!r}")
+    supported = set(supported_languages or resolve_language_registry())
     for index, item in enumerate(items, start=2):
-        if item.language not in LANGUAGES:
+        if item.language not in supported:
             errors.append(f"line {index}: unsupported language {item.language!r}")
         if not item.text:
             errors.append(f"line {index}: empty text")
@@ -92,4 +94,4 @@ def validate_manifest(path: str | Path, expected_sample_rate: int | None = None,
     if errors:
         raise ValueError("manifest validation failed:\n- " + "\n- ".join(errors))
     counts = Counter(item.language for item in items)
-    return ValidationReport(tuple(items), {lang: counts[lang] for lang in LANGUAGES}, tuple(sorted(rates)))
+    return ValidationReport(tuple(items), dict(sorted(counts.items())), tuple(sorted(rates)))

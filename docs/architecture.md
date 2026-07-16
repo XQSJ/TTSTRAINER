@@ -18,6 +18,11 @@ Embedding 参数和 `speaker_map.json`，保证 checkpoint 格式以后不变。
 数量和 ID 顺序。例如 `["en", "fr"]` 会得到 `en=0, fr=1`，而不会
 为未选中的语言保留空 embedding。
 
+语言能力来自 `configs/system/language_registry.json`。每项声明 Teacher 映射、
+G2P provider/voice 和烟雾测试文本。Qwen 官方十语已经内置；使用自备音频时，
+外层配置可以追加 `teacher=null` 的语言。训练开始前先检查注册、Teacher 和实际
+G2P 输出，失败时不会创建错误的训练 token。
+
 ## 训练图
 
 训练前先固定文本前端：
@@ -31,6 +36,10 @@ Embedding 参数和 `speaker_map.json`，保证 checkpoint 格式以后不变。
 `frontend.lock.json` 记录 provider、引擎版本、逐语言 voice、规范化规则和 token
 规则。训练会校验它与配置、已有 checkpoint 是否兼容，避免同一个 token ID 在
 继续训练后表示不同读音。G2P 本身不参与 VITS 训练；默认调用现有 eSpeak-ng。
+
+自动流水线的阶段、逐语言预检、样本生成批次、epoch/step/loss 和 checkpoint
+保存都通过标准 Python logging 输出。`training.log_every_steps` 只控制高频 loss
+日志，不会关闭阶段与错误日志。
 
 训练态包含 Text Encoder、Duration Predictor、Posterior Encoder、MAS、Flow、
 Waveform Decoder、Multi-Period/Scale Discriminator。损失包括 Mel、KL、Duration、

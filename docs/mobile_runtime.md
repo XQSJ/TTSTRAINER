@@ -71,5 +71,9 @@ $ 2
 Latin 语言可直接使用 eSpeak。中日韩需要逐语言评测；尤其是 eSpeak 日语处理
 汉字时可能切换到英文拼读，预处理器默认检测并拒绝这种 fallback。
 
+新增语言后必须把导出的 `frontend.json`、`tokens.json` 和 voice profile 与 ONNX
+一起更新。配置中 Teacher/G2P 预检通过，只证明训练端可生成一致 token；移动端
+仍必须包含相同 eSpeak-ng 版本和对应 voice 数据。
+
 eSpeak-ng 使用 GPL-3.0-or-later。TTSTRAINER 不复制或打包它；移动 App 如果分发
 eSpeak-ng native 库，需要单独完成许可证和发布方式评估。

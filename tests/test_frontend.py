@@ -29,6 +29,9 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual(parse_espeak_ipa("h|ə|l|ˈoʊ w|ˈɜː|l|d\nnext"),
                          tuple("həlˈoʊ wˈɜːld next"))
 
+    def test_language_switch_annotations_are_not_tokens(self):
+        self.assertEqual(parse_espeak_ipa("(en)h|ə|(fr)l|o"), tuple("həlo"))
+
     def test_manifest_freezes_phonemes_and_vocab_uses_them(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -72,6 +75,19 @@ class FrontendTests(unittest.TestCase):
             )
             save_frontend_contract(expected, path)
             self.assertEqual(load_frontend_contract(path), expected)
+
+    def test_custom_registry_supplies_frontend_voice(self):
+        frontend = espeak_frontend_from_config(
+            {"executable": "/bin/echo"}, languages=("pl",),
+            language_registry={
+                "pl": {
+                    "name": "Polish", "teacher": None,
+                    "frontend": {"provider": "espeak-ng", "voice": "pl"},
+                    "smoke_text": "Dzień dobry.",
+                }
+            },
+        )
+        self.assertEqual(frontend.voices["pl"], "pl")
 
 
 if __name__ == "__main__":

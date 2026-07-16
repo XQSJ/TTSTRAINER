@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -89,6 +93,7 @@ def ensure_model(key: str, root: Path | None = None, *, allow_download: bool = T
     destination_root = root or models_root()
     status = inspect_model(key, destination_root)
     if status.ready:
+        logger.info("model ready key=%s path=%s size_bytes=%d", key, status.path, status.size_bytes)
         return status.path
     if not allow_download:
         raise FileNotFoundError(
@@ -102,6 +107,10 @@ def ensure_model(key: str, root: Path | None = None, *, allow_download: bool = T
     with _download_lock(destination_root, key):
         status = inspect_model(key, destination_root)
         if not status.ready:
+            logger.info(
+                "model missing key=%s path=%s missing=%s; download starting",
+                key, status.path, ",".join(status.missing),
+            )
             status.path.mkdir(parents=True, exist_ok=True)
             snapshot_download(repo_id=status.spec.repo_id, local_dir=status.path)
         completed = inspect_model(key, destination_root)
@@ -113,6 +122,7 @@ def ensure_model(key: str, root: Path | None = None, *, allow_download: bool = T
             "size_bytes": completed.size_bytes,
         }
         (completed.path / ".download-complete.json").write_text(json.dumps(marker, indent=2), encoding="utf-8")
+        logger.info("model download completed key=%s path=%s size_bytes=%d", key, completed.path, completed.size_bytes)
         return completed.path
 
 

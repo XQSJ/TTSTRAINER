@@ -40,5 +40,8 @@
     "train": true,
     "export": true,
     "validate_onnx": true
+  },
+  "logging": {
+    "level": "INFO"
   }
 }

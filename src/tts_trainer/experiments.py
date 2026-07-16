@@ -6,7 +6,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 
-from .constants import LANGUAGES
+from .languages import (DEFAULT_TRAINING_LANGUAGES, LanguageSpec,
+                        language_specs_for, resolve_language_registry)
 from .project_config import load_project_config
 
 
@@ -17,6 +18,8 @@ MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 class ExperimentLayout:
     name: str
     languages: tuple[str, ...]
+    language_registry: dict[str, LanguageSpec]
+    language_specs: dict[str, LanguageSpec]
     dataset_dir: Path
     metadata: Path
     run_dir: Path
@@ -34,17 +37,21 @@ def validate_model_name(name: str) -> str:
     return name
 
 
-def validate_languages(values) -> tuple[str, ...]:
+def validate_languages(values, registry: dict[str, LanguageSpec] | None = None) -> tuple[str, ...]:
+    registry = registry or resolve_language_registry()
     if values is None:
-        return LANGUAGES
+        values = list(DEFAULT_TRAINING_LANGUAGES)
     if not isinstance(values, list) or not values:
         raise ValueError("experiment.languages must be a non-empty JSON array")
     languages = tuple(str(value).strip().lower() for value in values)
     if len(set(languages)) != len(languages):
         raise ValueError("experiment.languages must not contain duplicates")
-    unsupported = sorted(set(languages) - set(LANGUAGES))
+    unsupported = sorted(set(languages) - set(registry))
     if unsupported:
-        raise ValueError(f"unsupported configured languages: {', '.join(unsupported)}")
+        raise ValueError(
+            f"unregistered configured languages: {', '.join(unsupported)}; "
+            "add them under language_registry"
+        )
     return languages
 
 
@@ -54,7 +61,9 @@ def resolve_experiment(config_path: str | Path, *, metadata_override: str | None
     raw = load_project_config(config_path)
     experiment = raw.get("experiment", {})
     name = validate_model_name(experiment.get("name") or Path(config_path).stem)
-    languages = validate_languages(experiment.get("languages"))
+    registry = resolve_language_registry(raw.get("language_registry"))
+    languages = validate_languages(experiment.get("languages"), registry)
+    specs = language_specs_for(registry, languages)
     dataset_dir = Path(experiment.get("dataset_root", "datasets")) / name
     metadata_value = metadata_override or experiment.get("metadata") or dataset_dir / "metadata.phonemes.csv"
     run_dir = Path(output_override) if output_override else Path(experiment.get("run_root", "runs")) / name
@@ -70,6 +79,8 @@ def resolve_experiment(config_path: str | Path, *, metadata_override: str | None
     layout = ExperimentLayout(
         name=name,
         languages=languages,
+        language_registry=registry,
+        language_specs=specs,
         dataset_dir=dataset_dir,
         metadata=Path(metadata_value),
         run_dir=run_dir,
@@ -99,6 +110,7 @@ def prepare_experiment(layout: ExperimentLayout, resolved_config: dict, config_p
     manifest = {
         "name": layout.name,
         "languages": list(layout.languages),
+        "language_registry": {code: spec.to_dict() for code, spec in layout.language_specs.items()},
         "source_config": str(Path(config_path).resolve()),
         "dataset_dir": str(layout.dataset_dir.resolve()),
         "metadata": str(layout.metadata.resolve()),

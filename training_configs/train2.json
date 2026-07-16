@@ -34,6 +34,7 @@
     "learning_rate_discriminator": 0.0002,
     "epochs": 1000,
     "checkpoint_every_steps": 5000,
+    "log_every_steps": 10,
     "num_workers": 0,
     "seed": 2026
   }

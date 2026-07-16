@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import gc
 import importlib.util
+import logging
 import os
 import shutil
 from dataclasses import dataclass
@@ -14,21 +15,14 @@ import soundfile as sf
 import torch
 import torchaudio
 
-from .constants import LANGUAGES
 from .experiments import prepare_experiment, resolve_experiment
+from .languages import resolve_language_registry
+from .logging_utils import configure_logging
 from .manifest import read_manifest
 from .qwen_teacher import load_qwen_teacher
 
 
-QWEN_LANGUAGES = {
-    "zh": "Chinese",
-    "en": "English",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "fr": "French",
-    "es": "Spanish",
-    "pt": "Portuguese",
-}
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -44,8 +38,9 @@ class GenerationJob:
     output: Path
 
 
-def read_generation_texts(path: str | Path) -> list[GenerationText]:
+def read_generation_texts(path: str | Path, supported_languages=None) -> list[GenerationText]:
     source = Path(path)
+    supported = None if supported_languages is None else set(supported_languages)
     with source.open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
         missing = {"text", "language"} - set(reader.fieldnames or ())
@@ -57,7 +52,7 @@ def read_generation_texts(path: str | Path) -> list[GenerationText]:
             language = row["language"].strip().lower()
             if not text:
                 raise ValueError(f"generation text manifest line {line}: empty text")
-            if language not in LANGUAGES:
+            if supported is not None and language not in supported:
                 raise ValueError(f"generation text manifest line {line}: unsupported language {language!r}")
             result.append(GenerationText(text, language))
     if not result:
@@ -98,6 +93,19 @@ def _release_device_memory(device: str) -> None:
         torch.cuda.empty_cache()
 
 
+def _log_runtime_language_support(model, required: set[str], model_name: str) -> None:
+    getter = getattr(model, "get_supported_languages", None)
+    if not callable(getter):
+        logger.info("teacher=%s runtime language query unavailable; using validated registry", model_name)
+        return
+    supported = {str(value) for value in getter()}
+    logger.info("teacher=%s runtime languages=%s", model_name, ",".join(sorted(supported)))
+    supported_folded = {value.casefold() for value in supported}
+    missing = sorted(value for value in required if value.casefold() not in supported_folded)
+    if missing:
+        raise RuntimeError(f"teacher {model_name} does not report required languages: {', '.join(missing)}")
+
+
 def _write_training_wav(path: Path, waveform, source_rate: int, target_rate: int) -> None:
     samples = np.asarray(waveform, dtype=np.float32).squeeze()
     if samples.ndim != 1:
@@ -127,14 +135,17 @@ def generate_samples(config_path: str | Path, *,
     - clone: Base creates a reusable prompt from uploaded reference audio + transcript.
     """
     raw, layout = resolve_experiment(config_path)
+    configure_logging(raw.get("logging", {}).get("level", "INFO"))
     prepare_experiment(layout, raw, config_path)
+    registry = resolve_language_registry(raw.get("language_registry"))
+    logger.info("model=%s languages=%s", layout.name, ",".join(layout.languages))
     generation = raw.get("generation", {})
     if not generation.get("enabled", True):
         raise ValueError("sample generation is disabled in this config")
 
     text_manifest = Path(generation.get("text_manifest") or layout.dataset_dir / "texts.csv")
     output_metadata = Path(generation.get("raw_metadata") or layout.dataset_dir / "metadata.csv")
-    all_texts = read_generation_texts(text_manifest)
+    all_texts = read_generation_texts(text_manifest, registry)
     texts = [item for item in all_texts if item.language in layout.languages]
     missing_text_languages = sorted(set(layout.languages) - {item.language for item in texts})
     if missing_text_languages:
@@ -142,6 +153,15 @@ def generate_samples(config_path: str | Path, *,
             "generation text manifest has no rows for configured languages: "
             + ", ".join(missing_text_languages)
         )
+    logger.info("text manifest=%s selected=%d", text_manifest, len(texts))
+    teacher_languages = {}
+    for language, spec in layout.language_specs.items():
+        if spec.teacher_provider != "qwen" or not spec.teacher_language:
+            raise ValueError(
+                f"language {language} has no Qwen teacher mapping; disable generation "
+                "and supply your own metadata, or configure a supported teacher"
+            )
+        teacher_languages[language] = spec.teacher_language
     voice = generation.get("voice") or {}
     mode = voice.get("mode")
     if mode not in {"design", "clone"}:
@@ -161,6 +181,7 @@ def generate_samples(config_path: str | Path, *,
     ]
     overwrite = bool(generation.get("overwrite", False))
     pending = jobs if overwrite else [job for job in jobs if not job.output.is_file()]
+    logger.info("generation jobs total=%d pending=%d cached=%d", len(jobs), len(pending), len(jobs) - len(pending))
 
     if pending:
         device, load_kwargs = _runtime_kwargs(generation)
@@ -180,16 +201,24 @@ def generate_samples(config_path: str | Path, *,
             reference_language = voice.get("reference_language", "en").lower()
             if not prompt or not reference_text:
                 raise ValueError("design mode requires generation.voice.prompt and reference_text")
-            if reference_language not in QWEN_LANGUAGES:
+            if reference_language not in registry:
                 raise ValueError(f"unsupported design reference language: {reference_language}")
+            reference_spec = registry[reference_language]
+            if reference_spec.teacher_provider != "qwen" or not reference_spec.teacher_language:
+                raise ValueError(f"reference language {reference_language} has no Qwen teacher mapping")
             reference_audio = references / f"{speaker}.designed.wav"
             if reference_audio.is_file() and not overwrite:
                 reference_input = reference_audio
             else:
                 design_model = model_loader(model_keys.get("voice_design", "voice-design-1.7b"), **common)
+                _log_runtime_language_support(
+                    design_model, {reference_spec.teacher_language},
+                    model_keys.get("voice_design", "voice-design-1.7b"),
+                )
+                logger.info("creating designed reference voice speaker=%s language=%s", speaker, reference_language)
                 ref_wavs, ref_rate = design_model.generate_voice_design(
                     text=reference_text,
-                    language=QWEN_LANGUAGES[reference_language],
+                    language=reference_spec.teacher_language,
                     instruct=prompt,
                     **generation.get("generation_kwargs", {}),
                 )
@@ -209,6 +238,11 @@ def generate_samples(config_path: str | Path, *,
             reference_input = _copy_reference(uploaded, references / f"{speaker}.uploaded{uploaded.suffix or '.wav'}")
 
         clone_model = model_loader(model_keys.get("voice_clone", "base-1.7b"), **common)
+        _log_runtime_language_support(
+            clone_model, set(teacher_languages.values()),
+            model_keys.get("voice_clone", "base-1.7b"),
+        )
+        logger.info("creating reusable clone prompt speaker=%s mode=%s", speaker, mode)
         clone_prompt = clone_model.create_voice_clone_prompt(
             ref_audio=reference_input,
             ref_text=reference_text or None,
@@ -221,9 +255,10 @@ def generate_samples(config_path: str | Path, *,
         target_rate = int(raw["audio"]["sample_rate"])
         for start in range(0, len(pending), batch_size):
             batch = pending[start:start + batch_size]
+            logger.info("generating samples %d-%d/%d", start + 1, start + len(batch), len(pending))
             wavs, sample_rate = clone_model.generate_voice_clone(
                 text=[job.item.text for job in batch],
-                language=[QWEN_LANGUAGES[job.item.language] for job in batch],
+                language=[teacher_languages[job.item.language] for job in batch],
                 voice_clone_prompt=clone_prompt,
                 **generation_kwargs,
             )
@@ -270,4 +305,5 @@ def generate_samples(config_path: str | Path, *,
         writer.writeheader()
         writer.writerows(rows)
     temporary.replace(output_metadata)
+    logger.info("training metadata written=%s samples=%d", output_metadata, len(rows))
     return output_metadata
