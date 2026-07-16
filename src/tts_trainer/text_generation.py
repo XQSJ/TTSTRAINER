@@ -20,6 +20,7 @@ from .text import normalize
 
 logger = logging.getLogger(__name__)
 CORPUS_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 DEFAULT_CATEGORIES = {
     "daily": 0.35,
@@ -247,13 +248,50 @@ def _file_rows(path: str | Path, supported_languages) -> list[GeneratedText]:
         ]
 
 
-def _openai_compatible_request(config: dict, prompt: str) -> str:
-    endpoint = str(config.get("endpoint", "")).rstrip("/")
-    model = str(config.get("model", "")).strip()
+def _openai_compatible_config(config: dict) -> dict:
+    nested = config.get("openai_compatible") or {}
+    if not isinstance(nested, dict):
+        raise ValueError("text_generation.openai_compatible must be an object")
+    resolved = dict(nested)
+    for key in ("endpoint", "base_url", "model", "api_key_env", "temperature",
+                "timeout_seconds", "batch_size", "max_rounds"):
+        if key in config:
+            resolved[key] = config[key]
+    endpoint = str(resolved.get("endpoint") or resolved.get("base_url") or "").rstrip("/")
+    model = str(resolved.get("model") or "").strip()
     if not endpoint or not model:
-        raise ValueError("openai_compatible provider requires endpoint and model")
-    key_value = config.get("api_key_env", "OPENAI_API_KEY")
+        raise ValueError(
+            "text_generation provider=openai_compatible requires endpoint and model; "
+            "set text_generation.endpoint/model, or use provider=builtin for a smoke test"
+        )
+    if not endpoint.startswith(("http://", "https://")):
+        raise ValueError("text_generation.endpoint must start with http:// or https://")
+    key_value = resolved.get("api_key_env", "OPENAI_API_KEY")
     key_env = str(key_value) if key_value else None
+    if key_env and not ENVIRONMENT_NAME.fullmatch(key_env):
+        raise ValueError(
+            "text_generation.api_key_env must be an environment variable name such as "
+            "TEXT_LLM_API_KEY, not the API key value"
+        )
+    resolved.update({"endpoint": endpoint, "model": model, "api_key_env": key_env})
+    return resolved
+
+
+def validate_text_generation_config(config: dict) -> None:
+    provider = str(config.get("provider", "builtin"))
+    if provider not in {"builtin", "file", "openai_compatible"}:
+        raise ValueError("text_generation.provider must be builtin, file, or openai_compatible")
+    if provider == "file" and not config.get("input"):
+        raise ValueError("text_generation provider=file requires input")
+    if provider == "openai_compatible":
+        _openai_compatible_config(config)
+
+
+def _openai_compatible_request(config: dict, prompt: str) -> str:
+    resolved = _openai_compatible_config(config)
+    endpoint = resolved["endpoint"]
+    model = resolved["model"]
+    key_env = resolved["api_key_env"]
     api_key = os.environ.get(key_env) if key_env else None
     if key_env and not api_key:
         raise RuntimeError(f"environment variable {key_env} is not set")
@@ -263,14 +301,14 @@ def _openai_compatible_request(config: dict, prompt: str) -> str:
             {"role": "system", "content": "Return only valid JSON. Do not use Markdown fences."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": float(config.get("temperature", 0.9)),
+        "temperature": float(resolved.get("temperature", 0.9)),
     }).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(endpoint + "/chat/completions", data=payload,
                                      headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=float(config.get("timeout_seconds", 120))) as response:
+    with urllib.request.urlopen(request, timeout=float(resolved.get("timeout_seconds", 120))) as response:
         raw = json.loads(response.read().decode("utf-8"))
     return str(raw["choices"][0]["message"]["content"])
 
@@ -436,6 +474,7 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     config = raw.get("text_generation", {})
     if not config.get("enabled", False):
         raise ValueError("text generation is disabled in this config")
+    validate_text_generation_config(config)
     provider = str(config.get("provider", "builtin"))
     total = int(config.get("sentences_per_language", 100))
     corpus_id, fingerprint = _corpus_identity(config, layout)

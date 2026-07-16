@@ -11,7 +11,7 @@ from .language_check import check_language_support
 from .logging_utils import configure_logging
 from .manifest import validate_manifest
 from .sample_generation import generate_samples
-from .text_generation import generate_texts
+from .text_generation import generate_texts, validate_text_generation_config
 from .vits.exporter import export_vits_onnx, validate_onnx_runtime
 from .vits.trainer import train_vits
 
@@ -28,6 +28,8 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
     stages = raw.get("pipeline", {})
     generation = raw.get("generation", {})
     text_generation = raw.get("text_generation", {})
+    if stages.get("generate_texts", True) and text_generation.get("enabled", False):
+        validate_text_generation_config(text_generation)
     statuses = check_language_support(
         raw, layout,
         run_smoke=bool(stages.get("phonemize", True)),

@@ -987,6 +987,10 @@ datasets/text_corpora/<corpus-id>/
 export TEXT_LLM_API_KEY="..."
 ```
 
+`api_key_env` 填的是环境变量名称，不是密钥值。为兼容常见服务配置，也接受
+`openai_compatible` 子对象和其中的 `base_url` 别名，但推荐使用上面的扁平写法；
+启动流水线时会在生成文本或下载模型前检查这些必填项，并拒绝疑似直接写入的密钥。
+
 无需认证的本地 OpenAI-compatible 服务可以设置 `"api_key_env": null`。接口应
 提供 `/chat/completions`，并返回标准 `choices[0].message.content`；内容必须是
 由 `text` 和 `category` 组成的 JSON 数组。

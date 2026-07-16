@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tts_trainer.text_generation import generate_texts
+from tts_trainer.text_generation import generate_texts, validate_text_generation_config
 
 
 class TextGenerationTests(unittest.TestCase):
@@ -108,6 +108,29 @@ class TextGenerationTests(unittest.TestCase):
             self.assertEqual(len(rows), 2)
             self.assertEqual(calls[0][0], "text-model")
             self.assertEqual({row["source"] for row in rows}, {"openai_compatible"})
+
+    def test_nested_openai_compatible_config_accepts_base_url_alias(self):
+        config = {
+            "provider": "openai_compatible",
+            "openai_compatible": {
+                "base_url": "https://llm.example/v1",
+                "model": "text-model",
+                "api_key_env": "TEXT_LLM_API_KEY",
+            },
+        }
+        validate_text_generation_config(config)
+
+    def test_api_key_value_is_rejected_without_echoing_it(self):
+        secret = "secret-value.with-punctuation"
+        config = {
+            "provider": "openai_compatible",
+            "endpoint": "https://llm.example/v1",
+            "model": "text-model",
+            "api_key_env": secret,
+        }
+        with self.assertRaisesRegex(ValueError, "environment variable name") as raised:
+            validate_text_generation_config(config)
+        self.assertNotIn(secret, str(raised.exception))
 
 
 if __name__ == "__main__":
