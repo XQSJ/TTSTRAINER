@@ -31,7 +31,7 @@
     }
   },
   "generation": {
-    "_comment": "自动使用 texts.generated.csv，不需要 text_manifest / Automatically consumes texts.generated.csv; no text_manifest is needed",
+    "_comment": "自动使用 datasets/text_corpora 下的共享文本，不需要 text_manifest / Automatically consumes the shared corpus under datasets/text_corpora; no text_manifest is needed",
     "enabled": true,
     "qwen_runtime": "installed",
     "auto_download_models": true,

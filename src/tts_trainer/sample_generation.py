@@ -20,6 +20,7 @@ from .languages import resolve_language_registry
 from .logging_utils import configure_logging
 from .manifest import read_manifest
 from .qwen_teacher import load_qwen_teacher
+from .text_generation import text_corpus_path
 
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     text_generation = raw.get("text_generation", {})
     generated_default = None
     if text_generation.get("enabled", False):
-        generated_default = text_generation.get("output") or layout.dataset_dir / "texts.generated.csv"
+        generated_default = text_corpus_path(text_generation, layout)
     text_manifest = Path(
         text_manifest_path or generation.get("text_manifest")
         or generated_default or layout.dataset_dir / "texts.csv"

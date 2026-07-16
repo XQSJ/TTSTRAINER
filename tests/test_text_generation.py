@@ -8,10 +8,11 @@ from tts_trainer.text_generation import generate_texts
 
 
 class TextGenerationTests(unittest.TestCase):
-    def _config(self, root: Path, text_generation: dict, languages=("en", "de")) -> Path:
+    def _config(self, root: Path, text_generation: dict, languages=("en", "de"),
+                *, name="text-test", filename="config.json") -> Path:
         config = {
             "experiment": {
-                "name": "text-test",
+                "name": name,
                 "languages": list(languages),
                 "dataset_root": str(root / "datasets"),
                 "run_root": str(root / "runs"),
@@ -20,7 +21,7 @@ class TextGenerationTests(unittest.TestCase):
             "text_generation": {"enabled": True, **text_generation},
             "logging": {"level": "WARNING"},
         }
-        path = root / "config.json"
+        path = root / filename
         path.write_text(json.dumps(config), encoding="utf-8")
         return path
 
@@ -42,8 +43,30 @@ class TextGenerationTests(unittest.TestCase):
             rows = self._rows(first)
             self.assertEqual(len(rows), 24)
             self.assertEqual(sum(row["language"] == "de" for row in rows), 12)
-            report = json.loads((first.parent / "text-generation-report.json").read_text(encoding="utf-8"))
+            report = json.loads(first.with_suffix(".report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["accepted"], {"de": 12, "en": 12})
+            self.assertIn("fingerprint", report)
+
+    def test_same_corpus_is_reused_across_model_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = {
+                "provider": "builtin", "sentences_per_language": 4, "seed": 99,
+            }
+            first_config = self._config(
+                root, settings, languages=("en",), name="reader-a", filename="a.json",
+            )
+            second_config = self._config(
+                root, settings, languages=("en",), name="reader-b", filename="b.json",
+            )
+            first = generate_texts(first_config)
+            initial_mtime = first.stat().st_mtime_ns
+            second = generate_texts(second_config)
+            self.assertEqual(first, second)
+            self.assertEqual(second.stat().st_mtime_ns, initial_mtime)
+            self.assertIn("text_corpora", second.parts)
+            self.assertNotIn("reader-a", second.parts)
+            self.assertNotIn("reader-b", second.parts)
 
     def test_file_provider_filters_languages_and_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:

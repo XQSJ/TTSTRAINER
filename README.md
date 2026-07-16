@@ -28,7 +28,9 @@ cp training_configs/train1.json training_configs/my_model.json
 PYTHONPATH=src .venv/bin/python -m tts_trainer generate-texts --config training_configs/my_model.json
 ```
 
-生成位置是 `datasets/my_model/texts.generated.csv`。内置模板不需要下载文本大模型，
+生成文本放在公共语料库 `datasets/text_corpora/<corpus-id>/texts.csv`，不会放进
+`datasets/my_model/`。`corpus-id` 由语言、provider、seed 和过滤配置计算；另一个
+模型使用相同配置时会直接命中缓存，不会再次生成。内置模板不需要下载文本大模型，
 但内容只是覆盖数字、日期、问句等流程种子，不足以训练产品级声音。
 
 方式二，正式训练使用自己的业务文案、已获得许可的语料或人工整理文本，保存为
@@ -733,7 +735,7 @@ training_configs/train2.json                       # model_2 的用户参数
 | `initialization.mode` | `scratch`、`resume` 或 `expand_speakers` |
 | `initialization.checkpoint` | 续训/扩展时的旧 checkpoint 目录 |
 
-默认路径全部由 `name` 推导：
+模型私有路径由 `name` 推导：
 
 ```text
 datasets/<name>/metadata.phonemes.csv
@@ -743,6 +745,17 @@ artifacts/<name>/
 
 只有要共享数据或改变存储根目录时，才需要在专家配置中覆盖
 `dataset_root`、`metadata`、`run_root` 或 `artifact_root`。
+
+公共资源不跟模型名走：
+
+```text
+datasets/text_corpora/  # 自动生成/清洗后的共享文本，相同配置直接复用
+models/qwen/            # Qwen Teacher 权重
+models/frontends/       # 日语、韩语等前端词典
+models/quality/         # 可选 ASR/声纹质检权重
+```
+
+只有音色参考、生成 WAV、metadata、checkpoint 和 ONNX 属于具体模型/数据任务。
 
 ### 语言选项
 
@@ -887,16 +900,29 @@ PYTHONPATH=src .venv/bin/python scripts/generate_texts.py \
   --config training_configs/auto-text.example.json
 ```
 
-输出位于模型自己的数据目录：
+默认输出位于共享语料目录，不包含 `experiment.name`：
 
 ```text
-datasets/<name>/
-├── texts.generated.csv
-└── text-generation-report.json
+datasets/text_corpora/<corpus-id>/
+├── texts.csv
+└── texts.report.json
 ```
 
-报告记录逐语言目标数、通过数、拒绝原因和最多 20 条拒绝示例。过滤项包括长度、
-精确去重、基础文字脚本检查，以及可选的实际 G2P 检查。
+`corpus-id` 默认由 provider、语言集合和完整生成配置指纹得到。流水线再次请求相同
+语料时直接复用现有 CSV；不会因为 `experiment.name` 改变而重新生成。报告记录
+配置指纹、逐语言目标数、通过数、拒绝原因和最多 20 条拒绝示例。
+
+需要人为指定稳定名称时使用 `corpus_name`；同名但配置不一致时程序会拒绝覆盖：
+
+```json
+"text_generation": {
+  "corpus_name": "seven_language_business_v1",
+  "reuse": true,
+  "overwrite": false
+}
+```
+
+只有明确要重建同名语料时才临时设置 `overwrite=true`。
 
 ### `builtin`：内置确定性模板
 

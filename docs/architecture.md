@@ -30,12 +30,15 @@ G2P 输出，失败时不会创建错误的训练 token。
 ```text
 builtin templates / source CSV / OpenAI-compatible text model
         -> normalize / script check / deduplicate / optional G2P
-        -> texts.generated.csv + text-generation-report.json
+        -> datasets/text_corpora/<config-fingerprint>/texts.csv + report
         -> Qwen Teacher 生成 WAV
 ```
 
 文本生成只负责构造输入语句，不参与 VITS 梯度训练。固定 `seed` 的 builtin
 provider 是确定性的；LLM provider 的输出必须经过同一过滤器并保留来源字段。
+公共文本 corpus 由语言和完整生成配置指纹寻址，与模型名称无关；重复训练直接
+复用。Qwen 权重、前端词典和质检权重也属于项目公共资源，只有音色 WAV、训练状态
+和导出模型按具体任务隔离。
 
 训练前先固定文本前端：
 

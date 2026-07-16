@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from .text import normalize
 
 
 logger = logging.getLogger(__name__)
+CORPUS_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 DEFAULT_CATEGORIES = {
     "daily": 0.35,
@@ -326,6 +328,107 @@ def _script_matches(text: str, language: str) -> bool:
     return True
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _without_comments(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_comments(item)
+            for key, item in value.items()
+            if not str(key).startswith("_comment")
+        }
+    if isinstance(value, list):
+        return [_without_comments(item) for item in value]
+    return value
+
+
+def _corpus_identity(config: dict, layout) -> tuple[str, str]:
+    """Return a model-independent corpus ID and its reproducibility fingerprint."""
+    operational = {"enabled", "output", "root", "corpus_name", "reuse", "overwrite"}
+    generation_config = _without_comments({
+        key: value for key, value in config.items() if key not in operational
+    })
+    input_value = generation_config.get("input")
+    input_identity = None
+    if input_value:
+        input_path = Path(input_value).expanduser().resolve()
+        input_identity = {
+            "path": str(input_path),
+            "sha256": _file_sha256(input_path) if input_path.is_file() else None,
+        }
+        generation_config["input"] = input_identity
+    payload = {
+        "format": 1,
+        "languages": sorted(layout.languages),
+        "generation": generation_config,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")
+    fingerprint = hashlib.sha256(encoded).hexdigest()
+    configured_name = config.get("corpus_name")
+    if configured_name:
+        corpus_id = str(configured_name).strip()
+        if not CORPUS_NAME.fullmatch(corpus_id):
+            raise ValueError(
+                "text_generation.corpus_name must contain only letters, numbers, '.', '_' "
+                "and '-', and cannot start with punctuation"
+            )
+    else:
+        provider = str(config.get("provider", "builtin"))
+        language_slug = "-".join(sorted(layout.languages))
+        corpus_id = f"{provider}-{language_slug}-{fingerprint[:12]}"
+    return corpus_id, fingerprint
+
+
+def _corpus_paths(config: dict, layout, corpus_id: str) -> tuple[Path, Path]:
+    output_value = config.get("output")
+    if output_value:
+        output = Path(output_value)
+    else:
+        root = Path(config.get("root") or layout.dataset_dir.parent / "text_corpora")
+        output = root / corpus_id / "texts.csv"
+    return output, output.with_suffix(".report.json")
+
+
+def text_corpus_path(config: dict, layout) -> Path:
+    """Resolve the shared corpus path without generating or mutating it."""
+    corpus_id, _ = _corpus_identity(config, layout)
+    output, _ = _corpus_paths(config, layout, corpus_id)
+    return output
+
+
+def _reuse_cached_corpus(output: Path, report_path: Path, fingerprint: str,
+                         languages: tuple[str, ...], target: int) -> bool:
+    if not output.is_file() and not report_path.is_file():
+        return False
+    if not output.is_file() or not report_path.is_file():
+        raise RuntimeError(
+            f"shared text corpus cache is incomplete at {output.parent}; "
+            "delete it or set text_generation.overwrite=true"
+        )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("fingerprint") != fingerprint:
+        raise RuntimeError(
+            f"shared text corpus {output} was created with different settings; "
+            "change text_generation.corpus_name or set text_generation.overwrite=true"
+        )
+    accepted = report.get("accepted", {})
+    missing = [language for language in languages if int(accepted.get(language, 0)) < target]
+    if missing:
+        raise RuntimeError(
+            f"shared text corpus {output} is incomplete for: {', '.join(missing)}; "
+            "set text_generation.overwrite=true after fixing the source"
+        )
+    return True
+
+
 def generate_texts(config_path: str | Path, *, requester=_openai_compatible_request) -> Path:
     raw, layout = resolve_experiment(config_path)
     configure_logging(raw.get("logging", {}).get("level", "INFO"))
@@ -335,11 +438,19 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
         raise ValueError("text generation is disabled in this config")
     provider = str(config.get("provider", "builtin"))
     total = int(config.get("sentences_per_language", 100))
-    output = Path(config.get("output") or layout.dataset_dir / "texts.generated.csv")
+    corpus_id, fingerprint = _corpus_identity(config, layout)
+    output, report_path = _corpus_paths(config, layout, corpus_id)
     logger.info(
-        "text generation started model=%s provider=%s languages=%s target_per_language=%d",
-        layout.name, provider, ",".join(layout.languages), total,
+        "text corpus requested corpus=%s model=%s provider=%s languages=%s target_per_language=%d",
+        corpus_id, layout.name, provider, ",".join(layout.languages), total,
     )
+    reuse = bool(config.get("reuse", True))
+    overwrite = bool(config.get("overwrite", False))
+    if reuse and not overwrite and _reuse_cached_corpus(
+        output, report_path, fingerprint, layout.languages, total,
+    ):
+        logger.info("text corpus cache hit corpus=%s output=%s", corpus_id, output)
+        return output
     if provider == "builtin":
         candidates = []
         for language in layout.languages:
@@ -429,6 +540,8 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     temporary.replace(output)
     report = {
         "format": 1,
+        "corpus_id": corpus_id,
+        "fingerprint": fingerprint,
         "provider": provider,
         "output": str(output.resolve()),
         "languages": list(layout.languages),
@@ -438,7 +551,6 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
         "rejected_examples": rejected_examples,
         "seed": int(config.get("seed", 1337)),
     }
-    report_path = output.with_name("text-generation-report.json")
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("text generation completed output=%s accepted=%s rejected=%s", output, dict(per_language), dict(rejected))
     missing = {language: total - per_language[language] for language in layout.languages if per_language[language] < total}
