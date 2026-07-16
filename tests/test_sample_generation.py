@@ -6,9 +6,12 @@ import wave
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 
-from tts_trainer.manifest import validate_manifest
-from tts_trainer.sample_generation import generate_samples
+from tts_trainer.manifest import Item, validate_manifest
+from tts_trainer.quality import inspect_audio_item
+from tts_trainer.sample_generation import (_postprocess_training_wav,
+                                           generate_samples)
 
 
 class FakeDesignModel:
@@ -37,6 +40,35 @@ class FakeCloneModel:
 
 
 class SampleGenerationTests(unittest.TestCase):
+    def test_edge_silence_postprocess_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rate = 8000
+            active_time = np.arange(rate, dtype=np.float32) / rate
+            active = 0.2 * np.sin(2 * np.pi * 220 * active_time)
+            samples = np.concatenate([
+                np.zeros(rate, dtype=np.float32), active,
+                np.zeros(rate, dtype=np.float32),
+            ])
+            path = root / "padded.wav"
+            sf.write(path, samples, rate, subtype="PCM_16")
+            settings = {
+                "enabled": True, "trim_edge_silence": True,
+                "silence_threshold_dbfs": -45.0,
+                "keep_edge_silence_seconds": 0.1,
+            }
+            result = _postprocess_training_wav(path, settings)
+            self.assertIsNotNone(result)
+            self.assertLess(result["after_seconds"], 1.25)
+            self.assertIsNone(_postprocess_training_wav(path, settings))
+            quality = inspect_audio_item(
+                Item(path, "hello world", "en", "voice_a", tuple("hello world")),
+                {"maximum_edge_silence_seconds": 0.2},
+            )
+            self.assertTrue(quality["passed"])
+            self.assertLessEqual(quality["metrics"]["leading_silence_seconds"], 0.101)
+            self.assertLessEqual(quality["metrics"]["trailing_silence_seconds"], 0.101)
+
     def _base(self, root: Path, mode: str) -> tuple[Path, list]:
         texts = root / "texts.csv"
         with texts.open("w", newline="", encoding="utf-8") as stream:

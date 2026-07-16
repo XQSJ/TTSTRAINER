@@ -53,6 +53,12 @@
       "dtype": "auto",
       "attention": "auto"
     },
+    "audio_postprocess": {
+      "enabled": true,
+      "trim_edge_silence": true,
+      "silence_threshold_dbfs": -45.0,
+      "keep_edge_silence_seconds": 0.15
+    },
     "generation_kwargs": {
       "max_new_tokens": 2048,
       "do_sample": true,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import gc
 import importlib.util
+import json
 import logging
 import os
 import shutil
@@ -116,6 +117,36 @@ def _write_training_wav(path: Path, waveform, source_rate: int, target_rate: int
         samples = torchaudio.functional.resample(tensor, source_rate, target_rate).cpu().numpy()
     path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(path, samples, target_rate, subtype="PCM_16", format="WAV")
+
+
+def _postprocess_training_wav(path: Path, config: dict) -> dict | None:
+    """Trim excessive edge silence from a project-generated WAV, in place."""
+    if not config.get("enabled", True) or not config.get("trim_edge_silence", True):
+        return None
+    samples, sample_rate = sf.read(path, dtype="float32", always_2d=False)
+    samples = np.asarray(samples, dtype=np.float32).squeeze()
+    if samples.ndim != 1:
+        raise ValueError(f"generated WAV must be mono: {path}")
+    threshold = 10.0 ** (float(config.get("silence_threshold_dbfs", -45.0)) / 20.0)
+    active = np.flatnonzero(np.abs(samples) > threshold)
+    if not active.size:
+        return None
+    padding = max(0, round(float(config.get("keep_edge_silence_seconds", 0.15)) * sample_rate))
+    start = max(0, int(active[0]) - padding)
+    stop = min(len(samples), int(active[-1]) + padding + 1)
+    if start == 0 and stop == len(samples):
+        return None
+    trimmed = samples[start:stop]
+    temporary = path.with_name(path.name + ".trim.tmp")
+    sf.write(temporary, trimmed, sample_rate, subtype="PCM_16", format="WAV")
+    temporary.replace(path)
+    return {
+        "audio": str(path),
+        "before_seconds": len(samples) / sample_rate,
+        "after_seconds": len(trimmed) / sample_rate,
+        "removed_leading_seconds": start / sample_rate,
+        "removed_trailing_seconds": (len(samples) - stop) / sample_rate,
+    }
 
 
 def _copy_reference(source: Path, destination: Path) -> Path:
@@ -276,6 +307,26 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
                 _write_training_wav(job.output, waveform, sample_rate, target_rate)
         del clone_model
         _release_device_memory(device)
+
+    postprocess_config = generation.get("audio_postprocess", {})
+    trimmed = [
+        result for job in jobs
+        if (result := _postprocess_training_wav(job.output, postprocess_config)) is not None
+    ]
+    logger.info(
+        "audio postprocess status=completed checked=%d trimmed=%d",
+        len(jobs), len(trimmed),
+    )
+    if trimmed:
+        report_path = layout.dataset_dir / "audio-postprocess-report.json"
+        report_path.write_text(json.dumps({
+            "format": 1,
+            "provider": "edge-silence-trim-v1",
+            "checked": len(jobs),
+            "trimmed": len(trimmed),
+            "settings": postprocess_config,
+            "results": trimmed,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     rows = []
     seen = set()

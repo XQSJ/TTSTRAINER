@@ -293,7 +293,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline --config training_co
   → 按配置生成/导入训练文本和质检报告（可跳过）
   → 检查逐语言 Teacher/G2P/voice 并显示结果
   → 检查/按需下载项目内 Qwen 权重
-  → 生成 PCM16 训练 WAV 和 metadata.csv
+  → 生成 PCM16 训练 WAV、自动修整过长首尾静音并写 metadata.csv
   → 冻结音素
   → 信号质检并固定训练/验证集
   → VITS 训练、验证并保存 best/last
