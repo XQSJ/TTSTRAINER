@@ -471,18 +471,55 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             format_duration(time.monotonic() - generation_started),
             extra={"tts_style": "success"},
         )
+        logger.info("AUDIO MODEL RELEASE | status=started | device=%s", device)
         del clone_model
         _release_device_memory(device)
+        logger.info(
+            "AUDIO MODEL RELEASE | status=completed | device=%s",
+            device,
+            extra={"tts_style": "success"},
+        )
 
     postprocess_config = generation.get("audio_postprocess", {})
-    trimmed = [
-        result for job in jobs
-        if (result := _postprocess_training_wav(job.output, postprocess_config)) is not None
-    ]
-    logger.info(
-        "audio postprocess status=completed checked=%d trimmed=%d",
-        len(jobs), len(trimmed),
+    postprocess_enabled = bool(
+        postprocess_config.get("enabled", True)
+        and postprocess_config.get("trim_edge_silence", True)
     )
+    trimmed = []
+    if postprocess_enabled:
+        postprocess_started = time.monotonic()
+        postprocess_interval = max(
+            1, int(raw.get("logging", {}).get("sample_postprocess_every_files", 200)),
+        )
+        logger.info(
+            "AUDIO POSTPROCESS START | total=%d | progress_every_files=%d | action=trim_edge_silence",
+            len(jobs), postprocess_interval,
+        )
+        for index, job in enumerate(jobs, 1):
+            result = _postprocess_training_wav(job.output, postprocess_config)
+            if result is not None:
+                trimmed.append(result)
+            if index % postprocess_interval == 0 or index == len(jobs):
+                elapsed = time.monotonic() - postprocess_started
+                rate = index / max(elapsed, 1e-9)
+                remaining = len(jobs) - index
+                logger.info(
+                    "AUDIO POSTPROCESS %6.2f%% | checked=%d/%d | trimmed=%d | speed=%.1f/s | ETA=%s",
+                    100.0 * index / max(len(jobs), 1), index, len(jobs),
+                    len(trimmed), rate, format_duration(remaining / rate),
+                    extra={"tts_style": "progress"},
+                )
+        logger.info(
+            "AUDIO POSTPROCESS DONE | checked=%d | trimmed=%d | elapsed=%s",
+            len(jobs), len(trimmed),
+            format_duration(time.monotonic() - postprocess_started),
+            extra={"tts_style": "success"},
+        )
+    else:
+        logger.info(
+            "AUDIO POSTPROCESS SKIPPED | total=%d | reason=disabled",
+            len(jobs),
+        )
     if trimmed:
         report_path = layout.dataset_dir / "audio-postprocess-report.json"
         report_path.write_text(json.dumps({
@@ -494,6 +531,10 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             "results": trimmed,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    logger.info(
+        "METADATA BUILD START | generated_jobs=%d | included_manifests=%d | output=%s",
+        len(jobs), len(generation.get("include_metadata", [])), output_metadata,
+    )
     rows = []
     seen = set()
     for included_path in generation.get("include_metadata", []):
@@ -541,5 +582,9 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         "speaker_label": speaker,
         "samples": len(rows),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("training metadata written=%s samples=%d", output_metadata, len(rows))
+    logger.info(
+        "METADATA BUILD DONE | samples=%d | output=%s",
+        len(rows), output_metadata,
+        extra={"tts_style": "success"},
+    )
     return output_metadata

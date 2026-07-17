@@ -1260,12 +1260,14 @@ generate or reuse teacher WAV samples
   "level": "INFO",
   "color": "auto",
   "third_party_level": "WARNING",
-  "sample_progress_every_batches": 1
+  "sample_progress_every_batches": 1,
+  "sample_postprocess_every_files": 200
 }
 ```
 
-`sample_progress_every_batches=5` 表示每 5 个 Qwen 批次显示一次音频进度。日志选项也可
-临时使用环境变量覆盖：
+`sample_progress_every_batches=5` 表示每 5 个 Qwen 批次显示一次音频进度；
+`sample_postprocess_every_files=200` 表示每检查 200 个 WAV 显示一次首尾静音处理
+进度。日志选项也可临时使用环境变量覆盖：
 
 ```bash
 TTS_TRAINER_LOG_LEVEL=DEBUG PYTHONPATH=src .venv/bin/python -m tts_trainer \

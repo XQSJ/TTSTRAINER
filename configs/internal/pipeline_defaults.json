@@ -135,6 +135,7 @@
     "level": "INFO",
     "color": "auto",
     "third_party_level": "WARNING",
-    "sample_progress_every_batches": 1
+    "sample_progress_every_batches": 1,
+    "sample_postprocess_every_files": 200
   }
 }
