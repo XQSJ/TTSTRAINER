@@ -9,7 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tts_trainer.text_generation import (_openai_compatible_request, generate_texts,
+                                         text_corpus_path,
                                          validate_text_generation_config)
+from tts_trainer.experiments import resolve_experiment
 
 
 class TextGenerationTests(unittest.TestCase):
@@ -72,6 +74,28 @@ class TextGenerationTests(unittest.TestCase):
             self.assertIn("text_corpora", second.parts)
             self.assertNotIn("reader-a", second.parts)
             self.assertNotIn("reader-b", second.parts)
+
+    def test_request_batch_size_does_not_change_corpus_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = {
+                "provider": "openai_compatible",
+                "endpoint": "http://local/v1",
+                "model": "text-model",
+                "sentences_per_language": 20,
+                "batch_size": 20,
+            }
+            first_config = self._config(root, settings, languages=("en",))
+            first_raw, first_layout = resolve_experiment(first_config)
+            first_path = text_corpus_path(first_raw["text_generation"], first_layout)
+
+            settings["request_batch_size"] = 50
+            second_config = self._config(
+                root, settings, languages=("en",), filename="larger-requests.json",
+            )
+            second_raw, second_layout = resolve_experiment(second_config)
+            second_path = text_corpus_path(second_raw["text_generation"], second_layout)
+            self.assertEqual(first_path, second_path)
 
     def test_file_provider_filters_languages_and_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:

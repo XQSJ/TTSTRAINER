@@ -10,6 +10,7 @@
     "overwrite": false,
     "input": null,
     "sentences_per_language": 100,
+    "request_batch_size": null,
     "seed": 1337,
     "allow_fewer": false,
     "categories": {

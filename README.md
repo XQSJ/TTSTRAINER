@@ -938,6 +938,16 @@ datasets/text_corpora/<corpus-id>/
 临时断点文件会自动删除。修改语言、目标条数、模型、prompt/过滤参数等会产生新的
 `corpus-id`，因为那已经是另一份语料需求。
 
+`request_batch_size` 只控制每次 LLM 请求生成多少句，不参与语料指纹，运行中可以从
+`20` 调整为 `50` 后继续原断点。批次越大，重复 prompt 和请求次数越少，但过大更容易
+遇到响应截断、JSON 不完整或超时。建议从 `50` 开始，稳定后再测试 `80`～`100`：
+
+```json
+"text_generation": {
+  "request_batch_size": 50
+}
+```
+
 需要人为指定稳定名称时使用 `corpus_name`；同名但配置不一致时程序会拒绝覆盖：
 
 ```json

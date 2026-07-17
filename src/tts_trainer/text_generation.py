@@ -351,9 +351,17 @@ def _parse_llm_rows(content: str, language: str) -> list[GeneratedText]:
     return result
 
 
+def _request_batch_size(config: dict) -> int:
+    """Return the operational request size without changing corpus identity."""
+    value = config.get("request_batch_size")
+    if value is None:
+        value = config.get("batch_size", 50)
+    return max(1, int(value))
+
+
 def _llm_rows(language: str, language_name: str, total: int, config: dict,
               requester, *, on_batch=None, round_offset: int = 0) -> list[GeneratedText]:
-    batch_size = max(1, int(config.get("batch_size", 50)))
+    batch_size = _request_batch_size(config)
     rows = []
     round_index = 0
     while len(rows) < total and round_index < int(config.get("max_rounds", 100)):
@@ -415,7 +423,10 @@ def _without_comments(value):
 
 def _corpus_identity(config: dict, layout) -> tuple[str, str]:
     """Return a model-independent corpus ID and its reproducibility fingerprint."""
-    operational = {"enabled", "output", "root", "corpus_name", "reuse", "overwrite"}
+    operational = {
+        "enabled", "output", "root", "corpus_name", "reuse", "overwrite",
+        "request_batch_size",
+    }
     generation_config = _without_comments({
         key: value for key, value in config.items() if key not in operational
     })
@@ -570,6 +581,16 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
         "text corpus requested corpus=%s model=%s provider=%s languages=%s target_per_language=%d",
         corpus_id, layout.name, provider, ",".join(layout.languages), total,
     )
+    if provider == "openai_compatible":
+        request_batch_size = _request_batch_size(config)
+        estimated_requests = len(layout.languages) * (
+            (total + request_batch_size - 1) // request_batch_size
+        )
+        logger.info(
+            "LLM request plan batch_size=%d estimated_min_requests=%d "
+            "target_sentences=%d",
+            request_batch_size, estimated_requests, total * len(layout.languages),
+        )
     reuse = bool(config.get("reuse", True))
     overwrite = bool(config.get("overwrite", False))
     if overwrite or not reuse:
@@ -633,7 +654,7 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
                 corpus_id, len(candidates), dict(partial_counts), partial_path,
             )
 
-        configured_batch = max(1, int(config.get("batch_size", 50)))
+        configured_batch = _request_batch_size(config)
         for language, spec in layout.language_specs.items():
             existing = partial_counts[language]
             missing_raw = max(total - existing, 0)
@@ -719,7 +740,7 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
             if not missing:
                 break
             refill = []
-            configured_batch = max(1, int(config.get("batch_size", 50)))
+            configured_batch = _request_batch_size(config)
             for language, count in missing.items():
                 request_count = max(count, min(configured_batch, max(4, count * 2)))
                 logger.info(
