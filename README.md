@@ -928,12 +928,14 @@ datasets/text_corpora/<corpus-id>/
 └── texts.report.json
 ```
 
-`corpus-id` 默认由 provider、语言集合和完整生成配置指纹得到。流水线再次请求相同
-语料时直接复用现有 CSV；不会因为 `experiment.name` 改变而重新生成。报告记录
-配置指纹、逐语言目标数、通过数、拒绝原因和最多 20 条拒绝示例。
+`corpus-id` 只由 provider、语言集合、目标数量、模型及文本/过滤等“语料语义参数”
+计算。`batch_size`、`request_batch_size`、超时、重试轮数、API Key 环境变量名和输出
+路径等执行参数不参与哈希；改变它们不会创建新语料。流水线再次请求相同语料时直接
+复用现有 CSV，也不会因为 `experiment.name` 改变而重新生成。报告记录配置指纹、
+逐语言目标数、通过数、拒绝原因和最多 20 条拒绝示例。
 
 使用 `openai_compatible` 时，每次成功的 LLM 请求都会立即写入同一语料目录下的
-`texts.partial.jsonl`。网络中断、进程退出或服务器重启后，保持生成配置不变并重新执行
+`texts.partial.jsonl`。网络中断、进程退出或服务器重启后，保持语料语义参数不变并重新执行
 同一命令，会从该断点继续而不是重做已保存批次；全部文本过滤并写入 `texts.csv` 后，
 临时断点文件会自动删除。修改语言、目标条数、模型、prompt/过滤参数等会产生新的
 `corpus-id`，因为那已经是另一份语料需求。
@@ -947,6 +949,10 @@ datasets/text_corpora/<corpus-id>/
   "request_batch_size": 50
 }
 ```
+
+旧版本曾错误地将 `text_generation.batch_size` 放进指纹。新版第一次运行时会自动把
+旧的 `texts.csv`、报告或 `texts.partial.jsonl` 迁移到语义指纹 v2，保留已有断点。
+`batch_size` 继续作为兼容别名，但新配置应使用含义更明确的 `request_batch_size`。
 
 需要人为指定稳定名称时使用 `corpus_name`；同名但配置不一致时程序会拒绝覆盖：
 
@@ -998,7 +1004,7 @@ datasets/text_corpora/<corpus-id>/
   "model": "your-text-model",
   "api_key_env": "TEXT_LLM_API_KEY",
   "sentences_per_language": 5000,
-  "batch_size": 50
+  "request_batch_size": 50
 }
 ```
 

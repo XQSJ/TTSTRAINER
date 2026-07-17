@@ -409,41 +409,49 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _without_comments(value):
-    if isinstance(value, dict):
-        return {
-            key: _without_comments(item)
-            for key, item in value.items()
-            if not str(key).startswith("_comment")
+def _identity_payload(config: dict, layout, *, legacy: bool = False) -> dict:
+    """Build the semantic corpus identity, excluding execution scheduling."""
+    if legacy:
+        # Reproduce the v1 hash exactly. request_batch_size did not exist in v1
+        # and must not prevent migration of an older checkpoint.
+        operational = {
+            "enabled", "output", "root", "corpus_name", "reuse", "overwrite",
+            "request_batch_size",
         }
-    if isinstance(value, list):
-        return [_without_comments(item) for item in value]
-    return value
+    else:
+        operational = {
+            "enabled", "output", "root", "corpus_name", "reuse", "overwrite",
+            "batch_size", "request_batch_size", "timeout_seconds", "max_rounds",
+            "refill_rounds", "allow_fewer", "api_key_env",
+        }
 
+    def strip_operational(value):
+        if isinstance(value, dict):
+            return {
+                key: strip_operational(item)
+                for key, item in value.items()
+                if not str(key).startswith("_comment") and key not in operational
+            }
+        if isinstance(value, list):
+            return [strip_operational(item) for item in value]
+        return value
 
-def _corpus_identity(config: dict, layout) -> tuple[str, str]:
-    """Return a model-independent corpus ID and its reproducibility fingerprint."""
-    operational = {
-        "enabled", "output", "root", "corpus_name", "reuse", "overwrite",
-        "request_batch_size",
-    }
-    generation_config = _without_comments({
-        key: value for key, value in config.items() if key not in operational
-    })
+    generation_config = strip_operational(config)
     input_value = generation_config.get("input")
-    input_identity = None
     if input_value:
         input_path = Path(input_value).expanduser().resolve()
-        input_identity = {
+        generation_config["input"] = {
             "path": str(input_path),
             "sha256": _file_sha256(input_path) if input_path.is_file() else None,
         }
-        generation_config["input"] = input_identity
-    payload = {
-        "format": 1,
+    return {
+        "format": 1 if legacy else 2,
         "languages": sorted(layout.languages),
         "generation": generation_config,
     }
+
+
+def _identity_from_payload(config: dict, layout, payload: dict) -> tuple[str, str]:
     encoded = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")
@@ -463,6 +471,17 @@ def _corpus_identity(config: dict, layout) -> tuple[str, str]:
     return corpus_id, fingerprint
 
 
+def _corpus_identity(config: dict, layout) -> tuple[str, str]:
+    """Return a model-independent semantic corpus ID and fingerprint."""
+    return _identity_from_payload(config, layout, _identity_payload(config, layout))
+
+
+def _legacy_corpus_identity(config: dict, layout) -> tuple[str, str]:
+    return _identity_from_payload(
+        config, layout, _identity_payload(config, layout, legacy=True),
+    )
+
+
 def _corpus_paths(config: dict, layout, corpus_id: str) -> tuple[Path, Path]:
     output_value = config.get("output")
     if output_value:
@@ -475,6 +494,86 @@ def _corpus_paths(config: dict, layout, corpus_id: str) -> tuple[Path, Path]:
 
 def _partial_corpus_path(output: Path) -> Path:
     return output.with_suffix(".partial.jsonl")
+
+
+def _rewrite_partial_fingerprint(path: Path, old_fingerprint: str,
+                                 new_fingerprint: str) -> bool:
+    if not path.is_file():
+        return False
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    if not lines:
+        return False
+    header = json.loads(lines[0])
+    checkpoint = header.get("_checkpoint", {}) if isinstance(header, dict) else {}
+    if checkpoint.get("fingerprint") != old_fingerprint:
+        return False
+    checkpoint["fingerprint"] = new_fingerprint
+    checkpoint["identity_format"] = 2
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(header, ensure_ascii=False) + "\n" + "".join(lines[1:]),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return True
+
+
+def _migrate_legacy_corpus(config: dict, layout, *, corpus_id: str,
+                           fingerprint: str, legacy_id: str,
+                           legacy_fingerprint: str) -> bool:
+    """Move a v1 cache to the semantic v2 identity without losing progress."""
+    if fingerprint == legacy_fingerprint:
+        return False
+    output, report_path = _corpus_paths(config, layout, corpus_id)
+    partial_path = _partial_corpus_path(output)
+    old_output, old_report = _corpus_paths(config, layout, legacy_id)
+    old_partial = _partial_corpus_path(old_output)
+    same_paths = old_output == output
+    old_paths = (old_output, old_report, old_partial)
+    new_paths = (output, report_path, partial_path)
+    if not any(path.is_file() for path in old_paths):
+        return False
+    if not same_paths and any(path.is_file() for path in new_paths):
+        logger.warning(
+            "legacy corpus migration skipped because target already exists old=%s new=%s",
+            old_output.parent, output.parent,
+        )
+        return False
+    if not same_paths:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        for source, destination in zip(old_paths, new_paths):
+            if source.is_file():
+                source.replace(destination)
+    migrated = _rewrite_partial_fingerprint(
+        partial_path, legacy_fingerprint, fingerprint,
+    )
+    if report_path.is_file():
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        if report.get("fingerprint") == legacy_fingerprint:
+            report.update({
+                "corpus_id": corpus_id,
+                "fingerprint": fingerprint,
+                "identity_format": 2,
+                "migrated_from": legacy_id,
+                "output": str(output.resolve()),
+            })
+            temporary = report_path.with_suffix(report_path.suffix + ".tmp")
+            temporary.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
+            )
+            temporary.replace(report_path)
+            migrated = True
+    if migrated and not same_paths:
+        try:
+            old_output.parent.rmdir()
+        except OSError:
+            pass
+    if migrated:
+        logger.info(
+            "text corpus identity migrated format=1->2 old=%s new=%s",
+            legacy_id, corpus_id,
+        )
+    return migrated
 
 
 def _load_partial_rows(path: Path, fingerprint: str) -> list[GeneratedText]:
@@ -522,7 +621,9 @@ def _append_partial_rows(path: Path, fingerprint: str,
     if not path.exists():
         temporary = path.with_suffix(path.suffix + ".tmp")
         temporary.write_text(json.dumps({
-            "_checkpoint": {"format": 1, "fingerprint": fingerprint},
+            "_checkpoint": {
+                "format": 1, "identity_format": 2, "fingerprint": fingerprint,
+            },
         }, ensure_ascii=False) + "\n", encoding="utf-8")
         temporary.replace(path)
     with path.open("a", encoding="utf-8") as stream:
@@ -575,6 +676,14 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     provider = str(config.get("provider", "builtin"))
     total = int(config.get("sentences_per_language", 100))
     corpus_id, fingerprint = _corpus_identity(config, layout)
+    legacy_id, legacy_fingerprint = _legacy_corpus_identity(config, layout)
+    reuse = bool(config.get("reuse", True))
+    overwrite = bool(config.get("overwrite", False))
+    if reuse and not overwrite:
+        _migrate_legacy_corpus(
+            config, layout, corpus_id=corpus_id, fingerprint=fingerprint,
+            legacy_id=legacy_id, legacy_fingerprint=legacy_fingerprint,
+        )
     output, report_path = _corpus_paths(config, layout, corpus_id)
     partial_path = _partial_corpus_path(output)
     logger.info(
@@ -591,8 +700,6 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
             "target_sentences=%d",
             request_batch_size, estimated_requests, total * len(layout.languages),
         )
-    reuse = bool(config.get("reuse", True))
-    overwrite = bool(config.get("overwrite", False))
     if overwrite or not reuse:
         partial_path.unlink(missing_ok=True)
     cache_status = "missing"
@@ -772,6 +879,7 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     temporary.replace(output)
     report = {
         "format": 1,
+        "identity_format": 2,
         "corpus_id": corpus_id,
         "fingerprint": fingerprint,
         "provider": provider,

@@ -8,7 +8,8 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
-from tts_trainer.text_generation import (_openai_compatible_request, generate_texts,
+from tts_trainer.text_generation import (_corpus_paths, _legacy_corpus_identity,
+                                         _openai_compatible_request, generate_texts,
                                          text_corpus_path,
                                          validate_text_generation_config)
 from tts_trainer.experiments import resolve_experiment
@@ -89,6 +90,7 @@ class TextGenerationTests(unittest.TestCase):
             first_raw, first_layout = resolve_experiment(first_config)
             first_path = text_corpus_path(first_raw["text_generation"], first_layout)
 
+            settings["batch_size"] = 100
             settings["request_batch_size"] = 50
             second_config = self._config(
                 root, settings, languages=("en",), filename="larger-requests.json",
@@ -96,6 +98,48 @@ class TextGenerationTests(unittest.TestCase):
             second_raw, second_layout = resolve_experiment(second_config)
             second_path = text_corpus_path(second_raw["text_generation"], second_layout)
             self.assertEqual(first_path, second_path)
+
+    def test_legacy_batch_hashed_checkpoint_is_migrated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._config(root, {
+                "provider": "openai_compatible",
+                "endpoint": "http://local/v1",
+                "model": "text-model",
+                "sentences_per_language": 2,
+                "batch_size": 20,
+            }, languages=("en",))
+            raw, layout = resolve_experiment(config)
+            text_config = raw["text_generation"]
+            legacy_id, legacy_fingerprint = _legacy_corpus_identity(text_config, layout)
+            legacy_output, _ = _corpus_paths(text_config, layout, legacy_id)
+            legacy_partial = legacy_output.with_suffix(".partial.jsonl")
+            legacy_partial.parent.mkdir(parents=True)
+            legacy_partial.write_text(
+                json.dumps({
+                    "_checkpoint": {"format": 1, "fingerprint": legacy_fingerprint},
+                }) + "\n" + json.dumps({
+                    "text": "The first persisted sentence is valid.",
+                    "language": "en", "category": "daily",
+                    "source": "openai_compatible",
+                }) + "\n",
+                encoding="utf-8",
+            )
+            calls = 0
+
+            def requester(_raw, _prompt):
+                nonlocal calls
+                calls += 1
+                return json.dumps([{
+                    "text": "The recovered second sentence is valid.",
+                    "category": "daily",
+                }])
+
+            output = generate_texts(config, requester=requester)
+            self.assertEqual(calls, 1)
+            self.assertEqual(len(self._rows(output)), 2)
+            self.assertNotEqual(output, legacy_output)
+            self.assertFalse(legacy_partial.exists())
 
     def test_file_provider_filters_languages_and_duplicates(self):
         with tempfile.TemporaryDirectory() as directory:
