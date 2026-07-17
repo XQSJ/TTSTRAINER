@@ -213,6 +213,39 @@ class SampleGenerationTests(unittest.TestCase):
             self.assertEqual(first_audio, second_audio)
             self.assertNotEqual(first_metadata.parent, second_metadata.parent)
 
+    def test_reducing_languages_reuses_audio_and_rewrites_metadata_subset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            metadata = generate_samples(config, model_loader=loader)
+            original_audio = tuple(
+                item.audio for item in validate_manifest(metadata, 8000).items
+            )
+
+            reduced_texts = root / "reduced-texts.csv"
+            with reduced_texts.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=["text", "language"])
+                writer.writeheader()
+                writer.writerow({"text": "Hello world", "language": "en"})
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["experiment"]["languages"] = ["en"]
+            raw["generation"]["text_manifest"] = str(reduced_texts)
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            def must_not_load(*_args, **_kwargs):
+                self.fail("reduced selection should reuse existing voice WAV")
+
+            reduced_metadata = generate_samples(config, model_loader=must_not_load)
+            reduced_report = validate_manifest(reduced_metadata, 8000)
+            self.assertEqual(len(reduced_report.items), 1)
+            self.assertEqual(reduced_report.items[0].language, "en")
+            self.assertTrue(all(path.is_file() for path in original_audio))
+
     def test_legacy_model_wavs_are_migrated_to_shared_voice_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

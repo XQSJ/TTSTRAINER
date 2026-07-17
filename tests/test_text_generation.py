@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 import urllib.error
@@ -75,6 +76,109 @@ class TextGenerationTests(unittest.TestCase):
             self.assertIn("text_corpora", second.parts)
             self.assertNotIn("reader-a", second.parts)
             self.assertNotIn("reader-b", second.parts)
+
+    def test_smaller_language_selection_reuses_compatible_larger_corpus(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = {
+                "provider": "openai_compatible",
+                "endpoint": "http://local/v1",
+                "model": "text-model",
+                "sentences_per_language": 4,
+                "request_batch_size": 4,
+            }
+            larger = self._config(
+                root, settings, languages=("en", "fr"), filename="larger.json",
+            )
+
+            def requester(_config, prompt):
+                language = "fr" if "language code fr" in prompt else "en"
+                prefix = "Phrase française" if language == "fr" else "English sentence"
+                return json.dumps([
+                    {"text": f"{prefix} number {index} is valid.", "category": "daily"}
+                    for index in range(1, 5)
+                ])
+
+            larger_output = generate_texts(larger, requester=requester)
+            larger_english = [
+                row["text"] for row in self._rows(larger_output)
+                if row["language"] == "en"
+            ]
+            larger_report = larger_output.with_suffix(".report.json")
+            legacy_report = json.loads(larger_report.read_text(encoding="utf-8"))
+            legacy_report.pop("family_fingerprint")
+            larger_report.write_text(json.dumps(legacy_report), encoding="utf-8")
+
+            reduced_settings = {**settings, "sentences_per_language": 2}
+            reduced = self._config(
+                root, reduced_settings, languages=("en",), filename="reduced.json",
+            )
+
+            def must_not_request(*_args, **_kwargs):
+                self.fail("compatible larger corpus should satisfy reduced selection")
+
+            reduced_output = generate_texts(reduced, requester=must_not_request)
+            reduced_rows = self._rows(reduced_output)
+            self.assertNotEqual(reduced_output, larger_output)
+            self.assertEqual(len(reduced_rows), 2)
+            self.assertEqual(
+                [row["text"] for row in reduced_rows], larger_english[:2],
+            )
+
+            incompatible_settings = {
+                **reduced_settings, "model": "different-text-model",
+            }
+            incompatible = self._config(
+                root, incompatible_settings, languages=("en",),
+                filename="incompatible.json",
+            )
+            incompatible_calls = 0
+
+            def incompatible_requester(_config, _prompt):
+                nonlocal incompatible_calls
+                incompatible_calls += 1
+                return json.dumps([
+                    {"text": f"Different model sentence {index} is valid.",
+                     "category": "daily"}
+                    for index in range(1, 3)
+                ])
+
+            generate_texts(incompatible, requester=incompatible_requester)
+            self.assertEqual(incompatible_calls, 1)
+
+    def test_larger_selection_requests_only_missing_compatible_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base_settings = {
+                "provider": "openai_compatible",
+                "endpoint": "http://local/v1",
+                "model": "text-model",
+                "sentences_per_language": 2,
+                "request_batch_size": 10,
+            }
+            base = self._config(root, base_settings, languages=("en",))
+            generate_texts(base, requester=lambda *_args: json.dumps([
+                {"text": "Existing sentence number one is valid.", "category": "daily"},
+                {"text": "Existing sentence number two is valid.", "category": "daily"},
+            ]))
+
+            expanded = self._config(
+                root, {**base_settings, "sentences_per_language": 4},
+                languages=("en",), filename="expanded.json",
+            )
+            requested_counts = []
+
+            def requester(_config, prompt):
+                match = re.search(r"Create (\d+) unique", prompt)
+                requested_counts.append(int(match.group(1)))
+                return json.dumps([
+                    {"text": "New sentence number three is valid.", "category": "daily"},
+                    {"text": "New sentence number four is valid.", "category": "daily"},
+                ])
+
+            output = generate_texts(expanded, requester=requester)
+            self.assertEqual(requested_counts, [2])
+            self.assertEqual(len(self._rows(output)), 4)
 
     def test_request_batch_size_does_not_change_corpus_identity(self):
         with tempfile.TemporaryDirectory() as directory:

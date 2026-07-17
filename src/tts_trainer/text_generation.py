@@ -12,8 +12,10 @@ import time
 import urllib.error
 import urllib.request
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 from .experiments import prepare_experiment, resolve_experiment
 from .frontend import frontend_from_config
@@ -553,6 +555,14 @@ def _identity_from_payload(config: dict, layout, payload: dict) -> tuple[str, st
     return corpus_id, fingerprint
 
 
+def _payload_fingerprint(payload: dict) -> str:
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _corpus_identity(config: dict, layout) -> tuple[str, str]:
     """Return a model-independent semantic corpus ID and fingerprint."""
     return _identity_from_payload(config, layout, _identity_payload(config, layout))
@@ -562,6 +572,23 @@ def _legacy_corpus_identity(config: dict, layout) -> tuple[str, str]:
     return _identity_from_payload(
         config, layout, _identity_payload(config, layout, legacy=True),
     )
+
+
+def _corpus_family_fingerprint(config: dict, layout) -> str:
+    """Identify compatible text pools while ignoring language/count selection."""
+    payload = _identity_payload(config, layout)
+    payload["format"] = "text-family-v1"
+    payload.pop("languages", None)
+    payload["generation"].pop("sentences_per_language", None)
+    return _payload_fingerprint(payload)
+
+
+def _selection_fingerprint(config: dict, languages: list[str], target: int) -> str:
+    """Recreate a v2 corpus fingerprint for safe legacy-pool discovery."""
+    selected = deepcopy(config)
+    selected["sentences_per_language"] = target
+    layout = SimpleNamespace(languages=tuple(languages))
+    return _payload_fingerprint(_identity_payload(selected, layout))
 
 
 def _corpus_paths(config: dict, layout, corpus_id: str) -> tuple[Path, Path]:
@@ -576,6 +603,70 @@ def _corpus_paths(config: dict, layout, corpus_id: str) -> tuple[Path, Path]:
 
 def _partial_corpus_path(output: Path) -> Path:
     return output.with_suffix(".partial.jsonl")
+
+
+def _compatible_corpus_rows(config: dict, layout, output: Path, target: int,
+                            family_fingerprint: str) -> list[GeneratedText]:
+    """Reuse accepted rows from compatible larger/multilingual corpora."""
+    if config.get("output"):
+        roots = [output.parent]
+    else:
+        roots = [Path(config.get("root") or layout.dataset_dir.parent / "text_corpora")]
+    compatible = []
+    for root in roots:
+        for report_path in root.glob("*/texts.report.json"):
+            candidate_output = report_path.with_name("texts.csv")
+            if candidate_output.resolve() == output.resolve() or not candidate_output.is_file():
+                continue
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                languages = [str(value) for value in report.get("languages", [])]
+                candidate_target = int(report.get("target_per_language", 0))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            if report.get("provider") != config.get("provider", "builtin"):
+                continue
+            family_matches = report.get("family_fingerprint") == family_fingerprint
+            legacy_matches = (
+                report.get("identity_format") == 2
+                and report.get("fingerprint")
+                == _selection_fingerprint(config, languages, candidate_target)
+            )
+            if not family_matches and not legacy_matches:
+                continue
+            accepted = report.get("accepted", {})
+            coverage = sum(
+                min(int(accepted.get(language, 0)), target)
+                for language in layout.languages
+            )
+            if coverage:
+                compatible.append((coverage, candidate_output))
+    compatible.sort(key=lambda item: item[0], reverse=True)
+    rows = []
+    counts = Counter()
+    seen = set()
+    sources = []
+    for _, candidate_output in compatible:
+        used = 0
+        for row in _file_rows(candidate_output, layout.language_specs):
+            key = (row.language, normalize(row.text, row.language).casefold())
+            if counts[row.language] >= target or key in seen:
+                continue
+            seen.add(key)
+            counts[row.language] += 1
+            rows.append(row)
+            used += 1
+        if used:
+            sources.append(str(candidate_output))
+        if all(counts[language] >= target for language in layout.languages):
+            break
+    if rows:
+        logger.info(
+            "TEXT REUSE | reused=%d | counts=%s | compatible_corpora=%d | sources=%s",
+            len(rows), dict(counts), len(sources), ";".join(sources),
+            extra={"tts_style": "success"},
+        )
+    return rows
 
 
 def _rewrite_partial_fingerprint(path: Path, old_fingerprint: str,
@@ -758,6 +849,7 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     provider = str(config.get("provider", "builtin"))
     total = int(config.get("sentences_per_language", 100))
     corpus_id, fingerprint = _corpus_identity(config, layout)
+    family_fingerprint = _corpus_family_fingerprint(config, layout)
     legacy_id, legacy_fingerprint = _legacy_corpus_identity(config, layout)
     reuse = bool(config.get("reuse", True))
     overwrite = bool(config.get("overwrite", False))
@@ -797,6 +889,14 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
         )
     if cache_status == "complete":
         partial_path.unlink(missing_ok=True)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        if report.get("family_fingerprint") != family_fingerprint:
+            report["family_fingerprint"] = family_fingerprint
+            temporary_report = report_path.with_suffix(report_path.suffix + ".tmp")
+            temporary_report.write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
+            )
+            temporary_report.replace(report_path)
         logger.info("text corpus cache hit corpus=%s output=%s", corpus_id, output)
         return output
     if cache_status == "partial" and provider != "openai_compatible":
@@ -805,6 +905,12 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
             "text_generation.overwrite=true after fixing the source"
         )
     partial_counts = Counter()
+    reusable_candidates = []
+    if reuse and not overwrite and cache_status == "missing" \
+            and provider == "openai_compatible":
+        reusable_candidates = _compatible_corpus_rows(
+            config, layout, output, total, family_fingerprint,
+        )
 
     def save_request_batch(batch: list[GeneratedText]) -> None:
         _append_partial_rows(partial_path, fingerprint, batch)
@@ -841,17 +947,19 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
         candidates = _file_rows(input_path, layout.language_specs)
         logger.info("file text import input=%s selected=%d", input_path, len(candidates))
     elif provider == "openai_compatible":
-        candidates = _load_partial_rows(partial_path, fingerprint) if reuse else []
-        partial_counts.update(row.language for row in candidates)
-        if candidates:
+        checkpoint_candidates = _load_partial_rows(partial_path, fingerprint) if reuse else []
+        candidates = [*reusable_candidates, *checkpoint_candidates]
+        partial_counts.update(row.language for row in checkpoint_candidates)
+        if checkpoint_candidates:
             logger.info(
                 "text corpus request checkpoint resume corpus=%s persisted=%d counts=%s path=%s",
-                corpus_id, len(candidates), dict(partial_counts), partial_path,
+                corpus_id, len(checkpoint_candidates), dict(partial_counts), partial_path,
             )
 
         configured_batch = _request_batch_size(config)
+        available_counts = Counter(row.language for row in candidates)
         for language, spec in layout.language_specs.items():
-            existing = partial_counts[language]
+            existing = available_counts[language]
             missing_raw = max(total - existing, 0)
             if not missing_raw:
                 continue
@@ -970,6 +1078,7 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
         "identity_format": 2,
         "corpus_id": corpus_id,
         "fingerprint": fingerprint,
+        "family_fingerprint": family_fingerprint,
         "provider": provider,
         "output": str(output.resolve()),
         "languages": list(layout.languages),
