@@ -7,6 +7,8 @@ import logging
 import os
 import random
 import re
+import ssl
+import time
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -255,7 +257,8 @@ def _openai_compatible_config(config: dict) -> dict:
         raise ValueError("text_generation.openai_compatible must be an object")
     resolved = dict(nested)
     for key in ("endpoint", "base_url", "model", "api_key_env", "temperature",
-                "timeout_seconds", "batch_size", "max_rounds"):
+                "timeout_seconds", "batch_size", "max_rounds", "max_retries",
+                "retry_backoff_seconds", "retry_max_backoff_seconds"):
         if key in config:
             resolved[key] = config[key]
     endpoint = str(resolved.get("endpoint") or resolved.get("base_url") or "").rstrip("/")
@@ -285,7 +288,52 @@ def validate_text_generation_config(config: dict) -> None:
     if provider == "file" and not config.get("input"):
         raise ValueError("text_generation provider=file requires input")
     if provider == "openai_compatible":
-        _openai_compatible_config(config)
+        resolved = _openai_compatible_config(config)
+        if float(resolved.get("timeout_seconds", 180)) <= 0:
+            raise ValueError("text_generation.timeout_seconds must be greater than zero")
+        if int(resolved.get("max_retries", 4)) < 0:
+            raise ValueError("text_generation.max_retries cannot be negative")
+        if float(resolved.get("retry_backoff_seconds", 2)) < 0:
+            raise ValueError("text_generation.retry_backoff_seconds cannot be negative")
+        if float(resolved.get("retry_max_backoff_seconds", 30)) < 0:
+            raise ValueError("text_generation.retry_max_backoff_seconds cannot be negative")
+
+
+TRANSIENT_HTTP_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+
+
+def _retry_delay(resolved: dict, failed_attempt: int,
+                 retry_after: str | None = None) -> float:
+    base = float(resolved.get("retry_backoff_seconds", 2))
+    maximum = float(resolved.get("retry_max_backoff_seconds", 30))
+    delay = base * (2 ** max(0, failed_attempt - 1))
+    if retry_after:
+        try:
+            delay = max(delay, float(retry_after))
+        except ValueError:
+            pass
+    return min(maximum, delay) if maximum > 0 else 0.0
+
+
+def _wait_before_retry(resolved: dict, *, failed_attempt: int,
+                       total_attempts: int, reason: str,
+                       retry_after: str | None = None) -> None:
+    delay = _retry_delay(resolved, failed_attempt, retry_after)
+    logger.warning(
+        "text LLM request transient failure attempt=%d/%d reason=%s "
+        "retry_in=%.1fs next_attempt=%d/%d",
+        failed_attempt, total_attempts, reason, delay,
+        failed_attempt + 1, total_attempts,
+    )
+    if delay:
+        time.sleep(delay)
+
+
+def _is_transient_url_error(exc: urllib.error.URLError) -> bool:
+    reason = exc.reason
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return False
+    return isinstance(reason, (TimeoutError, ConnectionError, OSError, ssl.SSLError))
 
 
 def _openai_compatible_request(config: dict, prompt: str) -> str:
@@ -309,29 +357,61 @@ def _openai_compatible_request(config: dict, prompt: str) -> str:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(endpoint + "/chat/completions", data=payload,
                                      headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(
-            request, timeout=float(resolved.get("timeout_seconds", 120)),
-        ) as response:
-            raw = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
+    timeout = float(resolved.get("timeout_seconds", 180))
+    max_retries = max(0, int(resolved.get("max_retries", 4)))
+    total_attempts = max_retries + 1
+    for attempt in range(1, total_attempts + 1):
         try:
-            detail = exc.read(2048).decode("utf-8", errors="replace").strip()
-        except Exception:
-            detail = ""
-        suffix = f": {detail}" if detail else ""
-        hint = " Check that the API key belongs to this endpoint and plan." \
-            if exc.code in {401, 403} else ""
-        raise RuntimeError(
-            f"text LLM request failed with HTTP {exc.code}{suffix}.{hint}"
-        ) from None
-    except urllib.error.URLError as exc:
-        raise RuntimeError(
-            "text LLM request failed before receiving an HTTP response: "
-            f"{exc.reason}. Check text_generation.endpoint and the server's "
-            "HTTPS_PROXY/NO_PROXY settings."
-        ) from None
-    return str(raw["choices"][0]["message"]["content"])
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+            return str(raw["choices"][0]["message"]["content"])
+        except urllib.error.HTTPError as exc:
+            if exc.code in TRANSIENT_HTTP_STATUSES and attempt < total_attempts:
+                retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                _wait_before_retry(
+                    resolved, failed_attempt=attempt, total_attempts=total_attempts,
+                    reason=f"HTTP_{exc.code}", retry_after=retry_after,
+                )
+                continue
+            try:
+                detail = exc.read(2048).decode("utf-8", errors="replace").strip()
+            except Exception:
+                detail = ""
+            suffix = f": {detail}" if detail else ""
+            hint = " Check that the API key belongs to this endpoint and plan." \
+                if exc.code in {401, 403} else ""
+            raise RuntimeError(
+                f"text LLM request failed with HTTP {exc.code}{suffix}.{hint}"
+            ) from None
+        except urllib.error.URLError as exc:
+            if _is_transient_url_error(exc) and attempt < total_attempts:
+                _wait_before_retry(
+                    resolved, failed_attempt=attempt, total_attempts=total_attempts,
+                    reason=type(exc.reason).__name__,
+                )
+                continue
+            raise RuntimeError(
+                "text LLM request failed before receiving an HTTP response after "
+                f"{attempt} attempt(s): {exc.reason}. Check text_generation.endpoint "
+                "and the server's HTTPS_PROXY/NO_PROXY settings. Saved text batches "
+                "can be resumed by running the same command again."
+            ) from None
+        except ssl.SSLCertVerificationError as exc:
+            raise RuntimeError(
+                f"text LLM TLS certificate verification failed: {exc}"
+            ) from None
+        except (TimeoutError, ConnectionError, ssl.SSLError) as exc:
+            if attempt < total_attempts:
+                _wait_before_retry(
+                    resolved, failed_attempt=attempt, total_attempts=total_attempts,
+                    reason=type(exc).__name__,
+                )
+                continue
+            raise RuntimeError(
+                f"text LLM request failed after {attempt} attempt(s): {exc}. "
+                "Saved text batches can be resumed by running the same command again."
+            ) from None
+    raise AssertionError("text LLM retry loop ended unexpectedly")
 
 
 def _parse_llm_rows(content: str, language: str) -> list[GeneratedText]:
@@ -416,13 +496,15 @@ def _identity_payload(config: dict, layout, *, legacy: bool = False) -> dict:
         # and must not prevent migration of an older checkpoint.
         operational = {
             "enabled", "output", "root", "corpus_name", "reuse", "overwrite",
-            "request_batch_size",
+            "request_batch_size", "max_retries", "retry_backoff_seconds",
+            "retry_max_backoff_seconds",
         }
     else:
         operational = {
             "enabled", "output", "root", "corpus_name", "reuse", "overwrite",
             "batch_size", "request_batch_size", "timeout_seconds", "max_rounds",
-            "refill_rounds", "allow_fewer", "api_key_env",
+            "refill_rounds", "allow_fewer", "api_key_env", "max_retries",
+            "retry_backoff_seconds", "retry_max_backoff_seconds",
         }
 
     def strip_operational(value):
@@ -692,13 +774,19 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     )
     if provider == "openai_compatible":
         request_batch_size = _request_batch_size(config)
+        request_config = _openai_compatible_config(config)
         estimated_requests = len(layout.languages) * (
             (total + request_batch_size - 1) // request_batch_size
         )
         logger.info(
             "LLM request plan batch_size=%d estimated_min_requests=%d "
-            "target_sentences=%d",
+            "target_sentences=%d timeout_seconds=%g max_retries=%d "
+            "retry_backoff_seconds=%g retry_max_backoff_seconds=%g",
             request_batch_size, estimated_requests, total * len(layout.languages),
+            float(request_config.get("timeout_seconds", 180)),
+            int(request_config.get("max_retries", 4)),
+            float(request_config.get("retry_backoff_seconds", 2)),
+            float(request_config.get("retry_max_backoff_seconds", 30)),
         )
     if overwrite or not reuse:
         partial_path.unlink(missing_ok=True)

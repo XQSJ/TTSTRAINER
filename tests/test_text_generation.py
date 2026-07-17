@@ -92,12 +92,42 @@ class TextGenerationTests(unittest.TestCase):
 
             settings["batch_size"] = 100
             settings["request_batch_size"] = 50
+            settings["timeout_seconds"] = 300
+            settings["max_retries"] = 8
+            settings["retry_backoff_seconds"] = 0.1
             second_config = self._config(
                 root, settings, languages=("en",), filename="larger-requests.json",
             )
             second_raw, second_layout = resolve_experiment(second_config)
             second_path = text_corpus_path(second_raw["text_generation"], second_layout)
             self.assertEqual(first_path, second_path)
+
+    def test_timeout_is_retried_and_then_succeeds(self):
+        config = {
+            "provider": "openai_compatible",
+            "endpoint": "https://llm.example/v1",
+            "model": "text-model",
+            "api_key_env": None,
+            "max_retries": 1,
+            "retry_backoff_seconds": 0,
+        }
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "choices": [{"message": {"content": "[]"}}],
+                }).encode("utf-8")
+
+        with patch("tts_trainer.text_generation.urllib.request.urlopen",
+                   side_effect=[TimeoutError("read timed out"), Response()]) as urlopen:
+            self.assertEqual(_openai_compatible_request(config, "prompt"), "[]")
+        self.assertEqual(urlopen.call_count, 2)
 
     def test_legacy_batch_hashed_checkpoint_is_migrated(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -125,6 +155,13 @@ class TextGenerationTests(unittest.TestCase):
                 }) + "\n",
                 encoding="utf-8",
             )
+            updated = json.loads(config.read_text(encoding="utf-8"))
+            updated["text_generation"].update({
+                "request_batch_size": 100,
+                "max_retries": 8,
+                "retry_backoff_seconds": 0.1,
+            })
+            config.write_text(json.dumps(updated), encoding="utf-8")
             calls = 0
 
             def requester(_raw, _prompt):

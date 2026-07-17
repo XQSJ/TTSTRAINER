@@ -950,6 +950,22 @@ datasets/text_corpora/<corpus-id>/
 }
 ```
 
+网络超时、连接重置以及 HTTP 408/429/5xx 会自动重试并指数退避，默认最多重试 4 次。
+这些参数只控制执行，不参与语料指纹。大批量或较慢接口可以这样调整：
+
+```json
+"text_generation": {
+  "request_batch_size": 100,
+  "timeout_seconds": 300,
+  "max_retries": 6,
+  "retry_backoff_seconds": 2,
+  "retry_max_backoff_seconds": 30
+}
+```
+
+每次请求成功后才会写入 `texts.partial.jsonl`。某批在所有重试后仍失败时，重新执行原命令
+会从最后一次成功写盘的数量继续；已经保存的文本不会重新请求。
+
 旧版本曾错误地将 `text_generation.batch_size` 放进指纹。新版第一次运行时会自动把
 旧的 `texts.csv`、报告或 `texts.partial.jsonl` 迁移到语义指纹 v2，保留已有断点。
 `batch_size` 继续作为兼容别名，但新配置应使用含义更明确的 `request_batch_size`。
