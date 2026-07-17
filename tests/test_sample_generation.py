@@ -28,6 +28,8 @@ class FakeCloneModel:
         self.calls = calls
 
     def create_voice_clone_prompt(self, **kwargs):
+        if isinstance(kwargs["ref_audio"], Path):
+            raise TypeError("Qwen does not accept pathlib.Path reference inputs")
         self.calls.append(("prompt", kwargs))
         return ["reusable-prompt"]
 
@@ -146,6 +148,7 @@ class SampleGenerationTests(unittest.TestCase):
 
             generate_samples(config, model_loader=resumed_loader)
             self.assertEqual([call[0] for call in resumed_calls], ["load", "prompt", "clone"])
+            self.assertIsInstance(resumed_calls[1][1]["ref_audio"], str)
 
     def test_uploaded_reference_uses_base_model_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -157,6 +160,7 @@ class SampleGenerationTests(unittest.TestCase):
 
             metadata = generate_samples(config, model_loader=loader)
             self.assertEqual([call[0] for call in calls], ["load", "prompt", "clone"])
+            self.assertIsInstance(calls[1][1]["ref_audio"], str)
             voice_revisions = list((metadata.parent.parent / "voices/shared_voice_a").iterdir())
             self.assertTrue((voice_revisions[0] / "references/voice_a.uploaded.wav").is_file())
             with wave.open(str(validate_manifest(metadata, 8000).items[0].audio), "rb") as wav:

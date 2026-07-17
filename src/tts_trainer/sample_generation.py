@@ -239,6 +239,11 @@ def _copy_reference(source: Path, destination: Path) -> Path:
     return destination
 
 
+def _qwen_reference_input(value):
+    """Qwen accepts string paths, not pathlib.Path objects."""
+    return str(value) if isinstance(value, Path) else value
+
+
 def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path | None = None,
                      model_loader: Callable = load_qwen_teacher) -> Path:
     """Generate a named VITS dataset using the official Qwen teacher runtime.
@@ -410,7 +415,7 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         )
         logger.info("creating reusable clone prompt speaker=%s mode=%s", speaker, mode)
         clone_prompt = clone_model.create_voice_clone_prompt(
-            ref_audio=reference_input,
+            ref_audio=_qwen_reference_input(reference_input),
             ref_text=reference_text or None,
             x_vector_only_mode=x_vector_only,
         )
