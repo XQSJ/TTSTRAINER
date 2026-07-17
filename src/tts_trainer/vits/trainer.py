@@ -20,7 +20,7 @@ from ..frontend import (FrontendContract, frontend_contract_from_config,
                         frontend_lock_path, load_frontend_contract,
                         build_frontend_conformance)
 from ..manifest import validate_manifest
-from ..logging_utils import configure_logging
+from ..logging_utils import configure_logging_from_config, format_duration
 from ..quality import run_audio_quality_gate
 from ..semantic_quality import run_semantic_quality_gate
 from ..text import Vocabulary
@@ -140,7 +140,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         config_path, metadata_override=metadata_path,
         output_override=output_dir, device_override=device_name,
     )
-    configure_logging(raw.get("logging", {}).get("level", "INFO"))
+    configure_logging_from_config(raw)
     prepare_experiment(layout, raw, config_path)
     logger.info("training setup model=%s languages=%s", layout.name, ",".join(layout.languages))
     audio_config = AudioConfig(**raw["audio"])
@@ -365,7 +365,10 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     )
 
     for epoch in range(start_epoch, raw["training"]["epochs"] + 1):
-        logger.info("epoch=%d status=started batches=%d", epoch, len(loader))
+        logger.info(
+            "EPOCH START | epoch=%d/%d | batches=%d | global_step=%d",
+            epoch, raw["training"]["epochs"], len(loader), global_step,
+        )
         epoch_totals = Counter()
         epoch_steps = 0
         for batch_index, batch in enumerate(loader, 1):
@@ -413,21 +416,23 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 steps_since_log = max(global_step - last_log_step, 1)
                 seconds_per_step = (now - last_log_time) / steps_since_log
                 remaining_steps = max(planned_total_steps - global_step, 0)
-                eta = f"{remaining_steps * seconds_per_step:.1f}s"
+                eta = format_duration(remaining_steps * seconds_per_step)
                 overall_progress = min(
                     global_step / max(planned_total_steps, 1) * 100.0, 100.0,
                 )
                 logger.info(
-                    "train progress=%.1f%% epoch=%d batch=%d/%d step=%d "
-                    "step_time=%.2fs eta=%s generator=%.4f discriminator=%.4f mel=%.4f",
-                    overall_progress, epoch, batch_index, len(loader), global_step,
+                    "TRAIN %6.2f%% | epoch=%d/%d | batch=%d/%d | step=%d/%d | "
+                    "step_time=%.2fs | ETA=%s | generator=%.4f | discriminator=%.4f | mel=%.4f",
+                    overall_progress, epoch, raw["training"]["epochs"],
+                    batch_index, len(loader), global_step, planned_total_steps,
                     seconds_per_step, eta, loss_g.item(), loss_d.item(), loss_mel.item(),
+                    extra={"tts_style": "progress"},
                 )
                 last_log_time = now
                 last_log_step = global_step
             checkpoint_every = raw["training"].get("checkpoint_every_steps", 5000)
             if global_step % checkpoint_every == 0:
-                logger.info("checkpoint step=%d status=saving", global_step)
+                logger.info("CHECKPOINT SAVE | step=%d", global_step)
                 save_training_checkpoint(
                     destination / f"step-{global_step:09d}", generator=generator,
                     discriminator=discriminator, optimizer_g=optimizer_g, optimizer_d=optimizer_d,
@@ -456,7 +461,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         )
         if should_evaluate:
             logger.info(
-                "validation epoch=%d status=started batches=%d",
+                "VALIDATION START | epoch=%d | batches=%d",
                 epoch, len(validation_loader),
             )
             validation_metrics = evaluate_validation(
@@ -465,7 +470,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             )
             current_value = float(validation_metrics[selection_metric])
             logger.info(
-                "validation epoch=%d mel=%.4f duration=%.4f kl=%.4f total=%.4f",
+                "VALIDATION DONE | epoch=%d | mel=%.4f | duration=%.4f | kl=%.4f | total=%.4f",
                 epoch, validation_metrics["mel"], validation_metrics["duration"],
                 validation_metrics["kl"], validation_metrics["total"],
             )
@@ -490,8 +495,9 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     metrics={"train": train_metrics, "validation": validation_metrics},
                 )
                 logger.info(
-                    "best checkpoint updated epoch=%d metric=%s value=%.6f path=%s",
+                    "BEST CHECKPOINT | epoch=%d | metric=%s | value=%.6f | path=%s",
                     epoch, selection_metric, best_value, destination / "best",
+                    extra={"tts_style": "success"},
                 )
         selection = {
             "metric": selection_metric,
@@ -510,12 +516,16 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             metrics={"train": train_metrics, "validation": validation_metrics},
         )
         logger.info(
-            "epoch=%d status=completed step=%d elapsed=%.1fs checkpoint=%s",
-            epoch, global_step, time.monotonic() - training_started, destination / "last",
+            "EPOCH DONE | epoch=%d/%d | step=%d | total_elapsed=%s | checkpoint=%s",
+            epoch, raw["training"]["epochs"], global_step,
+            format_duration(time.monotonic() - training_started), destination / "last",
+            extra={"tts_style": "success"},
         )
         if max_steps is not None and global_step >= max_steps: break
     logger.info(
-        "training completed steps=%d elapsed=%.1fs checkpoint=%s",
-        global_step, time.monotonic() - training_started, destination / "last",
+        "TRAINING DONE | steps=%d | elapsed=%s | checkpoint=%s",
+        global_step, format_duration(time.monotonic() - training_started),
+        destination / "last",
+        extra={"tts_style": "success"},
     )
     return destination / "last"

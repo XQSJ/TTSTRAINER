@@ -1212,25 +1212,47 @@ runs/<name>/pipeline-report.json
 终端会持续显示阶段和训练状态，例如：
 
 ```text
-INFO | pipeline | pipeline plan total_stages=7 stages=preflight,generate_texts,...,export
-INFO | pipeline | pipeline progress=1/7 stage=preflight status=started ...
-INFO | pipeline | language ready code=de teacher=qwen:German g2p=espeak-ng:de
-INFO | pipeline | pipeline progress=2/7 stage=generate_texts status=started ...
-INFO | text_generation | text generation completed ...
-INFO | pipeline | pipeline progress=3/7 stage=generate_samples status=started ...
-INFO | sample_generation | generation jobs total=1000 pending=960 cached=40
-INFO | trainer | training plan epochs=1000 max_steps=unlimited log_every_steps=10 ...
-INFO | trainer | train progress=... epoch=1 batch=10/125 step=10 step_time=... eta=... mel=...
-INFO | trainer | checkpoint step=5000 status=saving
-INFO | exporter | ONNX export step=2/5 action=build_graph ...
-INFO | pipeline | pipeline progress=7/7 stage=export status=completed ...
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TTS TRAINING PIPELINE
+Model: model_1
+Languages: zh, en, ja, ko, fr, es, pt
+Stages: preflight | generate_texts | generate_samples | phonemize | validate | train | export
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STAGE 3/7  GENERATE_SAMPLES
+generate or reuse teacher WAV samples
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18:02:34 │ INFO     │ sample_generation │ AUDIO PLAN | total=14000 | pending=14000 | cached=0
+18:05:07 │ INFO     │ sample_generation │ AUDIO   0.29% | completed=40/14000 | new=40/14000 | cached=0 | batch=10/3500 (zh) | speed=18.6/min | ETA=12h 31m 20s
+18:10:12 │ INFO     │ trainer │ train progress=... epoch=1 batch=10/125 step=10 step_time=... eta=... mel=...
 ```
 
-日志级别由内部默认配置的 `logging.level` 控制，也可临时使用环境变量：
+交互终端默认显示颜色；重定向到文件或管道时自动移除 ANSI 颜色码。Qwen、Transformers
+等第三方库默认只显示 WARNING 及 ERROR，避免重复配置日志淹没训练进度。内部专家配置：
+
+```json
+"logging": {
+  "level": "INFO",
+  "color": "auto",
+  "third_party_level": "WARNING",
+  "sample_progress_every_batches": 1
+}
+```
+
+`sample_progress_every_batches=5` 表示每 5 个 Qwen 批次显示一次音频进度。日志选项也可
+临时使用环境变量覆盖：
 
 ```bash
 TTS_TRAINER_LOG_LEVEL=DEBUG PYTHONPATH=src .venv/bin/python -m tts_trainer \
   run-pipeline --config training_configs/train1.json
+```
+
+强制颜色或关闭颜色：
+
+```bash
+TTS_TRAINER_LOG_COLOR=always python -m tts_trainer run-pipeline --config training_configs/train1.json
+NO_COLOR=1 python -m tts_trainer run-pipeline --config training_configs/train1.json
 ```
 
 训练损失输出频率由外层配置的 `training.log_every_steps` 控制。

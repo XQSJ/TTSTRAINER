@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .experiments import prepare_experiment, resolve_experiment
 from .frontend import frontend_from_config
-from .logging_utils import configure_logging
+from .logging_utils import configure_logging_from_config
 from .text import normalize
 
 
@@ -749,7 +749,7 @@ def _cached_corpus_status(output: Path, report_path: Path, fingerprint: str,
 
 def generate_texts(config_path: str | Path, *, requester=_openai_compatible_request) -> Path:
     raw, layout = resolve_experiment(config_path)
-    configure_logging(raw.get("logging", {}).get("level", "INFO"))
+    configure_logging_from_config(raw)
     prepare_experiment(layout, raw, config_path)
     config = raw.get("text_generation", {})
     if not config.get("enabled", False):

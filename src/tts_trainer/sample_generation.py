@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -20,7 +21,8 @@ import torchaudio
 
 from .experiments import prepare_experiment, resolve_experiment
 from .languages import resolve_language_registry
-from .logging_utils import configure_logging
+from .logging_utils import (configure_logging_from_config, format_duration,
+                            log_section)
 from .manifest import read_manifest
 from .qwen_teacher import load_qwen_teacher
 from .text_generation import text_corpus_path
@@ -246,13 +248,17 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     - clone: Base creates a reusable prompt from uploaded reference audio + transcript.
     """
     raw, layout = resolve_experiment(config_path)
-    configure_logging(raw.get("logging", {}).get("level", "INFO"))
+    configure_logging_from_config(raw)
     prepare_experiment(layout, raw, config_path)
     registry = resolve_language_registry(raw.get("language_registry"))
-    logger.info("model=%s languages=%s", layout.name, ",".join(layout.languages))
     generation = raw.get("generation", {})
     if not generation.get("enabled", True):
         raise ValueError("sample generation is disabled in this config")
+    log_section(
+        logger,
+        "QWEN AUDIO DATASET",
+        f"Model: {layout.name}\nLanguages: {', '.join(layout.languages)}",
+    )
 
     text_generation = raw.get("text_generation", {})
     generated_default = None
@@ -329,7 +335,11 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             voice_id, voice_revision,
         )
     pending = jobs if overwrite else [job for job in jobs if not job.output.is_file()]
-    logger.info("generation jobs total=%d pending=%d cached=%d", len(jobs), len(pending), len(jobs) - len(pending))
+    cached_count = len(jobs) - len(pending)
+    logger.info(
+        "AUDIO PLAN | total=%d | pending=%d | cached=%d | output=%s",
+        len(jobs), len(pending), cached_count, wav_root,
+    )
 
     if pending:
         device, load_kwargs = _runtime_kwargs(generation)
@@ -409,9 +419,21 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             raise ValueError("generation.batch_size must be at least 1")
         generation_kwargs = generation.get("generation_kwargs", {})
         target_rate = int(raw["audio"]["sample_rate"])
+        progress_interval = max(
+            1, int(raw.get("logging", {}).get("sample_progress_every_batches", 1)),
+        )
+        generation_started = time.monotonic()
+        total_batches = (len(pending) + batch_size - 1) // batch_size
         for start in range(0, len(pending), batch_size):
             batch = pending[start:start + batch_size]
-            logger.info("generating samples %d-%d/%d", start + 1, start + len(batch), len(pending))
+            batch_number = start // batch_size + 1
+            batch_started = time.monotonic()
+            batch_languages = ",".join(sorted({job.item.language for job in batch}))
+            logger.debug(
+                "audio batch started batch=%d/%d range=%d-%d languages=%s",
+                batch_number, total_batches, start + 1, start + len(batch),
+                batch_languages,
+            )
             wavs, sample_rate = clone_model.generate_voice_clone(
                 text=[job.item.text for job in batch],
                 language=[teacher_languages[job.item.language] for job in batch],
@@ -422,6 +444,28 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
                 raise RuntimeError(f"Qwen returned {len(wavs)} waveforms for a batch of {len(batch)}")
             for job, waveform in zip(batch, wavs):
                 _write_training_wav(job.output, waveform, sample_rate, target_rate)
+            completed_new = start + len(batch)
+            if batch_number % progress_interval == 0 or completed_new == len(pending):
+                elapsed = time.monotonic() - generation_started
+                rate = completed_new / max(elapsed, 1e-9)
+                remaining = len(pending) - completed_new
+                overall_completed = cached_count + completed_new
+                percent = 100.0 * overall_completed / max(len(jobs), 1)
+                logger.info(
+                    "AUDIO %6.2f%% | completed=%d/%d | new=%d/%d | cached=%d | "
+                    "batch=%d/%d (%s) | batch_time=%s | speed=%.1f/min | ETA=%s",
+                    percent, overall_completed, len(jobs), completed_new, len(pending),
+                    cached_count, batch_number, total_batches, batch_languages,
+                    format_duration(time.monotonic() - batch_started), rate * 60,
+                    format_duration(remaining / rate),
+                    extra={"tts_style": "progress"},
+                )
+        logger.info(
+            "AUDIO GENERATION DONE | generated=%d | cached=%d | total=%d | elapsed=%s",
+            len(pending), cached_count, len(jobs),
+            format_duration(time.monotonic() - generation_started),
+            extra={"tts_style": "success"},
+        )
         del clone_model
         _release_device_memory(device)
 

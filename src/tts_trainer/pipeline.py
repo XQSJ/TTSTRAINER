@@ -9,7 +9,8 @@ from pathlib import Path
 from .experiments import prepare_experiment, resolve_experiment
 from .frontend import frontend_from_config, phonemize_manifest
 from .language_check import check_language_support
-from .logging_utils import configure_logging
+from .logging_utils import (configure_logging_from_config, format_duration,
+                            log_section)
 from .manifest import validate_manifest
 from .sample_generation import generate_samples
 from .text_generation import generate_texts, validate_text_generation_config
@@ -23,9 +24,8 @@ logger = logging.getLogger(__name__)
 def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Path:
     """Run the configured dataset → frontend → train → export workflow."""
     raw, layout = resolve_experiment(config_path)
-    configure_logging(raw.get("logging", {}).get("level", "INFO"))
+    configure_logging_from_config(raw)
     prepare_experiment(layout, raw, config_path)
-    logger.info("pipeline start model=%s languages=%s", layout.name, ",".join(layout.languages))
     stages = raw.get("pipeline", {})
     generation = raw.get("generation", {})
     text_generation = raw.get("text_generation", {})
@@ -39,19 +39,29 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
             active_stages.append(name)
     stage_numbers = {name: index for index, name in enumerate(active_stages, 1)}
     pipeline_started = time.monotonic()
+    log_section(
+        logger,
+        "TTS TRAINING PIPELINE",
+        f"Model: {layout.name}\n"
+        f"Languages: {', '.join(layout.languages)}\n"
+        f"Stages: {' | '.join(active_stages)}",
+    )
 
     def stage_started(name: str, description: str) -> float:
-        logger.info(
-            "pipeline progress=%d/%d stage=%s status=started detail=%s",
-            stage_numbers[name], len(active_stages), name, description,
+        log_section(
+            logger,
+            f"STAGE {stage_numbers[name]}/{len(active_stages)}  {name.upper()}",
+            description,
         )
         return time.monotonic()
 
     def stage_completed(name: str, started: float, detail: str) -> None:
+        elapsed = time.monotonic() - started
         logger.info(
-            "pipeline progress=%d/%d stage=%s status=completed elapsed=%.1fs %s",
+            "STAGE DONE %d/%d | %s | elapsed=%s | %s",
             stage_numbers[name], len(active_stages), name,
-            time.monotonic() - started, detail,
+            format_duration(elapsed), detail,
+            extra={"tts_style": "success"},
         )
 
     logger.info("pipeline plan total_stages=%d stages=%s", len(active_stages), ",".join(active_stages))
@@ -176,8 +186,11 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
     report["finished_at"] = datetime.now(timezone.utc).isoformat()
     destination = layout.run_dir / "pipeline-report.json"
     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info(
-        "pipeline completed status=success elapsed=%.1fs report=%s",
-        time.monotonic() - pipeline_started, destination,
+    log_section(
+        logger,
+        "PIPELINE COMPLETED",
+        f"Elapsed: {format_duration(time.monotonic() - pipeline_started)}\n"
+        f"Report: {destination}",
+        success=True,
     )
     return destination
