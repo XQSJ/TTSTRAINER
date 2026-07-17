@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from .config import load_config
@@ -33,9 +34,10 @@ from .quality import run_audio_quality_gate
 from .quality_models import (QUALITY_MODEL_SPECS, ensure_quality_model,
                              inspect_quality_model, quality_model_path)
 from .semantic_quality import run_semantic_quality_gate
+from .interrupts import run_supervised, should_supervise
 
 
-def main(argv=None) -> int:
+def _dispatch(argv=None) -> int:
     configure_logging(os.environ.get("TTS_TRAINER_LOG_LEVEL", "INFO"))
     parser = argparse.ArgumentParser(prog="tts-trainer")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -318,6 +320,21 @@ def main(argv=None) -> int:
                            "size_bytes": status.size_bytes, "missing": status.missing})
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
+
+
+def main(argv=None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if should_supervise(arguments):
+        return run_supervised(arguments)
+    try:
+        return _dispatch(arguments)
+    except KeyboardInterrupt:
+        print(
+            "\nINTERRUPT | stopped by user | rerun the same command to reuse completed work",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 130
 
 
 if __name__ == "__main__":

@@ -101,6 +101,19 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer language-check --config training_
 PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline --config training_configs/my_model.json
 ```
 
+运行过程中按一次 `Ctrl+C` 会安全停止。项目用独立监督进程保持终端可响应，即使
+Qwen、CUDA 或 PyTorch 正卡在一次原生计算中，也会先通知工作进程退出；10 秒仍未
+响应则自动终止该次计算。再按一次 `Ctrl+C` 会立即强制结束。已经落盘的文本请求
+断点、完整 WAV 和 checkpoint 不会删除，重新执行同一条命令会复用它们：
+
+```text
+INTERRUPT | Ctrl+C received | stopping safely; completed text/WAV/cache files are kept
+```
+
+注意：`Ctrl+C` 是停止并在下次运行时续用缓存，不是在内存中冻结进程。训练阶段若要
+从 `last` checkpoint 继续优化，请使用 `initialization.mode=resume` 的配置；音频和
+文本生成只需重新运行原命令，会自动跳过已完成内容。
+
 这里不要给整条安装命令增加 `--no-build-isolation`。日语依赖 `pyopenjtalk`
 目前从源码构建，并通过隔离构建环境中的 `setuptools_scm` 生成版本号；禁用隔离但
 没有预装该构建依赖时，pip 会把 0.4.1 错误识别为 0.0.0。若已经遇到
