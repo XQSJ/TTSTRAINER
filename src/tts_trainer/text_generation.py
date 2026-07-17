@@ -352,7 +352,7 @@ def _parse_llm_rows(content: str, language: str) -> list[GeneratedText]:
 
 
 def _llm_rows(language: str, language_name: str, total: int, config: dict,
-              requester) -> list[GeneratedText]:
+              requester, *, on_batch=None, round_offset: int = 0) -> list[GeneratedText]:
     batch_size = max(1, int(config.get("batch_size", 50)))
     rows = []
     round_index = 0
@@ -365,8 +365,14 @@ def _llm_rows(language: str, language_name: str, total: int, config: dict,
             "unsafe content, and duplicated wording. Return a JSON array of objects with exactly "
             "two fields: text and category."
         )
-        logger.info("LLM text request language=%s round=%d count=%d", language, round_index + 1, count)
-        rows.extend(_parse_llm_rows(requester(config, prompt), language))
+        logger.info(
+            "LLM text request language=%s round=%d count=%d",
+            language, round_offset + round_index + 1, count,
+        )
+        batch = _parse_llm_rows(requester(config, prompt), language)
+        rows.extend(batch)
+        if on_batch is not None:
+            on_batch(batch)
         round_index += 1
     return rows
 
@@ -456,6 +462,68 @@ def _corpus_paths(config: dict, layout, corpus_id: str) -> tuple[Path, Path]:
     return output, output.with_suffix(".report.json")
 
 
+def _partial_corpus_path(output: Path) -> Path:
+    return output.with_suffix(".partial.jsonl")
+
+
+def _load_partial_rows(path: Path, fingerprint: str) -> list[GeneratedText]:
+    """Load request-level progress left by an interrupted LLM generation."""
+    if not path.is_file():
+        return []
+    rows = []
+    with path.open(encoding="utf-8") as stream:
+        first = stream.readline()
+        try:
+            header = json.loads(first)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"invalid text generation checkpoint header: {path}") from exc
+        checkpoint = header.get("_checkpoint", {}) if isinstance(header, dict) else {}
+        if checkpoint.get("format") != 1 or checkpoint.get("fingerprint") != fingerprint:
+            raise RuntimeError(
+                f"text generation checkpoint {path} belongs to different settings; "
+                "delete it or set text_generation.overwrite=true"
+            )
+        for line_number, line in enumerate(stream, 2):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "ignoring incomplete final text checkpoint row path=%s line=%d",
+                    path, line_number,
+                )
+                break
+            rows.append(GeneratedText(
+                text=str(item["text"]), language=str(item["language"]),
+                category=str(item.get("category", "llm")),
+                source=str(item.get("source", "openai_compatible")),
+            ))
+    return rows
+
+
+def _append_partial_rows(path: Path, fingerprint: str,
+                         rows: list[GeneratedText]) -> None:
+    """Durably append one successful LLM response before the next request."""
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps({
+            "_checkpoint": {"format": 1, "fingerprint": fingerprint},
+        }, ensure_ascii=False) + "\n", encoding="utf-8")
+        temporary.replace(path)
+    with path.open("a", encoding="utf-8") as stream:
+        for row in rows:
+            stream.write(json.dumps({
+                "text": row.text, "language": row.language,
+                "category": row.category, "source": row.source,
+            }, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def text_corpus_path(config: dict, layout) -> Path:
     """Resolve the shared corpus path without generating or mutating it."""
     corpus_id, _ = _corpus_identity(config, layout)
@@ -497,18 +565,22 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     total = int(config.get("sentences_per_language", 100))
     corpus_id, fingerprint = _corpus_identity(config, layout)
     output, report_path = _corpus_paths(config, layout, corpus_id)
+    partial_path = _partial_corpus_path(output)
     logger.info(
         "text corpus requested corpus=%s model=%s provider=%s languages=%s target_per_language=%d",
         corpus_id, layout.name, provider, ",".join(layout.languages), total,
     )
     reuse = bool(config.get("reuse", True))
     overwrite = bool(config.get("overwrite", False))
+    if overwrite or not reuse:
+        partial_path.unlink(missing_ok=True)
     cache_status = "missing"
     if reuse and not overwrite:
         cache_status = _cached_corpus_status(
             output, report_path, fingerprint, layout.languages, total,
         )
     if cache_status == "complete":
+        partial_path.unlink(missing_ok=True)
         logger.info("text corpus cache hit corpus=%s output=%s", corpus_id, output)
         return output
     if cache_status == "partial" and provider != "openai_compatible":
@@ -516,12 +588,31 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
             f"shared text corpus {output} is incomplete; set "
             "text_generation.overwrite=true after fixing the source"
         )
+    partial_counts = Counter()
+
+    def save_request_batch(batch: list[GeneratedText]) -> None:
+        _append_partial_rows(partial_path, fingerprint, batch)
+        partial_counts.update(row.language for row in batch)
+        logger.info(
+            "text corpus request checkpoint saved corpus=%s batch=%d persisted=%d counts=%s",
+            corpus_id, len(batch), sum(partial_counts.values()), dict(partial_counts),
+        )
+
     if cache_status == "partial":
         candidates = _file_rows(output, layout.language_specs)
         logger.info(
             "text corpus partial cache resume corpus=%s accepted=%d",
             corpus_id, len(candidates),
         )
+        if provider == "openai_compatible" and reuse:
+            pending = _load_partial_rows(partial_path, fingerprint)
+            candidates.extend(pending)
+            partial_counts.update(row.language for row in pending)
+            if pending:
+                logger.info(
+                    "text corpus request checkpoint resume corpus=%s persisted=%d counts=%s path=%s",
+                    corpus_id, len(pending), dict(partial_counts), partial_path,
+                )
     elif provider == "builtin":
         candidates = []
         for language in layout.languages:
@@ -534,10 +625,25 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
         candidates = _file_rows(input_path, layout.language_specs)
         logger.info("file text import input=%s selected=%d", input_path, len(candidates))
     elif provider == "openai_compatible":
-        candidates = [
-            row for language, spec in layout.language_specs.items()
-            for row in _llm_rows(language, spec.name, total, config, requester)
-        ]
+        candidates = _load_partial_rows(partial_path, fingerprint) if reuse else []
+        partial_counts.update(row.language for row in candidates)
+        if candidates:
+            logger.info(
+                "text corpus request checkpoint resume corpus=%s persisted=%d counts=%s path=%s",
+                corpus_id, len(candidates), dict(partial_counts), partial_path,
+            )
+
+        configured_batch = max(1, int(config.get("batch_size", 50)))
+        for language, spec in layout.language_specs.items():
+            existing = partial_counts[language]
+            missing_raw = max(total - existing, 0)
+            if not missing_raw:
+                continue
+            candidates.extend(_llm_rows(
+                language, spec.name, missing_raw, config, requester,
+                on_batch=save_request_batch,
+                round_offset=existing // configured_batch,
+            ))
     else:
         raise ValueError("text_generation.provider must be builtin, file, or openai_compatible")
 
@@ -623,6 +729,7 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
                 refill.extend(_llm_rows(
                     language, layout.language_specs[language].name,
                     request_count, config, requester,
+                    on_batch=save_request_batch,
                 ))
             filter_candidates(refill)
 
@@ -656,6 +763,7 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
         "seed": int(config.get("seed", 1337)),
     }
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    partial_path.unlink(missing_ok=True)
     logger.info("text generation completed output=%s accepted=%s rejected=%s", output, dict(per_language), dict(rejected))
     missing = {language: total - per_language[language] for language in layout.languages if per_language[language] < total}
     if missing and not bool(config.get("allow_fewer", False)):

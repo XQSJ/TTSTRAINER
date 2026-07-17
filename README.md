@@ -74,6 +74,7 @@ CSV 或 OpenAI-compatible 文本服务自动扩写，配置示例见
   },
   "generation": {
     "voice": {
+      "id": "voice_01",
       "mode": "design",
       "speaker": "voice_01",
       "prompt": "A warm, natural adult voice with clear pronunciation."
@@ -87,7 +88,8 @@ CSV 或 OpenAI-compatible 文本服务自动扩写，配置示例见
 ```
 
 不要用上面的片段覆盖整个文件，只修改原配置中的同名字段。`name` 是模型和输出
-目录名，`languages` 是训练语言，`text_generation` 自动准备流程验证文本，`voice` 决定音色；
+目录名，`languages` 是训练语言，`text_generation` 自动准备流程验证文本，`voice.id`
+决定跨模型复用的公共音频数据集，`speaker` 是模型内部的音色标签；
 显存不足时把 `batch_size` 改成 `4` 或 `2`。
 
 安装并开始训练：
@@ -198,7 +200,8 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer language-check \
 
 ```text
 my_reader
-  ├── datasets/my_reader/    # 音频和 metadata
+  ├── datasets/my_reader/    # 模型使用的 metadata
+  ├── datasets/voices/       # 按 voice.id 共享的参考音频和训练 WAV
   ├── runs/my_reader/        # 可恢复训练的中间态，务必保留
   └── artifacts/my_reader/   # 最终 ONNX 发布资源
 ```
@@ -765,12 +768,14 @@ artifacts/<name>/
 
 ```text
 datasets/text_corpora/  # 自动生成/清洗后的共享文本，相同配置直接复用
+datasets/voices/        # 按 voice.id/revision 保存的共享音色音频
 models/qwen/            # Qwen Teacher 权重
 models/frontends/       # 日语、韩语等前端词典
 models/quality/         # 可选 ASR/声纹质检权重
 ```
 
-只有音色参考、生成 WAV、metadata、checkpoint 和 ONNX 属于具体模型/数据任务。
+音色参考和生成 WAV 属于公共 `voice.id/revision`；模型目录只保存引用这些 WAV 的
+metadata。checkpoint 和 ONNX 仍按模型 `name` 完全隔离。
 
 ### 语言选项
 
@@ -927,6 +932,12 @@ datasets/text_corpora/<corpus-id>/
 语料时直接复用现有 CSV；不会因为 `experiment.name` 改变而重新生成。报告记录
 配置指纹、逐语言目标数、通过数、拒绝原因和最多 20 条拒绝示例。
 
+使用 `openai_compatible` 时，每次成功的 LLM 请求都会立即写入同一语料目录下的
+`texts.partial.jsonl`。网络中断、进程退出或服务器重启后，保持生成配置不变并重新执行
+同一命令，会从该断点继续而不是重做已保存批次；全部文本过滤并写入 `texts.csv` 后，
+临时断点文件会自动删除。修改语言、目标条数、模型、prompt/过滤参数等会产生新的
+`corpus-id`，因为那已经是另一份语料需求。
+
 需要人为指定稳定名称时使用 `corpus_name`；同名但配置不一致时程序会拒绝覆盖：
 
 ```json
@@ -1033,16 +1044,25 @@ Hello, welcome to the multilingual speech system.,en
 支持 `zh en ja ko de fr ru pt es it`。使用一个参考音色生成全部语言，生成器会写入：
 
 ```text
-datasets/<name>/
+datasets/voices/<voice_id>/<voice_revision>/
+├── voice.json               # 音色来源、Qwen 模型、生成参数和版本指纹
 ├── references/              # 设计或上传的参考音色副本
-├── wavs/<speaker>/         # 已重采样的 PCM16 单声道 WAV
-└── metadata.csv
+└── wavs/<language>/         # 按文本哈希命名的 PCM16 单声道 WAV
+
+datasets/<model_name>/
+├── dataset.json             # 本模型引用的 voice_id/revision
+└── metadata.csv             # 引用公共 WAV，不复制音频
 ```
+
+`voice_id` 由 `generation.voice.id` 指定。`voice_revision` 根据音色描述/参考音频校验值、
+Qwen 模型、生成参数、采样率和后处理参数自动计算。同一个音色配置和同一句文本可被多个
+模型直接复用；改变音色配置会自动进入新 revision，避免把旧 WAV 错配给新音色。
 
 ### 方式一：用 Prompt 设计音色
 
 ```json
 "voice": {
+  "id": "voice_01",
   "mode": "design",
   "speaker": "voice_01",
   "prompt": "A warm, natural adult voice with clear pronunciation and calm delivery.",
@@ -1065,6 +1085,7 @@ VoiceDesign.generate_voice_design()
 
 ```json
 "voice": {
+  "id": "voice_01",
   "mode": "clone",
   "speaker": "voice_01",
   "reference_audio": "datasets/references/voice_01.wav",
@@ -1216,8 +1237,9 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 ```
 
 ```text
-train1.json → datasets/model_1/ → runs/model_1/ → artifacts/model_1/
-train2.json → datasets/model_2/ → runs/model_2/ → artifacts/model_2/
+train1.json → datasets/model_1/metadata → runs/model_1/ → artifacts/model_1/
+train2.json → datasets/model_2/metadata → runs/model_2/ → artifacts/model_2/
+相同 voice.id/revision → 共同引用 datasets/voices/.../wavs/
 ```
 
 可以先初始化目录，不会开始训练：
@@ -1231,7 +1253,9 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer init-experiment \
 
 ```text
 datasets/model_1/
-└── metadata.phonemes.csv      # 未显式配置 metadata 时的默认位置
+├── dataset.json               # 公共音色数据集引用信息
+├── metadata.csv               # 原始训练清单
+└── metadata.phonemes.csv      # 冻结音素后的训练清单
 
 runs/model_1/                  # 中间态，必须保留
 ├── resolved-config.json      # 本次实际生效的完整配置
@@ -1353,6 +1377,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer train-many \
   "generation": {
     "include_metadata": ["datasets/model_1/metadata.csv"],
     "voice": {
+      "id": "voice_02",
       "speaker": "voice_02"
     }
   }

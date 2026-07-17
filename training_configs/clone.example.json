@@ -19,6 +19,7 @@
     "text_manifest": "datasets/texts.example.csv",
     "voice": {
       "_comment": "reference_text 必须与录音逐字对应；仅 x_vector_only_mode=true 时可省略 / reference_text must exactly match the recording; omit it only when x_vector_only_mode=true",
+      "id": "voice_01",
       "mode": "clone",
       "speaker": "voice_01",
       "reference_audio": "datasets/references/voice_01.wav",

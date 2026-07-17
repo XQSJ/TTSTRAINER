@@ -20,6 +20,7 @@
     "text_manifest": "datasets/texts.example.csv",
     "voice": {
       "_comment": "先设计参考音色，再跨语言克隆 / Design a reference voice, then clone it across languages",
+      "id": "voice_01",
       "mode": "design",
       "speaker": "voice_01",
       "prompt": "A warm, natural adult voice with clear pronunciation and calm delivery.",

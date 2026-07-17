@@ -174,6 +174,46 @@ class TextGenerationTests(unittest.TestCase):
             self.assertEqual(len(self._rows(output)), 2)
             self.assertEqual(len(calls), 1)
 
+    def test_openai_provider_checkpoints_each_successful_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._config(root, {
+                "provider": "openai_compatible", "endpoint": "http://local/v1",
+                "model": "text-model", "sentences_per_language": 4,
+                "batch_size": 2,
+            }, languages=("en",))
+            calls = 0
+
+            def interrupted_requester(_raw, _prompt):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise RuntimeError("temporary network failure")
+                return json.dumps([
+                    {"text": f"Persisted sentence {index} is valid.", "category": "daily"}
+                    for index in range(2)
+                ])
+
+            with self.assertRaisesRegex(RuntimeError, "temporary network failure"):
+                generate_texts(config, requester=interrupted_requester)
+
+            partial = next((root / "datasets" / "text_corpora").rglob("texts.partial.jsonl"))
+            self.assertTrue(partial.is_file())
+            resumed_calls = 0
+
+            def resumed_requester(_raw, _prompt):
+                nonlocal resumed_calls
+                resumed_calls += 1
+                return json.dumps([
+                    {"text": f"Recovered sentence {index} is also valid.", "category": "daily"}
+                    for index in range(2)
+                ])
+
+            output = generate_texts(config, requester=resumed_requester)
+            self.assertEqual(resumed_calls, 1)
+            self.assertEqual(len(self._rows(output)), 4)
+            self.assertFalse(partial.exists())
+
     def test_nested_openai_compatible_config_accepts_base_url_alias(self):
         config = {
             "provider": "openai_compatible",

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import csv
 import gc
+import hashlib
 import importlib.util
 import json
 import logging
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +27,7 @@ from .text_generation import text_corpus_path
 
 
 logger = logging.getLogger(__name__)
+VOICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,82 @@ class GenerationJob:
     item: GenerationText
     candidate: int
     output: Path
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _voice_dataset(raw: dict, layout, generation: dict,
+                   voice: dict) -> tuple[str, str, Path, dict]:
+    """Resolve a model-independent, revision-safe voice dataset directory."""
+    voice_id = str(voice.get("id") or voice.get("speaker") or "voice_01").strip()
+    if not VOICE_ID.fullmatch(voice_id):
+        raise ValueError(
+            "generation.voice.id must contain only letters, numbers, '.', '_' and '-', "
+            "and cannot start with punctuation"
+        )
+    mode = str(voice.get("mode") or "")
+    reference_identity = None
+    if mode == "clone" and voice.get("reference_audio"):
+        reference_path = Path(voice["reference_audio"]).expanduser()
+        if not reference_path.is_file():
+            raise FileNotFoundError(f"reference audio does not exist: {reference_path}")
+        reference_identity = {
+            "sha256": _file_sha256(reference_path),
+            "suffix": reference_path.suffix.lower(),
+        }
+    identity = {
+        "format": 1,
+        "mode": mode,
+        "prompt": str(voice.get("prompt") or "").strip() or None,
+        "reference_text": str(voice.get("reference_text") or "").strip() or None,
+        "reference_language": (
+            str(voice.get("reference_language", "en")).strip().lower()
+            if mode == "design" else None
+        ),
+        "reference_audio": reference_identity,
+        "x_vector_only_mode": bool(voice.get("x_vector_only_mode", False)),
+        "models": generation.get("models", {}),
+        "generation_kwargs": generation.get("generation_kwargs", {}),
+        "audio": {
+            "sample_rate": int(raw["audio"]["sample_rate"]),
+            "postprocess": generation.get("audio_postprocess", {}),
+        },
+    }
+    encoded = json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")
+    revision = hashlib.sha256(encoded).hexdigest()[:12]
+    root = Path(generation.get("voice_dataset_root") or layout.dataset_dir.parent / "voices")
+    destination = root / voice_id / revision
+    destination.mkdir(parents=True, exist_ok=True)
+    record = destination / "voice.json"
+    if not record.is_file():
+        temporary = record.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps({
+            "format": 1,
+            "voice_id": voice_id,
+            "revision": revision,
+            "identity": identity,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(record)
+    return voice_id, revision, destination, identity
+
+
+def _sample_filename(item: GenerationText, candidate: int,
+                     teacher_language: str) -> str:
+    encoded = json.dumps({
+        "language": item.language,
+        "text": item.text,
+        "candidate": candidate,
+        "teacher_language": teacher_language,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:24] + ".wav"
 
 
 def read_generation_texts(path: str | Path, supported_languages=None) -> list[GenerationText]:
@@ -212,13 +291,43 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     candidates = int(generation.get("candidates_per_text", 1))
     if candidates < 1:
         raise ValueError("generation.candidates_per_text must be at least 1")
-    wav_root = layout.dataset_dir / "wavs" / speaker
-    jobs = [
-        GenerationJob(item, candidate, wav_root / f"{item.language}_{index:06d}_c{candidate:02d}.wav")
-        for index, item in enumerate(texts, start=1)
-        for candidate in range(1, candidates + 1)
-    ]
+    voice_id, voice_revision, voice_dataset, _ = _voice_dataset(
+        raw, layout, generation, voice,
+    )
+    logger.info(
+        "voice dataset ready voice_id=%s revision=%s path=%s speaker_label=%s",
+        voice_id, voice_revision, voice_dataset, speaker,
+    )
+    wav_root = voice_dataset / "wavs"
+    legacy_wav_root = layout.dataset_dir / "wavs" / speaker
+    jobs = []
+    job_outputs = set()
+    migrated = 0
+    for index, item in enumerate(texts, start=1):
+        for candidate in range(1, candidates + 1):
+            output = wav_root / item.language / _sample_filename(
+                item, candidate, teacher_languages[item.language],
+            )
+            if output in job_outputs:
+                continue
+            job_outputs.add(output)
+            legacy = legacy_wav_root / f"{item.language}_{index:06d}_c{candidate:02d}.wav"
+            if not output.is_file() and legacy.is_file() and not generation.get("overwrite", False):
+                output.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy, output)
+                migrated += 1
+            jobs.append(GenerationJob(item, candidate, output))
+    if migrated:
+        logger.info(
+            "legacy model audio migrated voice_id=%s files=%d source=%s destination=%s",
+            voice_id, migrated, legacy_wav_root, wav_root,
+        )
     overwrite = bool(generation.get("overwrite", False))
+    if overwrite:
+        logger.warning(
+            "generation.overwrite=true will regenerate shared voice audio voice_id=%s revision=%s",
+            voice_id, voice_revision,
+        )
     pending = jobs if overwrite else [job for job in jobs if not job.output.is_file()]
     logger.info("generation jobs total=%d pending=%d cached=%d", len(jobs), len(pending), len(jobs) - len(pending))
 
@@ -231,7 +340,7 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             **load_kwargs,
         }
         model_keys = generation.get("models", {})
-        references = layout.dataset_dir / "references"
+        references = voice_dataset / "references"
         reference_text = voice.get("reference_text", "").strip()
         x_vector_only = bool(voice.get("x_vector_only_mode", False))
 
@@ -246,6 +355,14 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             if reference_spec.teacher_provider != "qwen" or not reference_spec.teacher_language:
                 raise ValueError(f"reference language {reference_language} has no Qwen teacher mapping")
             reference_audio = references / f"{speaker}.designed.wav"
+            legacy_reference = layout.dataset_dir / "references" / f"{speaker}.designed.wav"
+            if not reference_audio.is_file() and legacy_reference.is_file() and not overwrite:
+                reference_audio.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(legacy_reference, reference_audio)
+                logger.info(
+                    "legacy designed reference migrated source=%s destination=%s",
+                    legacy_reference, reference_audio,
+                )
             if reference_audio.is_file() and not overwrite:
                 reference_input = reference_audio
             else:
@@ -364,5 +481,16 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         writer.writeheader()
         writer.writerows(rows)
     temporary.replace(output_metadata)
+    (layout.dataset_dir / "dataset.json").write_text(json.dumps({
+        "format": 1,
+        "model": layout.name,
+        "metadata": str(output_metadata.resolve()),
+        "text_manifest": str(text_manifest.resolve()),
+        "voice_id": voice_id,
+        "voice_revision": voice_revision,
+        "voice_dataset": str(voice_dataset.resolve()),
+        "speaker_label": speaker,
+        "samples": len(rows),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("training metadata written=%s samples=%d", output_metadata, len(rows))
     return output_metadata

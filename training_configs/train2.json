@@ -20,6 +20,8 @@
     "text_manifest": "datasets/texts.example.csv",
     "voice": {
       "_comment": "为 model_2 设计与 model_1 不同的音色 / Design a voice distinct from model_1",
+      "_comment_id": "不同的音色描述应使用不同 id / A different voice design should use a different id",
+      "id": "voice_01_expressive",
       "mode": "design",
       "speaker": "voice_01",
       "prompt": "A confident, expressive adult voice with a slightly lower pitch, crisp articulation, and natural pacing.",

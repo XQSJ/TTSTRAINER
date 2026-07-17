@@ -77,7 +77,10 @@ class SampleGenerationTests(unittest.TestCase):
             writer.writerow({"text": "Hello world", "language": "en"})
             writer.writerow({"text": "Bonjour", "language": "fr"})
             writer.writerow({"text": "你好", "language": "zh"})
-        voice = {"mode": mode, "speaker": "voice_a", "reference_text": "Exact reference text."}
+        voice = {
+            "id": "shared_voice_a", "mode": mode, "speaker": "voice_a",
+            "reference_text": "Exact reference text.",
+        }
         if mode == "design":
             voice.update({"prompt": "Warm and calm adult voice.", "reference_language": "en"})
         else:
@@ -126,7 +129,12 @@ class SampleGenerationTests(unittest.TestCase):
             self.assertEqual([call[0] for call in calls], ["load", "design", "load", "prompt", "clone"])
             self.assertEqual(calls[0][2]["runtime_mode"], "installed")
             self.assertIsNone(calls[0][2]["source_path"])
-            self.assertTrue((metadata.parent / "references/voice_a.designed.wav").is_file())
+            voice_revisions = list((metadata.parent.parent / "voices/shared_voice_a").iterdir())
+            self.assertEqual(len(voice_revisions), 1)
+            self.assertTrue((voice_revisions[0] / "references/voice_a.designed.wav").is_file())
+            dataset = json.loads((metadata.parent / "dataset.json").read_text())
+            self.assertEqual(dataset["voice_id"], "shared_voice_a")
+            self.assertEqual(Path(dataset["voice_dataset"]), voice_revisions[0].resolve())
 
             report.items[0].audio.unlink()
             resumed_calls = []
@@ -149,7 +157,8 @@ class SampleGenerationTests(unittest.TestCase):
 
             metadata = generate_samples(config, model_loader=loader)
             self.assertEqual([call[0] for call in calls], ["load", "prompt", "clone"])
-            self.assertTrue((metadata.parent / "references/voice_a.uploaded.wav").is_file())
+            voice_revisions = list((metadata.parent.parent / "voices/shared_voice_a").iterdir())
+            self.assertTrue((voice_revisions[0] / "references/voice_a.uploaded.wav").is_file())
             with wave.open(str(validate_manifest(metadata, 8000).items[0].audio), "rb") as wav:
                 self.assertEqual(wav.getframerate(), 8000)
                 self.assertEqual(wav.getsampwidth(), 2)
@@ -176,6 +185,54 @@ class SampleGenerationTests(unittest.TestCase):
             report = validate_manifest(metadata, 8000, require_single_speaker=False)
             self.assertEqual(len(report.items), 3)
             self.assertEqual({item.speaker for item in report.items}, {"voice_old", "voice_a"})
+
+    def test_same_voice_dataset_is_reused_by_different_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_config, calls = self._base(root, "design")
+
+            def loader(key, **kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" else FakeCloneModel(calls)
+
+            first_metadata = generate_samples(first_config, model_loader=loader)
+            first_audio = tuple(item.audio for item in validate_manifest(first_metadata, 8000).items)
+
+            second_raw = json.loads(first_config.read_text(encoding="utf-8"))
+            second_raw["experiment"]["name"] = "another-model"
+            second_raw["experiment"]["metadata"] = str(
+                root / "datasets/another-model/metadata.phonemes.csv"
+            )
+            second_config = root / "another-model.json"
+            second_config.write_text(json.dumps(second_raw), encoding="utf-8")
+
+            def must_not_load(*_args, **_kwargs):
+                self.fail("the shared voice WAV cache should avoid loading Qwen")
+
+            second_metadata = generate_samples(second_config, model_loader=must_not_load)
+            second_audio = tuple(item.audio for item in validate_manifest(second_metadata, 8000).items)
+            self.assertEqual(first_audio, second_audio)
+            self.assertNotEqual(first_metadata.parent, second_metadata.parent)
+
+    def test_legacy_model_wavs_are_migrated_to_shared_voice_dataset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, _ = self._base(root, "clone")
+            legacy = root / "datasets/sample-clone/wavs/voice_a"
+            legacy.mkdir(parents=True)
+            for index, language in enumerate(("en", "fr"), 1):
+                sf.write(
+                    legacy / f"{language}_{index:06d}_c01.wav",
+                    np.linspace(-0.1, 0.1, 80, dtype=np.float32), 8000,
+                    subtype="PCM_16",
+                )
+
+            def must_not_load(*_args, **_kwargs):
+                self.fail("legacy WAVs should migrate without loading Qwen")
+
+            metadata = generate_samples(config, model_loader=must_not_load)
+            report = validate_manifest(metadata, 8000)
+            self.assertEqual(len(report.items), 2)
+            self.assertTrue(all("/voices/shared_voice_a/" in str(item.audio) for item in report.items))
 
 
 if __name__ == "__main__":

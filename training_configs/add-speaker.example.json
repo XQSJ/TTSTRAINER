@@ -22,6 +22,7 @@
     ],
     "voice": {
       "_comment": "新 speaker 名称不能与旧 speaker 重复 / The new speaker name must not duplicate an existing speaker",
+      "id": "voice_02",
       "mode": "design",
       "speaker": "voice_02",
       "prompt": "A clear, confident adult voice that is distinct from voice_01, with natural pacing and neutral emotion.",

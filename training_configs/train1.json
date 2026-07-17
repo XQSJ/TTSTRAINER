@@ -25,6 +25,8 @@
     "qwen_runtime": "installed",
     "voice": {
       "_comment": "design 使用文字描述设计音色 / design creates a voice from a natural-language description",
+      "_comment_id": "id 决定可跨模型复用的公共音频目录；speaker 是模型内标签 / id selects the reusable shared audio directory; speaker is the in-model label",
+      "id": "voice_01",
       "mode": "design",
       "speaker": "voice_01",
       "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, steady pace, and calm friendly delivery.",

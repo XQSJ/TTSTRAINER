@@ -37,6 +37,7 @@
     "auto_download_models": true,
     "voice": {
       "_comment": "使用 Prompt 设计统一音色 / Design one shared voice from a prompt",
+      "id": "voice_01",
       "mode": "design",
       "speaker": "voice_01",
       "prompt": "A warm, natural adult voice with clear pronunciation and calm delivery.",
