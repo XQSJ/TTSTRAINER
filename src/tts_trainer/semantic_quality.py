@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import re
+import time
 import unicodedata
 from collections import Counter
 from pathlib import Path
 
 from .manifest import Item
+from .logging_utils import TerminalProgress, format_duration, progress_bar
 from .quality_models import ensure_quality_model
 
 
 CHARACTER_ERROR_LANGUAGES = {"zh", "ja"}
+logger = logging.getLogger(__name__)
 
 
 def _normalized_characters(text: str) -> list[str]:
@@ -151,8 +155,16 @@ def run_semantic_quality_gate(
                 "speaker quality reference files are missing for: " + ", ".join(unavailable)
             )
 
+    total = len(items)
+    interval = max(1, int(config.get("progress_every_items", max(1, total // 20))))
+    started = time.monotonic()
     results = []
-    for item in items:
+    live_progress = TerminalProgress("SEMANTIC QUALITY", total)
+    logger.info(
+        "SEMANTIC QUALITY START | total=%d | asr=%s | speaker=%s | progress_every_items=%d",
+        total, asr_evaluator is not None, speaker_evaluator is not None, interval,
+    )
+    for index, item in enumerate(items, 1):
         row = {
             "audio": str(item.audio), "text": item.text,
             "language": item.language, "speaker": item.speaker,
@@ -173,6 +185,20 @@ def run_semantic_quality_gate(
                 row["failures"].append("speaker_mismatch")
         row["passed"] = not row["failures"]
         results.append(row)
+        live_progress.update(index, f"language={item.language} speaker={item.speaker}")
+        if index % interval == 0 or index == total:
+            live_progress.clear()
+            elapsed = time.monotonic() - started
+            rate = index / max(elapsed, 1e-9)
+            logger.info(
+                "SEMANTIC QUALITY %s %6.2f%% | checked=%d/%d | failed=%d | speed=%.2f/min | ETA=%s",
+                progress_bar(index, total), 100.0 * index / max(total, 1),
+                index, total, sum(not result["passed"] for result in results),
+                rate * 60.0, format_duration((total - index) / rate),
+                extra={"tts_style": "progress"},
+            )
+            live_progress.update(index, f"language={item.language} speaker={item.speaker}")
+    live_progress.close()
 
     failure_counts = Counter(failure for row in results for failure in row["failures"])
     report = {
@@ -187,6 +213,12 @@ def run_semantic_quality_gate(
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(
+        "SEMANTIC QUALITY DONE | passed=%d | failed=%d | elapsed=%s | report=%s",
+        report["passed"], report["failed"],
+        format_duration(time.monotonic() - started), target,
+        extra={"tts_style": "success" if not report["failed"] else ""},
+    )
     if report["failed"] and config.get("fail_on_error", True):
         raise ValueError(
             f"semantic quality gate rejected {report['failed']}/{report['items']} items; see {target}"

@@ -89,6 +89,7 @@
   "quality": {
     "enabled": true,
     "fail_on_error": true,
+    "progress_every_items": 200,
     "minimum_duration_seconds": 0.4,
     "maximum_duration_seconds": 30.0,
     "minimum_rms_dbfs": -45.0,
@@ -103,6 +104,7 @@
     "semantic": {
       "enabled": false,
       "fail_on_error": true,
+      "progress_every_items": 20,
       "asr": {
         "enabled": true,
         "model": "asr-small",
@@ -135,6 +137,7 @@
     "level": "INFO",
     "color": "auto",
     "third_party_level": "WARNING",
+    "live_progress": true,
     "sample_progress_every_batches": 1,
     "sample_postprocess_every_files": 200
   }

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -9,6 +11,10 @@ import numpy as np
 import soundfile as sf
 
 from .manifest import Item
+from .logging_utils import TerminalProgress, format_duration, progress_bar
+
+
+logger = logging.getLogger(__name__)
 
 
 def _dbfs(value: float) -> float:
@@ -78,7 +84,28 @@ def inspect_audio_item(item: Item, config: dict) -> dict:
 
 def run_audio_quality_gate(items: list[Item], config: dict,
                            output_path: str | Path) -> dict:
-    results = [inspect_audio_item(item, config) for item in items]
+    total = len(items)
+    interval = max(1, int(config.get("progress_every_items", max(1, total // 20))))
+    started = time.monotonic()
+    results = []
+    live_progress = TerminalProgress("SIGNAL QUALITY", total)
+    logger.info("SIGNAL QUALITY START | total=%d | progress_every_items=%d", total, interval)
+    for index, item in enumerate(items, 1):
+        results.append(inspect_audio_item(item, config))
+        live_progress.update(index, f"language={item.language}")
+        if index % interval == 0 or index == total:
+            live_progress.clear()
+            elapsed = time.monotonic() - started
+            rate = index / max(elapsed, 1e-9)
+            logger.info(
+                "SIGNAL QUALITY %s %6.2f%% | checked=%d/%d | failed=%d | speed=%.1f/s | ETA=%s",
+                progress_bar(index, total), 100.0 * index / max(total, 1),
+                index, total, sum(not row["passed"] for row in results), rate,
+                format_duration((total - index) / rate),
+                extra={"tts_style": "progress"},
+            )
+            live_progress.update(index, f"language={item.language}")
+    live_progress.close()
     failure_counts = Counter(
         failure for result in results for failure in result["failures"]
     )
@@ -95,6 +122,12 @@ def run_audio_quality_gate(items: list[Item], config: dict,
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(
+        "SIGNAL QUALITY DONE | passed=%d | failed=%d | elapsed=%s | report=%s",
+        report["passed"], report["failed"],
+        format_duration(time.monotonic() - started), target,
+        extra={"tts_style": "success" if not report["failed"] else ""},
+    )
     if report["failed"] and config.get("fail_on_error", True):
         summary = ", ".join(f"{key}={value}" for key, value in failure_counts.items())
         raise ValueError(

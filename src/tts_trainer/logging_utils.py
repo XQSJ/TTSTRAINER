@@ -18,6 +18,57 @@ COLORS = {
 SECTION_WIDTH = 78
 
 
+def progress_bar(current: int, total: int, *, width: int = 24) -> str:
+    """Render a fixed-width progress bar suitable for logs and terminals."""
+    ratio = min(max(current / max(total, 1), 0.0), 1.0)
+    completed = min(width, int(ratio * width))
+    return "[" + "█" * completed + "░" * (width - completed) + "]"
+
+
+class TerminalProgress:
+    """One-line live progress that disappears before normal log records."""
+
+    def __init__(self, label: str, total: int, *, enabled: bool | None = None,
+                 stream=None, width: int = 24):
+        self.label = label
+        self.total = max(int(total), 1)
+        self.stream = stream or sys.stderr
+        configured = os.environ.get("TTS_TRAINER_LIVE_PROGRESS", "auto").lower()
+        if enabled is None:
+            enabled = configured not in {"0", "false", "no", "never", "off"}
+            if configured == "auto":
+                enabled = bool(getattr(self.stream, "isatty", lambda: False)())
+        self.enabled = bool(enabled)
+        self.width = width
+        self.rendered_width = 0
+
+    def update(self, current: int, detail: str = "") -> None:
+        if not self.enabled:
+            return
+        current = min(max(int(current), 0), self.total)
+        percent = 100.0 * current / self.total
+        text = (
+            f"{self.label} {progress_bar(current, self.total, width=self.width)} "
+            f"{percent:6.2f}% {current}/{self.total}"
+        )
+        if detail:
+            text += f" | {detail}"
+        padding = " " * max(0, self.rendered_width - len(text))
+        self.stream.write("\r" + text + padding)
+        self.stream.flush()
+        self.rendered_width = len(text)
+
+    def clear(self) -> None:
+        if not self.enabled or not self.rendered_width:
+            return
+        self.stream.write("\r" + " " * self.rendered_width + "\r")
+        self.stream.flush()
+        self.rendered_width = 0
+
+    def close(self) -> None:
+        self.clear()
+
+
 def _numeric_level(value: str, field: str) -> int:
     numeric = getattr(logging, str(value).upper(), None)
     if not isinstance(numeric, int):

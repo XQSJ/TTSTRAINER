@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import logging
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -10,8 +12,12 @@ import torch
 from torch.nn import functional as F
 
 from ..manifest import Item, format_phonemes
+from ..logging_utils import TerminalProgress, format_duration, progress_bar
 from .data import slice_waveforms
 from .losses import kl_loss
+
+
+logger = logging.getLogger(__name__)
 
 
 def _item_key(item: Item, seed: int) -> str:
@@ -122,11 +128,15 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
     generator.eval()
     totals = defaultdict(float)
     examples = 0
+    total_batches = len(loader)
+    interval = max(1, total_batches // 10)
+    started = time.monotonic()
+    live_progress = TerminalProgress("VALIDATION", total_batches)
     cuda_devices = [device.index if device.index is not None else torch.cuda.current_device()] \
         if device.type == "cuda" else []
     with torch.random.fork_rng(devices=cuda_devices):
         torch.manual_seed(seed)
-        for batch in loader:
+        for batch_index, batch in enumerate(loader, 1):
             batch = {key: value.to(device) for key, value in batch.items()}
             output = generator(
                 batch["tokens"], batch["text_lengths"], batch["spectrograms"],
@@ -153,6 +163,21 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
             totals["generated_clipping_ratio"] += float(
                 (output.audio.abs() >= 0.999).to(torch.float32).mean().item()
             ) * batch_size
+            live_progress.update(batch_index, f"items={examples} mel={mel.item():.4f}")
+            if batch_index % interval == 0 or batch_index == total_batches:
+                live_progress.clear()
+                elapsed = time.monotonic() - started
+                rate = batch_index / max(elapsed, 1e-9)
+                logger.info(
+                    "VALIDATION %s %6.2f%% | batches=%d/%d | items=%d | mel=%.4f | ETA=%s",
+                    progress_bar(batch_index, total_batches),
+                    100.0 * batch_index / max(total_batches, 1),
+                    batch_index, total_batches, examples, mel.item(),
+                    format_duration((total_batches - batch_index) / rate),
+                    extra={"tts_style": "progress"},
+                )
+                live_progress.update(batch_index, f"items={examples} mel={mel.item():.4f}")
+    live_progress.close()
     if was_training:
         generator.train()
     if examples == 0:

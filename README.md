@@ -1249,7 +1249,7 @@ generate or reuse teacher WAV samples
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 18:02:34 │ INFO     │ sample_generation │ AUDIO PLAN | total=14000 | pending=14000 | cached=0
 18:05:07 │ INFO     │ sample_generation │ AUDIO   0.29% | completed=40/14000 | new=40/14000 | cached=0 | batch=10/3500 (zh) | speed=18.6/min | ETA=12h 31m 20s
-18:10:12 │ INFO     │ trainer │ train progress=... epoch=1 batch=10/125 step=10 step_time=... eta=... mel=...
+18:10:12 │ INFO     │ trainer │ TRAIN [██░░░░░░░░░░░░░░░░░░░░░░] ... epoch=1 batch=10/125 step=10 ETA=... mel=...
 ```
 
 交互终端默认显示颜色；重定向到文件或管道时自动移除 ANSI 颜色码。Qwen、Transformers
@@ -1260,6 +1260,7 @@ generate or reuse teacher WAV samples
   "level": "INFO",
   "color": "auto",
   "third_party_level": "WARNING",
+  "live_progress": true,
   "sample_progress_every_batches": 1,
   "sample_postprocess_every_files": 200
 }
@@ -1267,7 +1268,9 @@ generate or reuse teacher WAV samples
 
 `sample_progress_every_batches=5` 表示每 5 个 Qwen 批次显示一次音频进度；
 `sample_postprocess_every_files=200` 表示每检查 200 个 WAV 显示一次首尾静音处理
-进度。日志选项也可临时使用环境变量覆盖：
+进度。`live_progress=true` 会在交互终端中每个训练 step 原地刷新进度条，不会生成
+几十万行日志；重定向到文件时自动关闭实时行，只保留周期日志。日志选项也可临时
+使用环境变量覆盖：
 
 ```bash
 TTS_TRAINER_LOG_LEVEL=DEBUG PYTHONPATH=src .venv/bin/python -m tts_trainer \
@@ -1281,11 +1284,10 @@ TTS_TRAINER_LOG_COLOR=always python -m tts_trainer run-pipeline --config trainin
 NO_COLOR=1 python -m tts_trainer run-pipeline --config training_configs/train1.json
 ```
 
-训练损失输出频率由外层配置的 `training.log_every_steps` 控制。
-使用 `--max-steps 10` 这类短流程验证时，程序会自动逐步显示训练进度；正式训练仍按
-`training.log_every_steps` 输出，避免数十万步训练刷满终端。`progress` 是当前短任务进度，
-`batch` 是本轮 epoch 的批次位置，`step_time` 是最近若干步平均耗时，`eta` 是传入
-`--max-steps` 时的粗略剩余时间估计。
+训练损失的完整日志频率由外层配置的 `training.log_every_steps` 控制。交互终端仍会
+每个 step 更新同一行进度条。ETA 前三个 step 显示 `warming-up`，之后使用最近 20 步
+耗时的中位数估算，避免 CUDA 首步预热把剩余时间夸大。流水线也会显示音频后处理、
+metadata、音素化、信号质检、ASR/声纹质检、验证批次、checkpoint 和 ONNX 导出进度。
 
 调试整条流水线时可限制 VITS 步数：
 

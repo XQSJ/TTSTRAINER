@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import csv
+import logging
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from ..languages import resolve_language_registry
+from ..logging_utils import TerminalProgress, format_duration, progress_bar
 from ..manifest import format_phonemes, read_manifest
 from ..text import normalize
 from .contract import (DEFAULT_ESPEAK_VOICES, FrontendContract,
@@ -15,6 +18,7 @@ from .contract import (DEFAULT_ESPEAK_VOICES, FrontendContract,
 
 ESPEAK_VOICES = DEFAULT_ESPEAK_VOICES
 ZERO_WIDTH = re.compile("[\u200b-\u200f\u2060\ufeff]")
+logger = logging.getLogger(__name__)
 
 
 def parse_espeak_ipa(output: str) -> tuple[str, ...]:
@@ -97,10 +101,16 @@ def phonemize_manifest(source: str | Path, destination: str | Path,
     items = read_manifest(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     languages = tuple(dict.fromkeys(item.language for item in items))
-    with destination.open("w", newline="", encoding="utf-8") as stream:
+    total = len(items)
+    interval = max(1, total // 20)
+    started = time.monotonic()
+    live_progress = TerminalProgress("PHONEMIZE", total)
+    logger.info("PHONEMIZE START | total=%d | output=%s", total, destination)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=["audio", "text", "language", "speaker", "phonemes"])
         writer.writeheader()
-        for item in items:
+        for index, item in enumerate(items, 1):
             phones = item.phonemes or frontend.phonemize(item.text, item.language)
             try:
                 audio = item.audio.relative_to(destination.parent)
@@ -110,8 +120,27 @@ def phonemize_manifest(source: str | Path, destination: str | Path,
                 "audio": str(audio), "text": item.text, "language": item.language,
                 "speaker": item.speaker, "phonemes": format_phonemes(phones),
             })
+            live_progress.update(index, f"language={item.language}")
+            if index % interval == 0 or index == total:
+                live_progress.clear()
+                elapsed = time.monotonic() - started
+                rate = index / max(elapsed, 1e-9)
+                logger.info(
+                    "PHONEMIZE %s %6.2f%% | completed=%d/%d | speed=%.1f/s | ETA=%s",
+                    progress_bar(index, total), 100.0 * index / max(total, 1),
+                    index, total, rate, format_duration((total - index) / rate),
+                    extra={"tts_style": "progress"},
+                )
+                live_progress.update(index, f"language={item.language}")
+    live_progress.close()
+    temporary.replace(destination)
     if hasattr(frontend, "contract"):
         save_frontend_contract(frontend.contract(languages), lock_path or frontend_lock_path(destination))
+    logger.info(
+        "PHONEMIZE DONE | completed=%d | elapsed=%s | output=%s",
+        total, format_duration(time.monotonic() - started), destination,
+        extra={"tts_style": "success"},
+    )
     return destination
 
 

@@ -6,9 +6,10 @@ import logging
 import math
 import time
 import warnings
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import replace
 from pathlib import Path
+from statistics import median
 
 import torch
 import torchaudio
@@ -20,7 +21,8 @@ from ..frontend import (FrontendContract, frontend_contract_from_config,
                         frontend_lock_path, load_frontend_contract,
                         build_frontend_conformance)
 from ..manifest import validate_manifest
-from ..logging_utils import configure_logging_from_config, format_duration
+from ..logging_utils import (TerminalProgress, configure_logging_from_config,
+                             format_duration, progress_bar)
 from ..quality import run_audio_quality_gate
 from ..semantic_quality import run_semantic_quality_gate
 from ..text import Vocabulary
@@ -302,6 +304,12 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         generator_parameters, discriminator_parameters, len(loader),
         len(validation_loader) if validation_loader is not None else 0,
     )
+    if device.type == "cuda":
+        logger.info(
+            "GPU MEMORY | allocated=%.2f GiB | reserved=%.2f GiB | device=%s",
+            torch.cuda.memory_allocated(device) / (1024 ** 3),
+            torch.cuda.memory_reserved(device) / (1024 ** 3), device,
+        )
     optimizer_g = torch.optim.AdamW(generator.parameters(), lr=raw["training"]["learning_rate_generator"], betas=(0.8, 0.99))
     optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=raw["training"]["learning_rate_discriminator"], betas=(0.8, 0.99))
     start_epoch = 1
@@ -355,6 +363,11 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     training_started = time.monotonic()
     last_log_time = training_started
     last_log_step = global_step
+    recent_step_times = deque(maxlen=20)
+    live_progress = TerminalProgress(
+        "TRAIN", planned_total_steps,
+        enabled=raw.get("logging", {}).get("live_progress"),
+    )
     logger.info(
         "training plan epochs=%d start_epoch=%d max_steps=%s target_steps=%d log_every_steps=%d "
         "batch_size=%d checkpoint_every_steps=%d",
@@ -363,8 +376,16 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         planned_total_steps, effective_log_every, raw["training"]["batch_size"],
         raw["training"].get("checkpoint_every_steps", 5000),
     )
+    if planned_total_steps >= 100_000:
+        logger.warning(
+            "LARGE TRAINING PLAN | target_steps=%d | use the rolling ETA after warm-up to "
+            "decide whether training.epochs should be reduced",
+            planned_total_steps,
+        )
+    live_progress.update(global_step, "warming up first batches")
 
     for epoch in range(start_epoch, raw["training"]["epochs"] + 1):
+        live_progress.clear()
         logger.info(
             "EPOCH START | epoch=%d/%d | batches=%d | global_step=%d",
             epoch, raw["training"]["epochs"], len(loader), global_step,
@@ -372,6 +393,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         epoch_totals = Counter()
         epoch_steps = 0
         for batch_index, batch in enumerate(loader, 1):
+            step_started = time.monotonic()
             batch = {key: value.to(device) for key, value in batch.items()}
             output = generator(
                 batch["tokens"], batch["text_lengths"], batch["spectrograms"],
@@ -404,6 +426,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             for parameter in discriminator.parameters(): parameter.requires_grad_(True)
             global_step += 1
             epoch_steps += 1
+            recent_step_times.append(time.monotonic() - step_started)
             epoch_totals.update({
                 "generator": float(loss_g.item()),
                 "discriminator": float(loss_d.item()),
@@ -411,27 +434,42 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 "duration": float(output.duration_loss.item()),
                 "kl": float(loss_kl.item()),
             })
+            rolling_step_time = median(recent_step_times)
+            remaining_steps = max(planned_total_steps - global_step, 0)
+            eta = (
+                format_duration(remaining_steps * rolling_step_time)
+                if len(recent_step_times) >= 3 else "warming-up"
+            )
+            live_detail = (
+                f"epoch={epoch}/{raw['training']['epochs']} "
+                f"batch={batch_index}/{len(loader)} ETA={eta} mel={loss_mel.item():.4f}"
+            )
+            live_progress.update(global_step, live_detail)
             if global_step == 1 or global_step % effective_log_every == 0:
+                live_progress.clear()
                 now = time.monotonic()
                 steps_since_log = max(global_step - last_log_step, 1)
                 seconds_per_step = (now - last_log_time) / steps_since_log
-                remaining_steps = max(planned_total_steps - global_step, 0)
-                eta = format_duration(remaining_steps * seconds_per_step)
                 overall_progress = min(
                     global_step / max(planned_total_steps, 1) * 100.0, 100.0,
                 )
                 logger.info(
-                    "TRAIN %6.2f%% | epoch=%d/%d | batch=%d/%d | step=%d/%d | "
-                    "step_time=%.2fs | ETA=%s | generator=%.4f | discriminator=%.4f | mel=%.4f",
-                    overall_progress, epoch, raw["training"]["epochs"],
+                    "TRAIN %s %6.2f%% | epoch=%d/%d | batch=%d/%d | step=%d/%d | "
+                    "step_time=%.2fs | rolling=%.2fs | speed=%.2f steps/min | ETA=%s | "
+                    "generator=%.4f | discriminator=%.4f | mel=%.4f",
+                    progress_bar(global_step, planned_total_steps), overall_progress,
+                    epoch, raw["training"]["epochs"],
                     batch_index, len(loader), global_step, planned_total_steps,
-                    seconds_per_step, eta, loss_g.item(), loss_d.item(), loss_mel.item(),
+                    seconds_per_step, rolling_step_time, 60.0 / max(rolling_step_time, 1e-9),
+                    eta, loss_g.item(), loss_d.item(), loss_mel.item(),
                     extra={"tts_style": "progress"},
                 )
                 last_log_time = now
                 last_log_step = global_step
+                live_progress.update(global_step, live_detail)
             checkpoint_every = raw["training"].get("checkpoint_every_steps", 5000)
             if global_step % checkpoint_every == 0:
+                live_progress.clear()
                 logger.info("CHECKPOINT SAVE | step=%d", global_step)
                 save_training_checkpoint(
                     destination / f"step-{global_step:09d}", generator=generator,
@@ -449,6 +487,12 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     quality_summary=quality_summary,
                     metrics={"generator": loss_g.item(), "discriminator": loss_d.item(), "mel": loss_mel.item()},
                 )
+                logger.info(
+                    "CHECKPOINT SAVED | step=%d | path=%s",
+                    global_step, destination / f"step-{global_step:09d}",
+                    extra={"tts_style": "success"},
+                )
+                live_progress.update(global_step, live_detail)
             if max_steps is not None and global_step >= max_steps:
                 break
         train_metrics = {
@@ -460,6 +504,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             or (max_steps is not None and global_step >= max_steps)
         )
         if should_evaluate:
+            live_progress.clear()
             logger.info(
                 "VALIDATION START | epoch=%d | batches=%d",
                 epoch, len(validation_loader),
@@ -483,6 +528,10 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     "best_epoch": best_epoch,
                     "mode": "min",
                 }
+                logger.info(
+                    "BEST CHECKPOINT SAVE START | epoch=%d | metric=%s | value=%.6f",
+                    epoch, selection_metric, best_value,
+                )
                 save_training_checkpoint(
                     destination / "best", generator=generator, discriminator=discriminator,
                     optimizer_g=optimizer_g, optimizer_d=optimizer_d, epoch=epoch,
@@ -505,6 +554,11 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             "best_epoch": best_epoch,
             "mode": "min",
         } if validation_enabled else {"enabled": False}
+        live_progress.clear()
+        logger.info(
+            "LAST CHECKPOINT SAVE START | epoch=%d | step=%d | path=%s",
+            epoch, global_step, destination / "last",
+        )
         save_training_checkpoint(
             destination / "last", generator=generator, discriminator=discriminator,
             optimizer_g=optimizer_g, optimizer_d=optimizer_d, epoch=epoch,
@@ -516,12 +570,14 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             metrics={"train": train_metrics, "validation": validation_metrics},
         )
         logger.info(
-            "EPOCH DONE | epoch=%d/%d | step=%d | total_elapsed=%s | checkpoint=%s",
+            "LAST CHECKPOINT SAVED | epoch=%d/%d | step=%d | total_elapsed=%s | checkpoint=%s",
             epoch, raw["training"]["epochs"], global_step,
             format_duration(time.monotonic() - training_started), destination / "last",
             extra={"tts_style": "success"},
         )
+        live_progress.update(global_step, f"epoch={epoch} checkpoint saved")
         if max_steps is not None and global_step >= max_steps: break
+    live_progress.close()
     logger.info(
         "TRAINING DONE | steps=%d | elapsed=%s | checkpoint=%s",
         global_step, format_duration(time.monotonic() - training_started),
