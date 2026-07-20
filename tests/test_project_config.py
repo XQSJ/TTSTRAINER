@@ -20,10 +20,31 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(result["model"], {"a": 1, "b": 3})
             self.assertEqual(result["training"], {"epochs": 10, "batch_size": 4})
 
-    def test_public_train1_config_resolves(self):
+    def test_public_preset_hides_internal_config_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "quality.json"
+            config.write_text(json.dumps({
+                "preset": "quality",
+                "experiment": {"name": "clear_config", "languages": ["en"]},
+                "training": {"batch_size": 2},
+            }), encoding="utf-8")
+            resolved = load_project_config(config)
+            self.assertEqual(resolved["model"]["hidden_channels"], 256)
+            self.assertEqual(resolved["training"]["batch_size"], 2)
+            self.assertEqual(resolved["training"]["log_every_steps"], 10)
+
+    def test_rejects_unknown_public_preset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "invalid.json"
+            config.write_text('{"preset":"mystery"}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown config preset"):
+                load_project_config(config)
+
+    def test_public_train1_uses_quality_defaults(self):
         config = load_project_config("training_configs/train1.json")
-        self.assertEqual(config["model"]["hidden_channels"], 128)
-        self.assertEqual(config["training"]["batch_size"], 8)
+        self.assertEqual(config["model"]["hidden_channels"], 256)
+        self.assertEqual(config["training"]["batch_size"], 4)
+        self.assertEqual(config["training"]["log_every_steps"], 10)
         self.assertEqual(config["experiment"]["name"], "model_1")
         self.assertEqual(config["experiment"]["languages"], ["zh", "en", "ja", "ko", "fr", "es", "pt"])
         self.assertEqual(config["language_registry"]["de"]["teacher"]["language"], "German")
@@ -36,7 +57,7 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(config["experiment"]["name"], "model_2")
         self.assertEqual(config["experiment"]["languages"], ["en", "fr", "es", "pt"])
         self.assertEqual(config["generation"]["voice"]["mode"], "design")
-        self.assertEqual(config["model"]["hidden_channels"], 128)
+        self.assertEqual(config["model"]["hidden_channels"], 256)
         self.assertEqual(config["generation"]["generation_kwargs"]["max_new_tokens"], 2048)
 
     def test_public_workflow_examples_resolve(self):

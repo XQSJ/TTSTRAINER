@@ -1,15 +1,10 @@
 {
   "_comment": "高质量训练基线示例；使用新模型名，但可复用相同 voice.id 的共享 WAV / Higher-quality baseline example; use a new model name while reusing shared WAVs with the same voice.id",
-  "extends": "../configs/internal/quality_pipeline_defaults.json",
+  "preset": "quality",
   "experiment": {
-    "_comment": "不要用紧凑模型的 checkpoint 续训；质量预设结构不同 / Do not resume a compact checkpoint; the quality architecture is different",
+    "_comment": "使用新模型名从零训练；不要加载紧凑模型 checkpoint / Use a new name and train from scratch; do not load a compact checkpoint",
     "name": "model_quality_1",
-    "languages": ["zh", "en"],
-    "device": "auto",
-    "initialization": {
-      "mode": "scratch",
-      "checkpoint": null
-    }
+    "languages": ["zh", "en"]
   },
   "text_generation": {
     "_comment": "替换成自己的共享文本设置；相同语义配置会复用公共语料 / Replace with your shared text settings; identical semantic settings reuse the corpus",
@@ -19,8 +14,6 @@
   },
   "generation": {
     "_comment": "voice 字段必须与旧配置完全相同才能复用 WAV / Voice fields must exactly match the old config to reuse WAVs",
-    "enabled": true,
-    "qwen_runtime": "installed",
     "voice": {
       "id": "voice_01",
       "mode": "design",
@@ -34,13 +27,5 @@
     "_comment": "先用 batch_size=4；显存不足改为 2，质量训练不要只跑 20 epoch / Start at batch_size=4; use 2 on OOM and do not stop quality training at 20 epochs",
     "batch_size": 4,
     "epochs": 200
-  },
-  "quality": {
-    "_comment": "正式训练强烈建议安装 quality extra 并开启 semantic / Production training should install the quality extra and enable semantic checks",
-    "enabled": true,
-    "fail_on_error": true,
-    "semantic": {
-      "enabled": false
-    }
   }
 }

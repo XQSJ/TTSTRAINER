@@ -1,6 +1,6 @@
 {
   "_comment": "在旧模型中增加新音色的示例 / Example: add a new voice to an existing model",
-  "extends": "../configs/internal/pipeline_defaults.json",
+  "preset": "compact",
   "experiment": {
     "_comment": "languages 及顺序必须与旧模型一致；使用新 name 保留旧模型 / Keep languages and order identical; use a new name to preserve the old model",
     "name": "model_1_voice02",
@@ -35,9 +35,6 @@
     "batch_size": 8,
     "learning_rate_generator": 0.0001,
     "learning_rate_discriminator": 0.0001,
-    "epochs": 300,
-    "checkpoint_every_steps": 2000,
-    "num_workers": 0,
-    "seed": 1337
+    "epochs": 300
   }
 }

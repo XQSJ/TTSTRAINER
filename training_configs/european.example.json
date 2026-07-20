@@ -1,22 +1,14 @@
 {
   "_comment": "示例：选择新增的德俄意语言训练欧洲语言模型 / Example: select newly registered German, Russian and Italian",
-  "extends": "../configs/internal/pipeline_defaults.json",
+  "preset": "compact",
   "experiment": {
     "_comment": "name 决定独立输出目录；语言顺序决定 language ID / name selects isolated output folders; language order defines IDs",
     "name": "european_reader",
     "_comment_languages": "Qwen 官方十语中的欧洲语言组合 / A European subset of Qwen's official ten languages",
-    "languages": ["en", "de", "fr", "ru", "es", "pt", "it"],
-    "device": "auto",
-    "initialization": {
-      "_comment": "新语言组合从零训练 / Train a new language combination from scratch",
-      "mode": "scratch",
-      "checkpoint": null
-    }
+    "languages": ["en", "de", "fr", "ru", "es", "pt", "it"]
   },
   "generation": {
     "_comment": "只从 CSV 选择上方启用的语言 / Select only enabled languages from the CSV",
-    "enabled": true,
-    "qwen_runtime": "installed",
     "text_manifest": "datasets/texts.example.csv",
     "voice": {
       "_comment": "先设计参考音色，再跨语言克隆 / Design a reference voice, then clone it across languages",
@@ -29,14 +21,8 @@
     }
   },
   "training": {
-    "_comment": "log_every_steps 控制训练损失日志频率 / log_every_steps controls loss log frequency",
+    "_comment": "普通用户只需调整批大小和训练轮数 / Most users only need to tune batch size and epochs",
     "batch_size": 8,
-    "learning_rate_generator": 0.0002,
-    "learning_rate_discriminator": 0.0002,
-    "epochs": 1000,
-    "checkpoint_every_steps": 5000,
-    "log_every_steps": 10,
-    "num_workers": 0,
-    "seed": 1337
+    "epochs": 1000
   }
 }

@@ -1,17 +1,11 @@
 {
   "_comment": "示例一：一个配置文件训练一个独立模型 / Example 1: one config file trains one independent model",
-  "extends": "../configs/internal/pipeline_defaults.json",
+  "preset": "quality",
   "experiment": {
-    "_comment": "模型身份、语言和启动方式；name 自动决定 datasets/runs/artifacts 目录 / Model identity, languages and initialization; name automatically determines datasets/runs/artifacts directories",
+    "_comment": "模型名称和语言；name 自动决定 datasets/runs/artifacts 目录 / Model name and languages; name automatically determines datasets/runs/artifacts directories",
     "name": "model_1",
     "_comment_languages": "内置可选 zh/en/ja/ko/de/fr/ru/pt/es/it；顺序决定 language ID / Built-ins: zh/en/ja/ko/de/fr/ru/pt/es/it; order defines language IDs",
-    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
-    "device": "auto",
-    "initialization": {
-      "_comment": "scratch=从零训练，resume=续训，expand_speakers=增加音色 / scratch=new model, resume=continue training, expand_speakers=add voices",
-      "mode": "scratch",
-      "checkpoint": null
-    }
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"]
   },
   "text_generation": {
     "_comment": "默认自动生成少量流程验证文本；产品训练请关闭并提供人工审核 CSV / Generates a small smoke-test corpus by default; disable it and provide reviewed CSV text for production",
@@ -20,9 +14,7 @@
     "sentences_per_language": 20
   },
   "generation": {
-    "_comment": "Qwen 样本生成；enabled=false 时使用自己准备的 WAV/metadata / Qwen sample generation; set enabled=false to use your own WAV/metadata",
-    "enabled": true,
-    "qwen_runtime": "installed",
+    "_comment": "使用 Qwen 根据音色设置生成训练音频 / Use Qwen to generate training audio from the voice settings",
     "voice": {
       "_comment": "design 使用文字描述设计音色 / design creates a voice from a natural-language description",
       "_comment_id": "id 决定可跨模型复用的公共音频目录；speaker 是模型内标签 / id selects the reusable shared audio directory; speaker is the in-model label",
@@ -35,29 +27,8 @@
     }
   },
   "training": {
-    "_comment": "常用微调参数；显存不足时先降低 batch_size / Common tuning options; reduce batch_size first when GPU memory is insufficient",
-    "batch_size": 8,
-    "learning_rate_generator": 0.0002,
-    "learning_rate_discriminator": 0.0002,
-    "epochs": 1000,
-    "checkpoint_every_steps": 5000,
-    "log_every_steps": 10,
-    "num_workers": 0,
-    "seed": 1337
-  },
-  "validation": {
-    "_comment": "自动留出验证集并导出最佳模型；通常只需调整 fraction / Automatically hold out validation data and export the best model; normally only tune fraction",
-    "enabled": true,
-    "fraction": 0.05,
-    "metric": "mel",
-    "export_checkpoint": "best"
-  },
-  "quality": {
-    "_comment": "基础信号质检默认开启且不下载模型；semantic=true 时需先安装 quality extra 并下载 ASR/声纹模型 / Signal checks are model-free; semantic=true requires the quality extra and explicit ASR/speaker model downloads",
-    "enabled": true,
-    "fail_on_error": true,
-    "semantic": {
-      "enabled": false
-    }
+    "_comment": "普通用户只需调整批大小和训练轮数 / Most users only need to tune batch size and epochs",
+    "batch_size": 4,
+    "epochs": 200
   }
 }

@@ -1,17 +1,11 @@
 {
   "_comment": "示例：自动生成多语言文本后完成音频生成和训练 / Example: generate multilingual text before audio generation and training",
-  "extends": "../configs/internal/pipeline_defaults.json",
+  "preset": "compact",
   "experiment": {
     "_comment": "修改 name 和 languages 即可创建独立任务 / Change name and languages to create an isolated job",
     "name": "auto_text_reader",
     "_comment_languages": "按需选择内置语言；中日韩会自动路由到专用 G2P / Select built-in languages as needed; Chinese, Japanese and Korean use dedicated G2P routes",
-    "languages": ["en", "de", "fr", "ru", "it"],
-    "device": "auto",
-    "initialization": {
-      "_comment": "从零训练自动文本模型 / Train the auto-text model from scratch",
-      "mode": "scratch",
-      "checkpoint": null
-    }
+    "languages": ["en", "de", "fr", "ru", "it"]
   },
   "text_generation": {
     "_comment": "builtin 不需要文本模型；适合流程验证和覆盖种子 / builtin needs no text model; use it for workflow validation and coverage seeding",
@@ -32,9 +26,6 @@
   },
   "generation": {
     "_comment": "自动使用 datasets/text_corpora 下的共享文本，不需要 text_manifest / Automatically consumes the shared corpus under datasets/text_corpora; no text_manifest is needed",
-    "enabled": true,
-    "qwen_runtime": "installed",
-    "auto_download_models": true,
     "voice": {
       "_comment": "使用 Prompt 设计统一音色 / Design one shared voice from a prompt",
       "id": "voice_01",
@@ -48,12 +39,6 @@
   "training": {
     "_comment": "先用 --max-steps 10 验证，再进行正式训练 / Validate with --max-steps 10 before full training",
     "batch_size": 8,
-    "learning_rate_generator": 0.0002,
-    "learning_rate_discriminator": 0.0002,
-    "epochs": 1000,
-    "checkpoint_every_steps": 5000,
-    "log_every_steps": 10,
-    "num_workers": 0,
-    "seed": 1337
+    "epochs": 1000
   }
 }

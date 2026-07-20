@@ -1,22 +1,14 @@
 {
   "_comment": "示例二：用另一份配置训练另一个独立模型 / Example 2: use another config to train another independent model",
-  "extends": "../configs/internal/pipeline_defaults.json",
+  "preset": "quality",
   "experiment": {
     "_comment": "model_2 会自动写入 datasets/model_2、runs/model_2 和 artifacts/model_2 / model_2 automatically writes to datasets/model_2, runs/model_2 and artifacts/model_2",
     "name": "model_2",
     "_comment_languages": "本例只训练英法西葡四种语言 / This example trains English, French, Spanish and Portuguese only",
-    "languages": ["en", "fr", "es", "pt"],
-    "device": "auto",
-    "initialization": {
-      "_comment": "从零训练第二个模型 / Start the second model from scratch",
-      "mode": "scratch",
-      "checkpoint": null
-    }
+    "languages": ["en", "fr", "es", "pt"]
   },
   "generation": {
     "_comment": "复用公共文本 CSV，但只生成 languages 中启用的语言 / Reuse the common text CSV but generate only enabled languages",
-    "enabled": true,
-    "qwen_runtime": "installed",
     "text_manifest": "datasets/texts.example.csv",
     "voice": {
       "_comment": "为 model_2 设计与 model_1 不同的音色 / Design a voice distinct from model_1",
@@ -30,14 +22,8 @@
     }
   },
   "training": {
-    "_comment": "每个模型可以使用不同训练参数和随机种子 / Each model may use different training settings and random seed",
-    "batch_size": 8,
-    "learning_rate_generator": 0.0002,
-    "learning_rate_discriminator": 0.0002,
-    "epochs": 1000,
-    "checkpoint_every_steps": 5000,
-    "log_every_steps": 10,
-    "num_workers": 0,
-    "seed": 2026
+    "_comment": "每个模型可以独立设置批大小和训练轮数 / Each model can set its own batch size and epochs",
+    "batch_size": 4,
+    "epochs": 200
   }
 }

@@ -8,15 +8,18 @@
 cp training_configs/train1.json training_configs/my_model.json
 ```
 
-`train1.json` 默认继承的是约 5M 参数的紧凑预设，适合验证数据、训练、ONNX 和手机
-链路，不应当被当作最终音质基线。正式训练请从质量预设开始：
+`train1.json` 默认使用 `"preset": "quality"`，对应约 39M 参数的高质量基线，
+适合作为正式训练起点。若只是验证数据、训练、ONNX 和手机链路，可以改为约 5M
+参数的 `"preset": "compact"`；紧凑模型不应被当作最终音质基线。
+
+也可以直接复制专门的质量示例：
 
 ```bash
 cp training_configs/quality.example.json training_configs/my_quality.json
 ```
 
-高质量基线约 39M Generator，使用 3/7/11 三组 HiFi-GAN ResBlock，默认训练 200
-epoch。它比紧凑预设更慢、更占显存；OOM 时把 `training.batch_size` 从 4 降到 2。
+高质量基线使用 3/7/11 三组 HiFi-GAN ResBlock，默认训练 200 epoch。它比紧凑
+预设更慢、更占显存；OOM 时把 `training.batch_size` 从 4 降到 2。
 紧凑模型与质量模型结构不兼容，必须使用新的 `experiment.name` 并从 `scratch` 开始，
 但只要文本语义配置和 `generation.voice` 完全相同，就会复用公共文本与 WAV，不会再次
 调用 LLM 或 Qwen。
@@ -77,6 +80,7 @@ CSV 或 OpenAI-compatible 文本服务自动扩写，配置示例见
 
 ```json
 {
+  "preset": "quality",
   "experiment": {
     "name": "my_model",
     "languages": ["zh", "en"]
@@ -94,8 +98,8 @@ CSV 或 OpenAI-compatible 文本服务自动扩写，配置示例见
     }
   },
   "training": {
-    "batch_size": 8,
-    "epochs": 1000
+    "batch_size": 4,
+    "epochs": 200
   }
 }
 ```
@@ -672,23 +676,20 @@ checkpoint。程序会比较 `frontend.lock.json` 和 checkpoint 契约并拒绝
 
 普通用户只需在 `training_configs/` 中新建或复制 JSON。
 例如 [train1.json](training_configs/train1.json) 和 [train2.json](training_configs/train2.json)。
-每个文件对应一个独立模型，并通过 `extends`
-自动继承内部默认值：
+每个文件对应一个独立模型。普通用户只选择一个名字清楚的 `preset`，无需理解内部
+配置文件路径：
 
 ```text
-configs/system/language_registry.json              # 内置语言声明
-                    ↓
-configs/system/vits_mobile_architecture.json       # 专家结构参数
-                    ↓
-configs/internal/pipeline_defaults.json           # Qwen/流水线细节
-                    ↓
-training_configs/train1.json                       # model_1 的用户参数
-training_configs/train2.json                       # model_2 的用户参数
-                    ↓
-最终合并配置
+"preset": "compact" → 约 5M，验证流程和端侧紧凑模型
+"preset": "quality" → 约 39M，高质量训练基线
+                         ↓
+用户只写模型名、语言、文本、音色、batch_size 和 epochs
+                         ↓
+程序自动合并 configs/internal/ 中的专家默认值
 ```
 
-相对继承路径以当前配置文件所在目录为基准，因此复制项目到其他目录仍然有效。
+旧配置中的 `extends` 仍然兼容，但新配置和公开示例统一使用 `preset`。实际合并后的
+完整配置保存在 `runs/<name>/resolved-config.json`，方便复现和排查。
 
 ### 第一层：每个模型都要确认
 
@@ -703,18 +704,15 @@ training_configs/train2.json                       # model_2 的用户参数
 
 ### 第二层：根据机器和训练效果微调
 
-这些参数都在外层配置的 `training` 中，可以为 `train1.json`、`train2.json`
-分别设置：
+普通用户通常只调整下面两个参数：
 
 | 参数 | 用途 | 推荐调整方式 |
 |---|---|---|
 | `batch_size` | 每批样本数 | OOM 时优先减半 |
 | `epochs` | 最大训练轮数 | 小数据先用 10～100 验证 |
-| `checkpoint_every_steps` | 周期 checkpoint | 调试 100～500，正式 5000 |
-| `log_every_steps` | 输出 GAN/Mel loss 的步数间隔 | 调试 1～10，正式 10～100 |
-| `num_workers` | 数据读取进程 | macOS 先用 0，Linux 可试 2～8 |
-| `seed` | 随机种子 | 复现实验时保持不变 |
-| 两个 learning rate | GAN 学习速度 | 首轮保持默认，GAN 失衡后再调 |
+
+日志频率、checkpoint 周期、数据线程、随机种子和学习率已经放入内部预设，不需要
+复制到每一份用户配置。专家确实需要调整时，再在用户配置中写同名字段覆盖即可。
 
 ### 一份完整的普通用户配置
 
@@ -723,25 +721,22 @@ training_configs/train2.json                       # model_2 的用户参数
 ```json
 {
   "_comment": "一个配置训练一个独立模型 / One config trains one independent model",
-  "extends": "../configs/internal/pipeline_defaults.json",
+  "preset": "quality",
   "experiment": {
-    "_comment": "name 自动决定输出目录 / name automatically determines output directories",
+    "_comment": "只需设置模型名和语言 / Set only the model name and languages",
     "name": "model_1",
     "_comment_languages": "顺序决定 language ID / Order defines language IDs",
-    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
-    "device": "auto",
-    "initialization": {
-      "mode": "scratch",
-      "checkpoint": null
-    }
+    "languages": ["zh", "en"]
+  },
+  "text_generation": {
+    "enabled": true,
+    "provider": "builtin",
+    "sentences_per_language": 20
   },
   "generation": {
-    "_comment": "enabled=false 时使用自备音频 / Use your own audio when enabled=false",
-    "enabled": true,
-    "qwen_runtime": "installed",
-    "text_manifest": "datasets/texts.example.csv",
     "voice": {
       "_comment": "design 根据 prompt 设计音色 / design creates a voice from the prompt",
+      "id": "voice_01",
       "mode": "design",
       "speaker": "voice_01",
       "prompt": "A warm and natural adult voice with clear pronunciation.",
@@ -751,14 +746,8 @@ training_configs/train2.json                       # model_2 的用户参数
   },
   "training": {
     "_comment": "显存不足时先降低 batch_size / Reduce batch_size first on OOM",
-    "batch_size": 8,
-    "learning_rate_generator": 0.0002,
-    "learning_rate_discriminator": 0.0002,
-    "epochs": 1000,
-    "checkpoint_every_steps": 5000,
-    "log_every_steps": 10,
-    "num_workers": 0,
-    "seed": 1337
+    "batch_size": 4,
+    "epochs": 200
   }
 }
 ```
@@ -1298,8 +1287,9 @@ TTS_TRAINER_LOG_COLOR=always python -m tts_trainer run-pipeline --config trainin
 NO_COLOR=1 python -m tts_trainer run-pipeline --config training_configs/train1.json
 ```
 
-训练损失的完整日志频率由外层配置的 `training.log_every_steps` 控制。交互终端仍会
-每个 step 更新同一行进度条。ETA 前三个 step 显示 `warming-up`，之后使用最近 20 步
+交互终端每个 step 只原地更新同一行进度条；内部 `training.log_every_steps` 只负责
+定期留下可保存、可重定向的损失记录，因此不再出现在普通用户配置里。ETA 前三个 step
+显示 `warming-up`，之后使用最近 20 步
 耗时的中位数估算，避免 CUDA 首步预热把剩余时间夸大。流水线也会显示音频后处理、
 metadata、音素化、信号质检、ASR/声纹质检、验证批次、checkpoint 和 ONNX 导出进度。
 
