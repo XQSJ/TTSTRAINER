@@ -14,6 +14,7 @@
     "text_encoder_heads": 4,
     "flow_layers": 4,
     "decoder_initial_channels": 256,
+    "decoder_resblock_kernel_sizes": [3],
     "upsample_rates": [8, 8, 2, 2],
     "upsample_kernel_sizes": [16, 16, 4, 4],
     "segment_frames": 32
@@ -23,7 +24,8 @@
     "n_fft": 1024,
     "hop_length": 256,
     "win_length": 1024,
-    "n_mels": 80
+    "n_mels": 80,
+    "mel_power": 2.0
   },
   "frontend": {
     "require_phonemes": true,

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import random
 import json
 import logging
 import math
+import random
 import time
 import warnings
 from collections import Counter, deque
@@ -135,6 +135,26 @@ def _resolve_frontend_contract(raw: dict, metadata: Path, languages: tuple[str, 
     return current.to_dict()
 
 
+def _semantic_reference_root(dataset_dir: Path) -> Path:
+    """Return the shared voice reference directory recorded for this dataset."""
+    fallback = dataset_dir / "references"
+    record_path = dataset_dir / "dataset.json"
+    if not record_path.is_file():
+        return fallback
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        logger.warning(
+            "SEMANTIC QUALITY | cannot read dataset record=%s | fallback=%s | error=%s",
+            record_path, fallback, error,
+        )
+        return fallback
+    voice_dataset = record.get("voice_dataset")
+    if not voice_dataset:
+        return fallback
+    return Path(voice_dataset).expanduser().resolve() / "references"
+
+
 def train_vits(config_path: str, metadata_path: str | None = None,
                output_dir: str | None = None, *, device_name: str | None = None,
                max_steps: int | None = None):
@@ -203,11 +223,15 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         )
         semantic_config = quality_config.get("semantic", {})
         if semantic_config.get("enabled", False):
-            logger.info("semantic quality gate status=started items=%d", len(items))
+            reference_root = _semantic_reference_root(layout.dataset_dir)
+            logger.info(
+                "semantic quality gate status=started items=%d reference_root=%s",
+                len(items), reference_root,
+            )
             semantic_report = run_semantic_quality_gate(
                 items, semantic_config,
                 layout.run_dir / "quality" / "semantic-quality-report.json",
-                reference_root=layout.dataset_dir / "references",
+                reference_root=reference_root,
             )
             quality_summary["semantic"] = {
                 key: semantic_report[key]
@@ -304,6 +328,20 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         generator_parameters, discriminator_parameters, len(loader),
         len(validation_loader) if validation_loader is not None else 0,
     )
+    if generator_parameters < 10_000_000:
+        logger.warning(
+            "COMPACT MODEL | generator_parameters=%d | intended for pipeline/mobile-size "
+            "validation; use configs/internal/quality_pipeline_defaults.json when sound "
+            "quality matters",
+            generator_parameters,
+        )
+    if raw.get("generation", {}).get("enabled", False) and not raw.get(
+        "quality", {},
+    ).get("semantic", {}).get("enabled", False):
+        logger.warning(
+            "SYNTHETIC DATA WITHOUT SEMANTIC GATE | ASR and speaker consistency checks are "
+            "disabled; pronunciation errors and voice drift can be learned by the student"
+        )
     if device.type == "cuda":
         logger.info(
             "GPU MEMORY | allocated=%.2f GiB | reserved=%.2f GiB | device=%s",
@@ -327,8 +365,13 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     mel_transform = torchaudio.transforms.MelSpectrogram(
         sample_rate=audio_config.sample_rate, n_fft=audio_config.n_fft,
         win_length=audio_config.win_length, hop_length=audio_config.hop_length,
-        n_mels=audio_config.n_mels, center=False,
+        n_mels=audio_config.n_mels, center=False, power=audio_config.mel_power,
     ).to(device)
+    logger.info(
+        "loss setup mel_power=%.1f segment_frames=%d segment_samples=%d",
+        audio_config.mel_power, config.segment_frames,
+        config.segment_frames * audio_config.hop_length,
+    )
     destination = layout.checkpoints_dir
     vocabulary.save(layout.run_dir / "vocab.json")
     if start_epoch > raw["training"]["epochs"]:
@@ -380,6 +423,12 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         logger.warning(
             "LARGE TRAINING PLAN | target_steps=%d | use the rolling ETA after warm-up to "
             "decide whether training.epochs should be reduced",
+            planned_total_steps,
+        )
+    elif max_steps is None and planned_total_steps < 50_000:
+        logger.warning(
+            "SHORT TRAINING PLAN | target_steps=%d | often insufficient for a VITS model "
+            "trained from scratch; inspect validation audio before accepting the export",
             planned_total_steps,
         )
     live_progress.update(global_step, "warming up first batches")

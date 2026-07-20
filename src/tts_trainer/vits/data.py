@@ -19,6 +19,7 @@ class AudioConfig:
     hop_length: int = 256
     win_length: int = 1024
     n_mels: int = 80
+    mel_power: float = 2.0
 
 
 class VitsDataset(torch.utils.data.Dataset):

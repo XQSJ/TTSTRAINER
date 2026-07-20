@@ -40,8 +40,9 @@ class PiperInferenceWrapper(nn.Module):
 
 def _config_from_metadata(raw: dict) -> VitsConfig:
     config = dict(raw["config"])
-    config["upsample_rates"] = tuple(config["upsample_rates"])
-    config["upsample_kernel_sizes"] = tuple(config["upsample_kernel_sizes"])
+    for key in ("decoder_resblock_kernel_sizes", "upsample_rates", "upsample_kernel_sizes"):
+        if key in config:
+            config[key] = tuple(config[key])
     return VitsConfig(**config)
 
 

@@ -21,6 +21,7 @@ class VitsConfig:
     text_encoder_heads: int = 4
     flow_layers: int = 4
     decoder_initial_channels: int = 256
+    decoder_resblock_kernel_sizes: tuple[int, ...] = (3,)
     upsample_rates: tuple[int, ...] = (8, 8, 2, 2)
     upsample_kernel_sizes: tuple[int, ...] = (16, 16, 4, 4)
     segment_frames: int = 32
@@ -30,6 +31,10 @@ class VitsConfig:
             raise ValueError("hidden_channels must be divisible by text_encoder_heads")
         if len(self.upsample_rates) != len(self.upsample_kernel_sizes):
             raise ValueError("upsample rates and kernels must have equal length")
+        if not self.decoder_resblock_kernel_sizes or any(
+            kernel < 3 or kernel % 2 == 0 for kernel in self.decoder_resblock_kernel_sizes
+        ):
+            raise ValueError("decoder resblock kernels must be non-empty odd integers >= 3")
         if any(kernel < rate or (kernel - rate) % 2 for rate, kernel in zip(self.upsample_rates, self.upsample_kernel_sizes)):
             raise ValueError("each upsample kernel must produce an exact integer-length expansion")
         if min(self.vocab_size, self.num_languages, self.num_speakers) <= 0:
@@ -51,7 +56,7 @@ def load_vits_config(path: str | Path, *, vocab_size: int | None = None) -> Vits
     model = raw.get("model", raw)
     if vocab_size is not None:
         model["vocab_size"] = vocab_size
-    for key in ("upsample_rates", "upsample_kernel_sizes"):
+    for key in ("decoder_resblock_kernel_sizes", "upsample_rates", "upsample_kernel_sizes"):
         if key in model:
             model[key] = tuple(model[key])
     return VitsConfig(**model)

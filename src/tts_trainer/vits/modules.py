@@ -179,12 +179,17 @@ class ResidualCouplingFlow(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, channels: int):
+    def __init__(self, channels: int, kernel_size: int = 3):
         super().__init__()
         self.convs = nn.ModuleList()
         for dilation in (1, 3, 5):
-            self.convs.append(nn.Conv1d(channels, channels, 3, padding=dilation, dilation=dilation))
-            self.convs.append(nn.Conv1d(channels, channels, 3, padding=1))
+            padding = (kernel_size * dilation - dilation) // 2
+            self.convs.append(nn.Conv1d(
+                channels, channels, kernel_size, padding=padding, dilation=dilation,
+            ))
+            self.convs.append(nn.Conv1d(
+                channels, channels, kernel_size, padding=(kernel_size - 1) // 2,
+            ))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for first, second in zip(self.convs[::2], self.convs[1::2]):
@@ -196,7 +201,8 @@ class ResBlock(nn.Module):
 
 class WaveformDecoder(nn.Module):
     def __init__(self, latent_channels: int, condition_channels: int, initial_channels: int,
-                 upsample_rates: tuple[int, ...], upsample_kernels: tuple[int, ...]):
+                 upsample_rates: tuple[int, ...], upsample_kernels: tuple[int, ...],
+                 resblock_kernels: tuple[int, ...] = (3,)):
         super().__init__()
         self.pre = nn.Conv1d(latent_channels, initial_channels, 7, padding=3)
         self.condition = nn.Conv1d(condition_channels, initial_channels, 1)
@@ -207,41 +213,78 @@ class WaveformDecoder(nn.Module):
             next_channels = channels // 2
             self.upsamples.append(nn.ConvTranspose1d(channels, next_channels, kernel, stride=rate,
                                                      padding=(kernel - rate) // 2))
-            self.resblocks.append(ResBlock(next_channels))
+            if len(resblock_kernels) == 1:
+                # Preserve compact-model checkpoint keys created before quality presets existed.
+                self.resblocks.append(ResBlock(next_channels, resblock_kernels[0]))
+            else:
+                self.resblocks.append(nn.ModuleList(
+                    ResBlock(next_channels, kernel) for kernel in resblock_kernels
+                ))
             channels = next_channels
         self.post = nn.Conv1d(channels, 1, 7, padding=3)
 
     def forward(self, latent: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
         hidden = self.pre(latent) + self.condition(g)
         for upsample, resblock in zip(self.upsamples, self.resblocks):
-            hidden = resblock(upsample(F.leaky_relu(hidden, 0.1)))
+            hidden = upsample(F.leaky_relu(hidden, 0.1))
+            if isinstance(resblock, nn.ModuleList):
+                hidden = sum(block(hidden) for block in resblock) / len(resblock)
+            else:
+                hidden = resblock(hidden)
         return torch.tanh(self.post(F.leaky_relu(hidden, 0.1)))
 
 
 @torch.no_grad()
 def maximum_path(value: torch.Tensor, text_lengths: torch.Tensor, spec_lengths: torch.Tensor) -> torch.Tensor:
     """Monotonic alignment DP. `value` is [B, T_audio, T_text]."""
-    path = torch.zeros_like(value)
+    batch_size, max_audio, max_text = value.shape
     negative = value.new_tensor(torch.finfo(value.dtype).min)
-    for batch in range(value.shape[0]):
-        tx, ty = int(text_lengths[batch]), int(spec_lengths[batch])
-        if ty < tx:
-            raise ValueError(f"audio frames ({ty}) must be >= text tokens ({tx}) for MAS")
-        score = value.new_full((ty, tx), negative)
-        score[0, 0] = value[batch, 0, 0]
-        for y in range(1, ty):
-            start = max(0, tx - (ty - y))
-            end = min(tx, y + 1)
-            for x in range(start, end):
-                stay = score[y - 1, x]
-                move = score[y - 1, x - 1] if x else negative
-                score[y, x] = value[batch, y, x] + torch.maximum(stay, move)
-        x = tx - 1
-        for y in range(ty - 1, -1, -1):
-            path[batch, y, x] = 1
-            if x and y and score[y - 1, x - 1] >= score[y - 1, x]:
-                x -= 1
-    return path
+    if bool(torch.any(spec_lengths < text_lengths)):
+        failed = int(torch.nonzero(spec_lengths < text_lengths, as_tuple=False)[0, 0])
+        raise ValueError(
+            f"audio frames ({int(spec_lengths[failed])}) must be >= "
+            f"text tokens ({int(text_lengths[failed])}) for MAS"
+        )
+
+    # The old implementation launched one tiny GPU operation for every
+    # audio-frame/text-token cell. Vectorize the text dimension and keep only
+    # the unavoidable audio-frame recurrence on device.
+    scores = value.new_full((batch_size, max_audio, max_text), negative)
+    decisions = torch.zeros(
+        (batch_size, max_audio, max_text), dtype=torch.bool, device=value.device,
+    )
+    scores[:, 0, 0] = value[:, 0, 0]
+    text_positions = torch.arange(max_text, device=value.device).unsqueeze(0)
+    for audio_index in range(1, max_audio):
+        stay = scores[:, audio_index - 1]
+        move = F.pad(stay[:, :-1], (1, 0), value=float(negative))
+        choose_move = move >= stay
+        candidate = value[:, audio_index] + torch.maximum(stay, move)
+        valid = (
+            (audio_index < spec_lengths.unsqueeze(1))
+            & (text_positions < text_lengths.unsqueeze(1))
+            & (text_positions <= audio_index)
+            & (
+                text_positions
+                >= text_lengths.unsqueeze(1)
+                - (spec_lengths.unsqueeze(1) - audio_index)
+            )
+        )
+        scores[:, audio_index] = torch.where(valid, candidate, negative)
+        decisions[:, audio_index] = choose_move & valid
+
+    # One device-to-host transfer replaces thousands of scalar synchronizations.
+    decisions_cpu = decisions.cpu()
+    path_cpu = torch.zeros(
+        (batch_size, max_audio, max_text), dtype=value.dtype, device="cpu",
+    )
+    for batch in range(batch_size):
+        text_index = int(text_lengths[batch]) - 1
+        for audio_index in range(int(spec_lengths[batch]) - 1, -1, -1):
+            path_cpu[batch, audio_index, text_index] = 1
+            if text_index and audio_index and decisions_cpu[batch, audio_index, text_index]:
+                text_index -= 1
+    return path_cpu.to(value.device)
 
 
 @torch.no_grad()

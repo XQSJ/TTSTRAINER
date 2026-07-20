@@ -8,6 +8,19 @@
 cp training_configs/train1.json training_configs/my_model.json
 ```
 
+`train1.json` 默认继承的是约 5M 参数的紧凑预设，适合验证数据、训练、ONNX 和手机
+链路，不应当被当作最终音质基线。正式训练请从质量预设开始：
+
+```bash
+cp training_configs/quality.example.json training_configs/my_quality.json
+```
+
+高质量基线约 39M Generator，使用 3/7/11 三组 HiFi-GAN ResBlock，默认训练 200
+epoch。它比紧凑预设更慢、更占显存；OOM 时把 `training.batch_size` 从 4 降到 2。
+紧凑模型与质量模型结构不兼容，必须使用新的 `experiment.name` 并从 `scratch` 开始，
+但只要文本语义配置和 `generation.voice` 完全相同，就会复用公共文本与 WAV，不会再次
+调用 LLM 或 Qwen。
+
 ### 训练文本从哪里来
 
 有两种最常用的方式。
@@ -174,6 +187,7 @@ VITS 训练、checkpoint 保存和 ONNX 导出。
 | 你的目标 | 从哪个文件开始 |
 |---|---|
 | 用 Prompt 设计一个新音色并从零训练 | `training_configs/train1.json` |
+| 高质量训练基线 | `training_configs/quality.example.json` |
 | 再训练一个互不影响的模型 | `training_configs/train2.json` |
 | 训练包含德语、俄语和意大利语的模型 | `training_configs/european.example.json` |
 | 自动生成文本后训练 | `training_configs/auto-text.example.json` |

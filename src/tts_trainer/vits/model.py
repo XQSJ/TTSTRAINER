@@ -55,6 +55,7 @@ class MultilingualVITS(nn.Module):
         self.decoder = WaveformDecoder(
             config.latent_channels, config.conditioning_channels, config.decoder_initial_channels,
             config.upsample_rates, config.upsample_kernel_sizes,
+            config.decoder_resblock_kernel_sizes,
         )
 
     def forward(self, tokens: torch.Tensor, text_lengths: torch.Tensor, spectrogram: torch.Tensor,

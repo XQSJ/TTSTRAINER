@@ -53,6 +53,10 @@ class ProjectConfigTests(unittest.TestCase):
         auto_text = load_project_config("training_configs/auto-text.example.json")
         self.assertTrue(auto_text["text_generation"]["enabled"])
         self.assertEqual(auto_text["text_generation"]["provider"], "builtin")
+        quality = load_project_config("training_configs/quality.example.json")
+        self.assertEqual(quality["model"]["hidden_channels"], 256)
+        self.assertEqual(quality["model"]["decoder_resblock_kernel_sizes"], [3, 7, 11])
+        self.assertEqual(quality["training"]["epochs"], 200)
 
     def test_public_configs_keep_valid_bilingual_json_comments(self):
         config_paths = sorted(Path("training_configs").glob("*.json"))

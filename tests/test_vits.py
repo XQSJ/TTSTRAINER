@@ -13,7 +13,8 @@ from tts_trainer.checkpoints import load_training_checkpoint, save_training_chec
 from tts_trainer.vits import MultilingualVITS, VitsConfig, VitsDiscriminator
 from tts_trainer.vits.data import slice_waveforms
 from tts_trainer.vits.losses import discriminator_loss, generator_adversarial_loss
-from tts_trainer.vits.trainer import train_vits
+from tts_trainer.vits.modules import maximum_path
+from tts_trainer.vits.trainer import _semantic_reference_root, train_vits
 from tts_trainer.vits.trainer import (_load_expanded_generator,
                                       _resolve_frontend_contract)
 from tts_trainer.vits.exporter import (PiperInferenceWrapper, export_vits_onnx,
@@ -36,6 +37,21 @@ def tiny_config():
 
 
 class VitsTests(unittest.TestCase):
+    def test_semantic_quality_uses_shared_voice_reference_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = root / "datasets" / "model_a"
+            shared_voice = root / "datasets" / "voices" / "warm_girl" / "revision_a"
+            dataset.mkdir(parents=True)
+            (dataset / "dataset.json").write_text(json.dumps({
+                "voice_dataset": str(shared_voice),
+            }), encoding="utf-8")
+
+            self.assertEqual(
+                _semantic_reference_root(dataset),
+                shared_voice.resolve() / "references",
+            )
+
     def setUp(self):
         torch.manual_seed(7)
         self.config = tiny_config()
@@ -52,6 +68,44 @@ class VitsTests(unittest.TestCase):
         self.assertEqual(output.attention.shape, (2, 8, 4))
         (output.audio.abs().mean() + output.duration_loss).backward()
         self.assertIsNotNone(self.model.conditioning.speaker_embedding.weight.grad)
+
+    def test_vectorized_maximum_path_matches_reference_alignment(self):
+        value = torch.randn(2, 9, 5)
+        text_lengths = torch.tensor([5, 3])
+        spec_lengths = torch.tensor([9, 7])
+
+        def reference(scores, text_length, spec_length):
+            negative = scores.new_tensor(torch.finfo(scores.dtype).min)
+            dynamic = scores.new_full((spec_length, text_length), negative)
+            dynamic[0, 0] = scores[0, 0]
+            for audio_index in range(1, spec_length):
+                start = max(0, text_length - (spec_length - audio_index))
+                end = min(text_length, audio_index + 1)
+                for text_index in range(start, end):
+                    stay = dynamic[audio_index - 1, text_index]
+                    move = dynamic[audio_index - 1, text_index - 1] \
+                        if text_index else negative
+                    dynamic[audio_index, text_index] = (
+                        scores[audio_index, text_index] + torch.maximum(stay, move)
+                    )
+            result = torch.zeros_like(scores)
+            text_index = text_length - 1
+            for audio_index in range(spec_length - 1, -1, -1):
+                result[audio_index, text_index] = 1
+                if text_index and audio_index and (
+                    dynamic[audio_index - 1, text_index - 1]
+                    >= dynamic[audio_index - 1, text_index]
+                ):
+                    text_index -= 1
+            return result
+
+        actual = maximum_path(value, text_lengths, spec_lengths)
+        expected = torch.zeros_like(value)
+        for batch in range(2):
+            expected[batch] = reference(
+                value[batch], int(text_lengths[batch]), int(spec_lengths[batch]),
+            )
+        self.assertTrue(torch.equal(actual, expected))
 
     def test_inference_uses_language_and_speaker_inputs(self):
         audio, lengths, attention = self.model.infer(

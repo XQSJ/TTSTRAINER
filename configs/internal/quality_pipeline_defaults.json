@@ -1,0 +1,29 @@
+{
+  "_comment": "高质量训练基线；约 39M Generator，训练和显存成本显著高于默认紧凑预设 / Higher-quality training baseline; about 39M generator parameters with substantially higher training and memory cost",
+  "extends": "pipeline_defaults.json",
+  "model": {
+    "hidden_channels": 256,
+    "latent_channels": 256,
+    "conditioning_channels": 256,
+    "language_embedding_channels": 64,
+    "speaker_embedding_channels": 128,
+    "text_encoder_layers": 8,
+    "text_encoder_heads": 8,
+    "flow_layers": 8,
+    "decoder_initial_channels": 512,
+    "decoder_resblock_kernel_sizes": [3, 7, 11]
+  },
+  "audio": {
+    "mel_power": 1.0
+  },
+  "training": {
+    "batch_size": 4,
+    "learning_rate_generator": 0.0002,
+    "learning_rate_discriminator": 0.0002,
+    "epochs": 200,
+    "checkpoint_every_steps": 2500,
+    "log_every_steps": 10,
+    "num_workers": 2,
+    "seed": 1337
+  }
+}
