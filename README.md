@@ -1,5 +1,11 @@
 # tts-trainer
 
+> **重要修复（2026-07-21）：** 旧版训练代码错误地切断了文本先验的梯度，表现为
+> 训练 loss 下降、ONNX 能导出，但文本推理仍是噪音。请先 `git pull origin main`。
+> 旧的 format 1 checkpoint 无法修复，必须换一个新的 `experiment.name` 并以
+> `initialization.mode=scratch` 重新训练；已生成的公共文本和 Qwen WAV 会自动复用，
+> 不需要重新生成数据。新版 checkpoint format 为 2，加载旧模型时会明确拒绝。
+
 ## 最快开始：改一份配置，运行几条命令
 
 先复制示例配置：

@@ -9,7 +9,9 @@ from pathlib import Path
 
 import torch
 
-from tts_trainer.checkpoints import load_training_checkpoint, save_training_checkpoint
+from tts_trainer.checkpoints import (load_training_checkpoint,
+                                     require_checkpoint_format,
+                                     save_training_checkpoint)
 from tts_trainer.vits import MultilingualVITS, VitsConfig, VitsDiscriminator
 from tts_trainer.vits.data import slice_waveforms
 from tts_trainer.vits.losses import discriminator_loss, generator_adversarial_loss
@@ -37,6 +39,10 @@ def tiny_config():
 
 
 class VitsTests(unittest.TestCase):
+    def test_legacy_noise_checkpoint_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "untrained text prior"):
+            require_checkpoint_format(1)
+
     def test_semantic_quality_uses_shared_voice_reference_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -68,6 +74,28 @@ class VitsTests(unittest.TestCase):
         self.assertEqual(output.attention.shape, (2, 8, 4))
         (output.audio.abs().mean() + output.duration_loss).backward()
         self.assertIsNotNone(self.model.conditioning.speaker_embedding.weight.grad)
+
+    def test_kl_loss_trains_text_prior(self):
+        """The inference-only text prior must receive training gradients."""
+        tokens = torch.tensor([[2, 4, 5, 3], [2, 7, 3, 0]])
+        text_lengths = torch.tensor([4, 3])
+        spectrogram = torch.randn(2, 9, 8)
+        spec_lengths = torch.tensor([8, 7])
+        output = self.model(
+            tokens, text_lengths, spectrogram, spec_lengths,
+            torch.tensor([0, 1]), torch.tensor([0, 2]),
+        )
+
+        from tts_trainer.vits.losses import kl_loss
+        loss = kl_loss(
+            output.latent_prior, output.posterior_log_scale,
+            output.prior_mean, output.prior_log_scale, output.audio_mask,
+        )
+        loss.backward()
+
+        gradient = self.model.text_encoder.projection.weight.grad
+        self.assertIsNotNone(gradient)
+        self.assertGreater(float(gradient.abs().sum()), 0.0)
 
     def test_vectorized_maximum_path_matches_reference_alignment(self):
         value = torch.randn(2, 9, 5)

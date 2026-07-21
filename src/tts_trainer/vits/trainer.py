@@ -15,7 +15,8 @@ import torch
 import torchaudio
 from torch.nn import functional as F
 
-from ..checkpoints import CHECKPOINT_FORMAT, load_training_checkpoint, save_training_checkpoint
+from ..checkpoints import (load_training_checkpoint, require_checkpoint_format,
+                           save_training_checkpoint)
 from ..experiments import prepare_experiment, resolve_experiment
 from ..frontend import (FrontendContract, frontend_contract_from_config,
                         frontend_lock_path, load_frontend_contract,
@@ -49,8 +50,7 @@ def select_device(requested: str = "auto") -> torch.device:
 
 def _checkpoint_metadata(path: Path) -> dict:
     metadata = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
-    if metadata["format"] != CHECKPOINT_FORMAT:
-        raise ValueError("unsupported checkpoint format")
+    require_checkpoint_format(int(metadata["format"]))
     return metadata
 
 

@@ -5,7 +5,24 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 
-CHECKPOINT_FORMAT = 1
+# Format 1 checkpoints were produced while aligned text-prior statistics were
+# accidentally detached during training. Their text encoders did not learn a
+# usable inference prior, so exporting or resuming them generally produces
+# noise. Do not silently present those checkpoints as compatible.
+CHECKPOINT_FORMAT = 2
+
+
+def require_checkpoint_format(value: int) -> None:
+    if value == 1:
+        raise ValueError(
+            "checkpoint format 1 has an untrained text prior and produces noisy "
+            "text-only inference; update TTSTRAINER and retrain from scratch with "
+            "a new experiment.name"
+        )
+    if value != CHECKPOINT_FORMAT:
+        raise ValueError(
+            f"unsupported checkpoint format {value}; expected {CHECKPOINT_FORMAT}"
+        )
 
 
 def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
@@ -63,8 +80,8 @@ def load_training_checkpoint(directory: str | Path, *, generator, discriminator=
     source = Path(directory)
     metadata = json.loads((source / "metadata.json").read_text(encoding="utf-8"))
     state = torch.load(source / "training-state.pt", map_location=map_location, weights_only=False)
-    if state["format"] != CHECKPOINT_FORMAT or metadata["format"] != CHECKPOINT_FORMAT:
-        raise ValueError("unsupported checkpoint format")
+    require_checkpoint_format(int(metadata["format"]))
+    require_checkpoint_format(int(state["format"]))
     generator.load_state_dict(state["generator"])
     if discriminator is not None: discriminator.load_state_dict(state["discriminator"])
     if optimizer_g is not None: optimizer_g.load_state_dict(state["optimizer_g"])

@@ -72,8 +72,14 @@ class MultilingualVITS(nn.Module):
             scores = (-0.5 * difference.square() * inv_variance - text_log_scale.unsqueeze(2)).sum(1)
             attention = maximum_path(scores, text_lengths, spec_lengths)
             durations = attention.sum(1).unsqueeze(1)
-            expanded_mean = torch.matmul(attention, text_mean.transpose(1, 2)).transpose(1, 2)
-            expanded_log_scale = torch.matmul(attention, text_log_scale.transpose(1, 2)).transpose(1, 2)
+
+        # MAS is a discrete search and must not be differentiated, but the
+        # aligned text-prior statistics must remain in the autograd graph.
+        # Detaching these projections leaves the text encoder completely
+        # untrained: teacher-forced reconstruction can improve while
+        # text-only inference remains random noise.
+        expanded_mean = torch.matmul(attention, text_mean.transpose(1, 2)).transpose(1, 2)
+        expanded_log_scale = torch.matmul(attention, text_log_scale.transpose(1, 2)).transpose(1, 2)
 
         predicted_log_duration = self.duration_predictor(text_hidden, text_mask, g)
         target_log_duration = torch.log(durations + 1e-6) * text_mask

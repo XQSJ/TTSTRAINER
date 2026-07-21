@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from ..checkpoints import CHECKPOINT_FORMAT
+from ..checkpoints import require_checkpoint_format
 from ..frontend import frontend_contract_from_config
 from ..frontend.conformance import save_frontend_conformance
 from .config import VitsConfig
@@ -70,8 +70,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     checkpoint_dir = Path(checkpoint_dir)
     output_dir = Path(output_dir); output_dir.mkdir(parents=True, exist_ok=True)
     metadata = json.loads((checkpoint_dir / "metadata.json").read_text(encoding="utf-8"))
-    if metadata["format"] != CHECKPOINT_FORMAT:
-        raise ValueError("unsupported checkpoint format")
+    require_checkpoint_format(int(metadata["format"]))
     config = _config_from_metadata(metadata)
     logger.info("ONNX export step=1/5 action=load_checkpoint path=%s", checkpoint_dir)
     generator = MultilingualVITS(config)
