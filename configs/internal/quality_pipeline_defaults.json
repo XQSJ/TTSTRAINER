@@ -21,9 +21,14 @@
     "learning_rate_generator": 0.0002,
     "learning_rate_discriminator": 0.0002,
     "epochs": 200,
-    "checkpoint_every_steps": 2500,
-    "log_every_steps": 10,
+    "checkpoint_every_steps": 10000,
+    "checkpoint_every_epochs": 5,
+    "log_every_steps": 50,
     "num_workers": 2,
     "seed": 1337
+  },
+  "validation": {
+    "every_epochs": 5,
+    "preview_every_epochs": 10
   }
 }

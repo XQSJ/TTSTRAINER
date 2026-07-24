@@ -172,6 +172,11 @@ runs/my_model/validation-audio/epoch-XXXX/
 `best` 默认按 `prior_mel` 而不是 posterior 重建 mel 选择，避免把“音色已学会、文本仍
 杂乱”的 checkpoint 导出为最终模型。试听时应优先听 `text-only-inference.wav`。
 
+`quality` 预设默认每 50 step 写一条持久日志、每 5 epoch 验证并覆盖保存一次
+`last`、每 10,000 step 保存一个累计阶段 checkpoint；第 1 个 epoch 和最后一个 epoch
+始终保存。交互终端中的单行进度条仍逐 step 更新。普通用户无需把这些内部参数复制到
+训练配置中。
+
 ---
 
 这是一个面向移动端离线部署的多语言、多音色 VITS 训练工程。即使你没有语音

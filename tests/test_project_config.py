@@ -31,7 +31,10 @@ class ProjectConfigTests(unittest.TestCase):
             resolved = load_project_config(config)
             self.assertEqual(resolved["model"]["hidden_channels"], 256)
             self.assertEqual(resolved["training"]["batch_size"], 2)
-            self.assertEqual(resolved["training"]["log_every_steps"], 10)
+            self.assertEqual(resolved["training"]["log_every_steps"], 50)
+            self.assertEqual(resolved["training"]["checkpoint_every_steps"], 10000)
+            self.assertEqual(resolved["training"]["checkpoint_every_epochs"], 5)
+            self.assertEqual(resolved["validation"]["every_epochs"], 5)
 
     def test_rejects_unknown_public_preset(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -44,7 +47,8 @@ class ProjectConfigTests(unittest.TestCase):
         config = load_project_config("training_configs/train1.json")
         self.assertEqual(config["model"]["hidden_channels"], 256)
         self.assertEqual(config["training"]["batch_size"], 4)
-        self.assertEqual(config["training"]["log_every_steps"], 10)
+        self.assertEqual(config["training"]["log_every_steps"], 50)
+        self.assertEqual(config["training"]["checkpoint_every_epochs"], 5)
         self.assertEqual(config["experiment"]["name"], "model_1")
         self.assertEqual(config["experiment"]["languages"], ["zh", "en", "ja", "ko", "fr", "es", "pt"])
         self.assertEqual(config["language_registry"]["de"]["teacher"]["language"], "German")

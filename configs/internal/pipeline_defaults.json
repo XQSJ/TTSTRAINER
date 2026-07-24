@@ -132,6 +132,7 @@
     "lr_decay": 0.999875,
     "epochs": 1000,
     "checkpoint_every_steps": 5000,
+    "checkpoint_every_epochs": 1,
     "log_every_steps": 10,
     "num_workers": 0,
     "seed": 1337

@@ -407,6 +407,9 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     evaluation_every = int(validation_config.get("every_epochs", 1))
     if evaluation_every < 1:
         raise ValueError("validation.every_epochs must be at least 1")
+    checkpoint_every_epochs = int(raw["training"].get("checkpoint_every_epochs", 1))
+    if checkpoint_every_epochs < 1:
+        raise ValueError("training.checkpoint_every_epochs must be at least 1")
     # Smoke tests should visibly advance instead of appearing frozen between
     # step 1 and the configured logging interval. Full training still honors
     # training.log_every_steps to avoid flooding long-running server logs.
@@ -427,11 +430,13 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     )
     logger.info(
         "training plan epochs=%d start_epoch=%d max_steps=%s target_steps=%d log_every_steps=%d "
-        "batch_size=%d checkpoint_every_steps=%d",
+        "batch_size=%d checkpoint_every_steps=%d checkpoint_every_epochs=%d "
+        "validation_every_epochs=%d",
         raw["training"]["epochs"], start_epoch,
         max_steps if max_steps is not None else "unlimited",
         planned_total_steps, effective_log_every, raw["training"]["batch_size"],
         raw["training"].get("checkpoint_every_steps", 5000),
+        checkpoint_every_epochs, evaluation_every,
     )
     if planned_total_steps >= 100_000:
         logger.warning(
@@ -639,30 +644,45 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             "best_epoch": best_epoch,
             "mode": "min",
         } if validation_enabled else {"enabled": False}
+        reached_max_steps = max_steps is not None and global_step >= max_steps
+        final_epoch = epoch == raw["training"]["epochs"]
+        should_save_last = (
+            epoch == start_epoch or epoch % checkpoint_every_epochs == 0
+            or reached_max_steps or final_epoch
+        )
         live_progress.clear()
-        logger.info(
-            "LAST CHECKPOINT SAVE START | epoch=%d | step=%d | path=%s",
-            epoch, global_step, destination / "last",
-        )
-        save_training_checkpoint(
-            destination / "last", generator=generator, discriminator=discriminator,
-            optimizer_g=optimizer_g, optimizer_d=optimizer_d, epoch=epoch,
-            global_step=global_step, config=config, language_map=language_map,
-            speaker_map=speaker_map, tokens=vocabulary.tokens, frontend=frontend_contract,
-            frontend_conformance=frontend_conformance,
-            selection=selection, data_split=split_report,
-            quality_summary=quality_summary,
-            scheduler_g=scheduler_g, scheduler_d=scheduler_d,
-            metrics={"train": train_metrics, "validation": validation_metrics},
-        )
-        logger.info(
-            "LAST CHECKPOINT SAVED | epoch=%d/%d | step=%d | total_elapsed=%s | checkpoint=%s",
-            epoch, raw["training"]["epochs"], global_step,
-            format_duration(time.monotonic() - training_started), destination / "last",
-            extra={"tts_style": "success"},
-        )
-        live_progress.update(global_step, f"epoch={epoch} checkpoint saved")
-        if max_steps is not None and global_step >= max_steps: break
+        if should_save_last:
+            logger.info(
+                "LAST CHECKPOINT SAVE START | epoch=%d | step=%d | path=%s",
+                epoch, global_step, destination / "last",
+            )
+            save_training_checkpoint(
+                destination / "last", generator=generator, discriminator=discriminator,
+                optimizer_g=optimizer_g, optimizer_d=optimizer_d, epoch=epoch,
+                global_step=global_step, config=config, language_map=language_map,
+                speaker_map=speaker_map, tokens=vocabulary.tokens, frontend=frontend_contract,
+                frontend_conformance=frontend_conformance,
+                selection=selection, data_split=split_report,
+                quality_summary=quality_summary,
+                scheduler_g=scheduler_g, scheduler_d=scheduler_d,
+                metrics={"train": train_metrics, "validation": validation_metrics},
+            )
+            logger.info(
+                "LAST CHECKPOINT SAVED | epoch=%d/%d | step=%d | total_elapsed=%s | checkpoint=%s",
+                epoch, raw["training"]["epochs"], global_step,
+                format_duration(time.monotonic() - training_started), destination / "last",
+                extra={"tts_style": "success"},
+            )
+            live_progress.update(global_step, f"epoch={epoch} checkpoint saved")
+        else:
+            logger.info(
+                "EPOCH DONE | epoch=%d/%d | step=%d | checkpoint=skipped "
+                "(saved every %d epochs)",
+                epoch, raw["training"]["epochs"], global_step,
+                checkpoint_every_epochs,
+            )
+            live_progress.update(global_step, f"epoch={epoch} completed")
+        if reached_max_steps: break
     live_progress.close()
     logger.info(
         "TRAINING DONE | steps=%d | elapsed=%s | checkpoint=%s",
