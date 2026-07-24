@@ -348,14 +348,26 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             torch.cuda.memory_allocated(device) / (1024 ** 3),
             torch.cuda.memory_reserved(device) / (1024 ** 3), device,
         )
-    optimizer_g = torch.optim.AdamW(generator.parameters(), lr=raw["training"]["learning_rate_generator"], betas=(0.8, 0.99))
-    optimizer_d = torch.optim.AdamW(discriminator.parameters(), lr=raw["training"]["learning_rate_discriminator"], betas=(0.8, 0.99))
+    optimizer_g = torch.optim.AdamW(
+        generator.parameters(), lr=raw["training"]["learning_rate_generator"],
+        betas=(0.8, 0.99), eps=1e-9,
+    )
+    optimizer_d = torch.optim.AdamW(
+        discriminator.parameters(), lr=raw["training"]["learning_rate_discriminator"],
+        betas=(0.8, 0.99), eps=1e-9,
+    )
+    lr_decay = float(raw["training"].get("lr_decay", 0.999875))
+    if not 0.0 < lr_decay <= 1.0:
+        raise ValueError("training.lr_decay must be in (0, 1]")
+    scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optimizer_g, gamma=lr_decay)
+    scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optimizer_d, gamma=lr_decay)
     start_epoch = 1
     global_step = 0
     if layout.initialization_mode == "resume":
         restored = load_training_checkpoint(
             layout.initialization_checkpoint, generator=generator, discriminator=discriminator,
             optimizer_g=optimizer_g, optimizer_d=optimizer_d,
+            scheduler_g=scheduler_g, scheduler_d=scheduler_d,
         )
         start_epoch = int(restored["epoch"]) + 1
         global_step = int(restored["global_step"])
@@ -381,9 +393,11 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     log_every = int(raw["training"].get("log_every_steps", 10))
     if log_every < 1:
         raise ValueError("training.log_every_steps must be at least 1")
-    selection_metric = str(validation_config.get("metric", "mel"))
-    if selection_metric not in {"mel", "duration", "kl", "total"}:
-        raise ValueError("validation.metric must be mel, duration, kl, or total")
+    selection_metric = str(validation_config.get("metric", "prior_mel"))
+    if selection_metric not in {"mel", "prior_mel", "duration", "kl", "total"}:
+        raise ValueError(
+            "validation.metric must be mel, prior_mel, duration, kl, or total"
+        )
     previous_selection = previous.get("selection") if previous else None
     best_value = float("inf")
     best_epoch = None
@@ -505,12 +519,15 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 logger.info(
                     "TRAIN %s %6.2f%% | epoch=%d/%d | batch=%d/%d | step=%d/%d | "
                     "step_time=%.2fs | rolling=%.2fs | speed=%.2f steps/min | ETA=%s | "
-                    "generator=%.4f | discriminator=%.4f | mel=%.4f",
+                    "generator=%.4f | discriminator=%.4f | mel=%.4f | "
+                    "duration=%.4f | kl=%.4f | lr=%.8f",
                     progress_bar(global_step, planned_total_steps), overall_progress,
                     epoch, raw["training"]["epochs"],
                     batch_index, len(loader), global_step, planned_total_steps,
                     seconds_per_step, rolling_step_time, 60.0 / max(rolling_step_time, 1e-9),
                     eta, loss_g.item(), loss_d.item(), loss_mel.item(),
+                    output.duration_loss.item(), loss_kl.item(),
+                    optimizer_g.param_groups[0]["lr"],
                     extra={"tts_style": "progress"},
                 )
                 last_log_time = now
@@ -534,6 +551,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     },
                     data_split=split_report,
                     quality_summary=quality_summary,
+                    scheduler_g=scheduler_g, scheduler_d=scheduler_d,
                     metrics={"generator": loss_g.item(), "discriminator": loss_d.item(), "mel": loss_mel.item()},
                 )
                 logger.info(
@@ -547,6 +565,12 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         train_metrics = {
             key: value / max(epoch_steps, 1) for key, value in epoch_totals.items()
         }
+        scheduler_g.step()
+        scheduler_d.step()
+        logger.info(
+            "LEARNING RATE | epoch=%d | generator=%.8f | discriminator=%.8f | decay=%.8f",
+            epoch, scheduler_g.get_last_lr()[0], scheduler_d.get_last_lr()[0], lr_decay,
+        )
         validation_metrics = None
         should_evaluate = validation_loader is not None and (
             epoch == start_epoch or epoch % evaluation_every == 0
@@ -558,14 +582,25 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 "VALIDATION START | epoch=%d | batches=%d",
                 epoch, len(validation_loader),
             )
+            preview_every = int(validation_config.get("preview_every_epochs", 10))
+            if preview_every < 1:
+                raise ValueError("validation.preview_every_epochs must be at least 1")
+            preview_dir = (
+                layout.run_dir / "validation-audio" / f"epoch-{epoch:04d}"
+                if epoch == start_epoch or epoch % preview_every == 0
+                or (max_steps is not None and global_step >= max_steps)
+                else None
+            )
             validation_metrics = evaluate_validation(
                 generator, validation_loader, mel_transform, audio_config, config, device,
                 seed=int(validation_config.get("seed", seed)),
+                preview_dir=preview_dir,
             )
             current_value = float(validation_metrics[selection_metric])
             logger.info(
-                "VALIDATION DONE | epoch=%d | mel=%.4f | duration=%.4f | kl=%.4f | total=%.4f",
-                epoch, validation_metrics["mel"], validation_metrics["duration"],
+                "VALIDATION DONE | epoch=%d | mel=%.4f | prior_mel=%.4f | "
+                "duration=%.4f | kl=%.4f | total=%.4f",
+                epoch, validation_metrics["mel"], validation_metrics["prior_mel"], validation_metrics["duration"],
                 validation_metrics["kl"], validation_metrics["total"],
             )
             if current_value < best_value:
@@ -590,6 +625,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     frontend_conformance=frontend_conformance,
                     selection=selection, data_split=split_report,
                     quality_summary=quality_summary,
+                    scheduler_g=scheduler_g, scheduler_d=scheduler_d,
                     metrics={"train": train_metrics, "validation": validation_metrics},
                 )
                 logger.info(
@@ -616,6 +652,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             frontend_conformance=frontend_conformance,
             selection=selection, data_split=split_report,
             quality_summary=quality_summary,
+            scheduler_g=scheduler_g, scheduler_d=scheduler_d,
             metrics={"train": train_metrics, "validation": validation_metrics},
         )
         logger.info(

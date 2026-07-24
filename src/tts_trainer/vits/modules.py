@@ -63,6 +63,12 @@ class TextEncoder(nn.Module):
                  condition_channels: int, layers: int, heads: int):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, hidden_channels, padding_idx=0)
+        # VITS scales embeddings by sqrt(hidden), so their initialization must
+        # use hidden**-0.5. PyTorch's default N(0, 1) initialization would make
+        # the first attention layer see values roughly sqrt(hidden) too large.
+        nn.init.normal_(self.embedding.weight, 0.0, hidden_channels ** -0.5)
+        with torch.no_grad():
+            self.embedding.weight[0].zero_()
         self.condition = nn.Linear(condition_channels, hidden_channels)
         self.encoder = nn.ModuleList(SelfAttentionBlock(hidden_channels, heads) for _ in range(layers))
         self.projection = nn.Conv1d(hidden_channels, latent_channels * 2, 1)
@@ -70,6 +76,10 @@ class TextEncoder(nn.Module):
     def forward(self, tokens: torch.Tensor, lengths: torch.Tensor, g: torch.Tensor):
         mask_bool = sequence_mask(lengths, tokens.shape[1])
         x = self.embedding(tokens) * math.sqrt(self.embedding.embedding_dim)
+        x = x + sinusoidal_position_encoding(
+            tokens.shape[1], self.embedding.embedding_dim,
+            device=x.device, dtype=x.dtype,
+        ).unsqueeze(0)
         x = x + self.condition(g.squeeze(-1)).unsqueeze(1)
         for layer in self.encoder:
             x = layer(x, mask_bool)
@@ -133,7 +143,20 @@ class DurationPredictor(nn.Module):
         return self.projection(hidden * mask) * mask
 
 
-class AffineCoupling(nn.Module):
+def sinusoidal_position_encoding(length: int, channels: int, *, device, dtype) -> torch.Tensor:
+    """Return an ONNX-friendly absolute position signal [length, channels]."""
+    positions = torch.arange(length, device=device, dtype=torch.float32).unsqueeze(1)
+    pair_count = (channels + 1) // 2
+    frequencies = torch.exp(
+        torch.arange(pair_count, device=device, dtype=torch.float32)
+        * (-math.log(10000.0) / max(pair_count - 1, 1))
+    ).unsqueeze(0)
+    angles = positions * frequencies
+    encoded = torch.stack((torch.sin(angles), torch.cos(angles)), dim=-1).flatten(1)
+    return encoded[:, :channels].to(dtype=dtype)
+
+
+class AdditiveCoupling(nn.Module):
     def __init__(self, channels: int, hidden_channels: int, condition_channels: int):
         super().__init__()
         if channels % 2:
@@ -141,28 +164,32 @@ class AffineCoupling(nn.Module):
         half = channels // 2
         self.pre = nn.Conv1d(half, hidden_channels, 1)
         self.stack = ConvStack(hidden_channels, condition_channels, 4)
-        self.projection = nn.Conv1d(hidden_channels, half * 2, 1)
+        # The VITS KL loss used by this project assumes a volume-preserving
+        # flow. Match the reference mean-only residual coupling instead of
+        # learning an affine scale whose log-determinant is never optimized.
+        self.projection = nn.Conv1d(hidden_channels, half, 1)
         nn.init.zeros_(self.projection.weight)
         nn.init.zeros_(self.projection.bias)
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor, reverse: bool = False):
         first, second = x.chunk(2, dim=1)
-        stats = self.projection(self.stack(self.pre(first) * mask, mask, g)) * mask
-        mean, log_scale = stats.chunk(2, dim=1)
-        log_scale = torch.tanh(log_scale)
+        mean = self.projection(self.stack(self.pre(first) * mask, mask, g)) * mask
         if reverse:
-            second = (second - mean) * torch.exp(-log_scale) * mask
+            second = (second - mean) * mask
             logdet = None
         else:
-            second = (mean + second * torch.exp(log_scale)) * mask
-            logdet = (log_scale * mask).sum(dim=(1, 2))
+            second = (mean + second) * mask
+            logdet = x.new_zeros(x.shape[0])
         return torch.cat((first, second), dim=1), logdet
 
 
 class ResidualCouplingFlow(nn.Module):
     def __init__(self, channels: int, hidden_channels: int, condition_channels: int, layers: int):
         super().__init__()
-        self.flows = nn.ModuleList(AffineCoupling(channels, hidden_channels, condition_channels) for _ in range(layers))
+        self.flows = nn.ModuleList(
+            AdditiveCoupling(channels, hidden_channels, condition_channels)
+            for _ in range(layers)
+        )
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor, reverse: bool = False):
         flows = reversed(self.flows) if reverse else self.flows
@@ -300,11 +327,20 @@ def duration_path(durations: torch.Tensor, max_frames: int) -> torch.Tensor:
 def slice_latent(latent: torch.Tensor, lengths: torch.Tensor, segment_frames: int):
     if segment_frames <= 0:
         return latent, latent.new_zeros(latent.shape[0], dtype=torch.long)
-    slices, starts = [], []
+    starts = []
     for batch in range(latent.shape[0]):
         max_start = max(int(lengths[batch]) - segment_frames, 0)
         start = int(torch.randint(max_start + 1, (1,), device=latent.device).item()) if max_start else 0
+        starts.append(start)
+    starts_tensor = torch.tensor(starts, device=latent.device)
+    return slice_latent_at(latent, starts_tensor, segment_frames), starts_tensor
+
+
+def slice_latent_at(latent: torch.Tensor, starts: torch.Tensor,
+                    segment_frames: int) -> torch.Tensor:
+    slices = []
+    for batch, start_value in enumerate(starts):
+        start = int(start_value.item())
         segment = latent[batch:batch + 1, :, start:start + segment_frames]
-        segment = F.pad(segment, (0, segment_frames - segment.shape[-1]))
-        slices.append(segment); starts.append(start)
-    return torch.cat(slices), torch.tensor(starts, device=latent.device)
+        slices.append(F.pad(segment, (0, segment_frames - segment.shape[-1])))
+    return torch.cat(slices)

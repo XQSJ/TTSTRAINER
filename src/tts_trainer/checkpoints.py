@@ -5,11 +5,9 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 
-# Format 1 checkpoints were produced while aligned text-prior statistics were
-# accidentally detached during training. Their text encoders did not learn a
-# usable inference prior, so exporting or resuming them generally produces
-# noise. Do not silently present those checkpoints as compatible.
-CHECKPOINT_FORMAT = 2
+# Formats 1 and 2 were produced with broken text-prior training semantics.
+# Do not silently present those checkpoints as compatible with format 3.
+CHECKPOINT_FORMAT = 3
 
 
 def require_checkpoint_format(value: int) -> None:
@@ -18,6 +16,12 @@ def require_checkpoint_format(value: int) -> None:
             "checkpoint format 1 has an untrained text prior and produces noisy "
             "text-only inference; update TTSTRAINER and retrain from scratch with "
             "a new experiment.name"
+        )
+    if value == 2:
+        raise ValueError(
+            "checkpoint format 2 used an incorrectly initialized position-free "
+            "text encoder and an affine flow incompatible with its KL objective; "
+            "update TTSTRAINER and retrain from scratch with a new experiment.name"
         )
     if value != CHECKPOINT_FORMAT:
         raise ValueError(
@@ -75,7 +79,8 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
 
 
 def load_training_checkpoint(directory: str | Path, *, generator, discriminator=None,
-                             optimizer_g=None, optimizer_d=None, map_location="cpu") -> dict:
+                             optimizer_g=None, optimizer_d=None, scheduler_g=None,
+                             scheduler_d=None, scaler=None, map_location="cpu") -> dict:
     import torch
     source = Path(directory)
     metadata = json.loads((source / "metadata.json").read_text(encoding="utf-8"))
@@ -86,4 +91,10 @@ def load_training_checkpoint(directory: str | Path, *, generator, discriminator=
     if discriminator is not None: discriminator.load_state_dict(state["discriminator"])
     if optimizer_g is not None: optimizer_g.load_state_dict(state["optimizer_g"])
     if optimizer_d is not None: optimizer_d.load_state_dict(state["optimizer_d"])
+    if scheduler_g is not None and state.get("scheduler_g") is not None:
+        scheduler_g.load_state_dict(state["scheduler_g"])
+    if scheduler_d is not None and state.get("scheduler_d") is not None:
+        scheduler_d.load_state_dict(state["scheduler_d"])
+    if scaler is not None and state.get("scaler") is not None:
+        scaler.load_state_dict(state["scaler"])
     return {**metadata, "state": state}

@@ -9,6 +9,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import torch
+import soundfile as sf
 from torch.nn import functional as F
 
 from ..manifest import Item, format_phonemes
@@ -122,8 +123,9 @@ def save_split_artifacts(run_dir: str | Path, train_items: list[Item],
 
 @torch.no_grad()
 def evaluate_validation(generator, loader, mel_transform, audio_config, model_config,
-                        device: torch.device, *, seed: int = 1337) -> dict[str, float]:
-    """Evaluate deterministic teacher-forced reconstruction metrics."""
+                        device: torch.device, *, seed: int = 1337,
+                        preview_dir: str | Path | None = None) -> dict[str, float]:
+    """Evaluate posterior reconstruction and the actual text-prior pathway."""
     was_training = generator.training
     generator.eval()
     totals = defaultdict(float)
@@ -149,6 +151,14 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
             mel_real = torch.log(mel_transform(real_audio.squeeze(1)).clamp_min(1e-5))
             mel_fake = torch.log(mel_transform(output.audio.squeeze(1)).clamp_min(1e-5))
             mel = F.l1_loss(mel_fake, mel_real)
+            aligned_prior_audio = generator.decode_aligned_prior(
+                output.prior_mean, output.audio_mask,
+                batch["language_ids"], batch["speaker_ids"], output.slice_starts,
+            )
+            mel_prior = torch.log(
+                mel_transform(aligned_prior_audio.squeeze(1)).clamp_min(1e-5)
+            )
+            prior_mel = F.l1_loss(mel_prior, mel_real)
             kl = kl_loss(
                 output.latent_prior, output.posterior_log_scale,
                 output.prior_mean, output.prior_log_scale, output.audio_mask,
@@ -156,6 +166,7 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
             batch_size = int(batch["tokens"].shape[0])
             examples += batch_size
             totals["mel"] += float(mel.item()) * batch_size
+            totals["prior_mel"] += float(prior_mel.item()) * batch_size
             totals["duration"] += float(output.duration_loss.item()) * batch_size
             totals["kl"] += float(kl.item()) * batch_size
             totals["generated_peak"] += float(output.audio.abs().amax().item()) * batch_size
@@ -163,16 +174,62 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
             totals["generated_clipping_ratio"] += float(
                 (output.audio.abs() >= 0.999).to(torch.float32).mean().item()
             ) * batch_size
+            if preview_dir is not None and batch_index == 1:
+                preview = Path(preview_dir)
+                preview.mkdir(parents=True, exist_ok=True)
+                text_length = int(batch["text_lengths"][0].item())
+                target_frames = int(batch["spec_lengths"][0].item())
+                target_samples = int(batch["audio_lengths"][0].item())
+                inferred, inferred_frames, _ = generator.infer(
+                    batch["tokens"][0:1, :text_length],
+                    batch["text_lengths"][0:1],
+                    batch["language_ids"][0:1], batch["speaker_ids"][0:1],
+                    noise_scale=0.0,
+                    max_frames=min(max(target_frames * 2, text_length), 4000),
+                )
+                full_prior = generator.decode_aligned_prior(
+                    output.prior_mean[0:1, :, :target_frames],
+                    output.audio_mask[0:1, :, :target_frames],
+                    batch["language_ids"][0:1], batch["speaker_ids"][0:1],
+                )
+                audio_files = {
+                    "target.wav": batch["waveforms"][0, 0, :target_samples],
+                    "posterior-reconstruction.wav": output.audio[0, 0],
+                    "aligned-text-prior.wav": full_prior[0, 0, :target_frames * audio_config.hop_length],
+                    "text-only-inference.wav": inferred[0, 0],
+                }
+                for filename, samples in audio_files.items():
+                    sf.write(
+                        preview / filename, samples.detach().cpu().numpy(),
+                        audio_config.sample_rate, subtype="PCM_16",
+                    )
+                (preview / "diagnostics.json").write_text(json.dumps({
+                    "format": 1,
+                    "target_frames": target_frames,
+                    "inferred_frames": int(inferred_frames[0].item()),
+                    "duration_ratio": float(inferred_frames[0].item()) / max(target_frames, 1),
+                    "posterior_mel": float(mel.item()),
+                    "aligned_prior_mel": float(prior_mel.item()),
+                    "files": list(audio_files),
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
+                logger.info(
+                    "VALIDATION AUDIO | posterior_mel=%.4f | prior_mel=%.4f | "
+                    "duration_ratio=%.3f | output=%s",
+                    mel.item(), prior_mel.item(),
+                    float(inferred_frames[0].item()) / max(target_frames, 1), preview,
+                    extra={"tts_style": "success"},
+                )
             live_progress.update(batch_index, f"items={examples} mel={mel.item():.4f}")
             if batch_index % interval == 0 or batch_index == total_batches:
                 live_progress.clear()
                 elapsed = time.monotonic() - started
                 rate = batch_index / max(elapsed, 1e-9)
                 logger.info(
-                    "VALIDATION %s %6.2f%% | batches=%d/%d | items=%d | mel=%.4f | ETA=%s",
+                    "VALIDATION %s %6.2f%% | batches=%d/%d | items=%d | "
+                    "mel=%.4f | prior_mel=%.4f | ETA=%s",
                     progress_bar(batch_index, total_batches),
                     100.0 * batch_index / max(total_batches, 1),
-                    batch_index, total_batches, examples, mel.item(),
+                    batch_index, total_batches, examples, mel.item(), prior_mel.item(),
                     format_duration((total_batches - batch_index) / rate),
                     extra={"tts_style": "progress"},
                 )
@@ -183,6 +240,6 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
     if examples == 0:
         raise ValueError("validation loader contains no examples")
     metrics = {key: value / examples for key, value in totals.items()}
-    metrics["total"] = 45.0 * metrics["mel"] + metrics["duration"] + metrics["kl"]
+    metrics["total"] = 45.0 * metrics["prior_mel"] + metrics["duration"] + metrics["kl"]
     metrics["items"] = float(examples)
     return metrics

@@ -15,7 +15,7 @@ from tts_trainer.checkpoints import (load_training_checkpoint,
 from tts_trainer.vits import MultilingualVITS, VitsConfig, VitsDiscriminator
 from tts_trainer.vits.data import slice_waveforms
 from tts_trainer.vits.losses import discriminator_loss, generator_adversarial_loss
-from tts_trainer.vits.modules import maximum_path
+from tts_trainer.vits.modules import maximum_path, sinusoidal_position_encoding
 from tts_trainer.vits.trainer import _semantic_reference_root, train_vits
 from tts_trainer.vits.trainer import (_load_expanded_generator,
                                       _resolve_frontend_contract)
@@ -42,6 +42,8 @@ class VitsTests(unittest.TestCase):
     def test_legacy_noise_checkpoint_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "untrained text prior"):
             require_checkpoint_format(1)
+        with self.assertRaisesRegex(ValueError, "position-free text encoder"):
+            require_checkpoint_format(2)
 
     def test_semantic_quality_uses_shared_voice_reference_directory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -74,6 +76,30 @@ class VitsTests(unittest.TestCase):
         self.assertEqual(output.attention.shape, (2, 8, 4))
         (output.audio.abs().mean() + output.duration_loss).backward()
         self.assertIsNotNone(self.model.conditioning.speaker_embedding.weight.grad)
+
+    def test_text_embedding_scale_and_positions_are_well_conditioned(self):
+        embedding = self.model.text_encoder.embedding.weight.detach()
+        expected_std = self.config.hidden_channels ** -0.5
+        self.assertLess(abs(float(embedding[1:].std()) - expected_std), expected_std * 0.35)
+        self.assertTrue(torch.equal(embedding[0], torch.zeros_like(embedding[0])))
+
+        positions = sinusoidal_position_encoding(
+            4, self.config.hidden_channels, device=embedding.device, dtype=embedding.dtype,
+        )
+        self.assertEqual(positions.shape, (4, self.config.hidden_channels))
+        self.assertFalse(torch.equal(positions[0], positions[1]))
+
+    def test_residual_flow_is_volume_preserving_and_invertible(self):
+        mask = torch.ones(2, 1, 7)
+        latent = torch.randn(2, self.config.latent_channels, 7)
+        condition = self.model.conditioning(torch.tensor([0, 1]), torch.tensor([0, 2]))
+        transformed, logdet = self.model.flow(latent, mask, condition)
+        restored, reverse_logdet = self.model.flow(
+            transformed, mask, condition, reverse=True,
+        )
+        self.assertTrue(torch.allclose(restored, latent, atol=1e-5, rtol=1e-5))
+        self.assertTrue(torch.equal(logdet, torch.zeros_like(logdet)))
+        self.assertIsNone(reverse_logdet)
 
     def test_kl_loss_trains_text_prior(self):
         """The inference-only text prior must receive training gradients."""
@@ -368,6 +394,20 @@ class VitsTests(unittest.TestCase):
             saved = json.loads((best / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["selection"]["best_epoch"], 1)
             self.assertIn("validation", saved["metrics"])
+            self.assertIn("prior_mel", saved["metrics"]["validation"])
+            state = torch.load(
+                best / "training-state.pt", map_location="cpu", weights_only=False,
+            )
+            self.assertIsNotNone(state["scheduler_g"])
+            preview = root / "run" / "validation-audio" / "epoch-0001"
+            self.assertTrue((preview / "target.wav").is_file())
+            self.assertTrue((preview / "posterior-reconstruction.wav").is_file())
+            self.assertTrue((preview / "aligned-text-prior.wav").is_file())
+            self.assertTrue((preview / "text-only-inference.wav").is_file())
+            diagnostics = json.loads(
+                (preview / "diagnostics.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("duration_ratio", diagnostics)
             self.assertTrue((root / "run" / "splits" / "validation.csv").is_file())
 
 

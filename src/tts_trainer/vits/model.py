@@ -8,7 +8,8 @@ from torch import nn
 from .config import VitsConfig
 from .modules import (DurationPredictor, GlobalConditioning, PosteriorEncoder,
                       ResidualCouplingFlow, TextEncoder, WaveformDecoder,
-                      duration_path, maximum_path, slice_latent)
+                      duration_path, maximum_path, slice_latent,
+                      slice_latent_at)
 
 
 @dataclass
@@ -110,6 +111,21 @@ class MultilingualVITS(nn.Module):
         latent_prior = (expanded_mean + torch.randn_like(expanded_mean) * torch.exp(expanded_log_scale) * noise_scale) * audio_mask
         latent, _ = self.flow(latent_prior, audio_mask, g, reverse=True)
         return self.decoder(latent, g), frame_lengths, attention
+
+    @torch.no_grad()
+    def decode_aligned_prior(self, prior_mean: torch.Tensor, audio_mask: torch.Tensor,
+                             language_ids: torch.Tensor, speaker_ids: torch.Tensor,
+                             starts: torch.Tensor | None = None) -> torch.Tensor:
+        """Decode the text prior under an oracle MAS alignment.
+
+        This isolates text-prior/flow quality from duration prediction. It is
+        used only for validation diagnostics and checkpoint selection.
+        """
+        g = self.conditioning(language_ids, speaker_ids)
+        latent, _ = self.flow(prior_mean * audio_mask, audio_mask, g, reverse=True)
+        if starts is not None:
+            latent = slice_latent_at(latent, starts, self.config.segment_frames)
+        return self.decoder(latent, g)
 
     def infer_deploy(self, tokens: torch.Tensor, text_lengths: torch.Tensor,
                      language_ids: torch.Tensor, speaker_ids: torch.Tensor,

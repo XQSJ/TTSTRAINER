@@ -1,10 +1,11 @@
 # tts-trainer
 
-> **重要修复（2026-07-21）：** 旧版训练代码错误地切断了文本先验的梯度，表现为
-> 训练 loss 下降、ONNX 能导出，但文本推理仍是噪音。请先 `git pull origin main`。
-> 旧的 format 1 checkpoint 无法修复，必须换一个新的 `experiment.name` 并以
-> `initialization.mode=scratch` 重新训练；已生成的公共文本和 Qwen WAV 会自动复用，
-> 不需要重新生成数据。新版 checkpoint format 为 2，加载旧模型时会明确拒绝。
+> **重要修复（2026-07-24）：** format 1/2 训练代码的文本推理链路存在缺陷：文本
+> 先验梯度曾被切断，随后仍保留了错误的 embedding 初始化、无位置信息的文本编码器，
+> 以及与 KL 目标不匹配的 affine flow。典型表现是训练 loss 下降、音色相似，但内容是
+> 噪音或杂乱音节。请先 `git pull origin main`。旧 checkpoint 无法可靠修复，必须换一
+> 个新的 `experiment.name`，以 `initialization.mode=scratch` 重新训练。公共文本和
+> Qwen WAV 会自动复用，不需要重新生成数据。新版 checkpoint format 为 3。
 
 ## 最快开始：改一份配置，运行几条命令
 
@@ -156,6 +157,20 @@ venv。
 `artifacts/my_model/`。Windows 请将 `.venv/bin/python` 换成
 `.venv\Scripts\python.exe`。更换音色、自动生成文本、续训、增加音色和专家参数见
 后面的完整说明。
+
+训练会在第 1 个 epoch 以及之后每 10 个 epoch 写出端到端试听诊断：
+
+```text
+runs/my_model/validation-audio/epoch-XXXX/
+├── target.wav                    # 原始验证音频
+├── posterior-reconstruction.wav # 真实音频驱动的声码器重建
+├── aligned-text-prior.wav        # 使用真实对齐的文本先验重建
+├── text-only-inference.wav       # 与手机端相同的纯文本推理
+└── diagnostics.json              # prior mel 与预测/真实时长比例
+```
+
+`best` 默认按 `prior_mel` 而不是 posterior 重建 mel 选择，避免把“音色已学会、文本仍
+杂乱”的 checkpoint 导出为最终模型。试听时应优先听 `text-only-inference.wav`。
 
 ---
 
