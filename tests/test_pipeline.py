@@ -9,6 +9,50 @@ from tts_trainer.pipeline import run_pipeline
 
 
 class PipelineTests(unittest.TestCase):
+    def test_prepare_task_stops_after_voice_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "prepare.json"
+            config_path.write_text(json.dumps({
+                "task": "prepare",
+                "experiment": {
+                    "name": "prepare",
+                    "languages": ["en"],
+                    "dataset_root": str(root / "datasets"),
+                    "run_root": str(root / "runs"),
+                    "artifact_root": str(root / "artifacts"),
+                },
+                "generation": {
+                    "enabled": True,
+                    "voices": {"voice_a": {"id": "voice_a", "mode": "design"}},
+                },
+                "text_generation": {"enabled": True},
+            }), encoding="utf-8")
+            output = root / "datasets/prepare/metadata.csv"
+            calls = []
+
+            def fake_generate(_config, **kwargs):
+                self.assertIsNone(kwargs["text_manifest_path"])
+                calls.append("generate")
+                return output
+
+            with patch("tts_trainer.pipeline.generate_samples", fake_generate), \
+                    patch("tts_trainer.pipeline.check_language_support", return_value=[]), \
+                    patch("tts_trainer.pipeline.generate_texts",
+                          side_effect=AssertionError("must be per-voice")), \
+                    patch("tts_trainer.pipeline.phonemize_manifest",
+                          side_effect=AssertionError("must not phonemize")), \
+                    patch("tts_trainer.pipeline.train_vits",
+                          side_effect=AssertionError("must not train")), \
+                    patch("tts_trainer.pipeline.export_vits_onnx",
+                          side_effect=AssertionError("must not export")):
+                report_path = run_pipeline(config_path)
+
+            self.assertEqual(calls, ["generate"])
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertEqual(report["task"], "prepare")
+            self.assertEqual(report["stages"]["train"], "skipped")
+
     def test_configured_stages_run_in_order_and_write_report(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

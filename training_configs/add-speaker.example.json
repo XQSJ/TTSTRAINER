@@ -1,5 +1,6 @@
 {
   "_comment": "给旧模型增加一个音色 / Add one voice to an existing model",
+  "task": "train",
   "preset": "quality",
   "experiment": {
     "name": "model_1_voice02",
@@ -19,12 +20,13 @@
     "text": {
       "provider": "builtin"
     },
-    "voice": {
-      "id": "voice_02",
-      "mode": "design",
-      "prompt": "A clear adult voice distinct from voice_01, with natural pacing and neutral emotion.",
-      "reference_text": "你好，这是一段用于创建第二个统一音色的参考录音。",
-      "reference_language": "zh"
+    "voices": {
+      "voice_02": {
+        "mode": "design",
+        "prompt": "A clear adult voice distinct from voice_01, with natural pacing and neutral emotion.",
+        "reference_text": "你好，这是一段用于创建第二个统一音色的参考录音。",
+        "reference_language": "zh"
+      }
     }
   },
   "training": {

@@ -1,5 +1,6 @@
 {
   "_comment": "第二个独立模型示例 / A second independent model example",
+  "task": "train",
   "preset": "quality",
   "experiment": {
     "name": "model_2",
@@ -14,12 +15,13 @@
     "text": {
       "provider": "builtin"
     },
-    "voice": {
-      "id": "voice_02",
-      "mode": "design",
-      "prompt": "A confident adult voice with crisp articulation and natural expressive pacing.",
-      "reference_text": "This reference creates a consistent multilingual voice.",
-      "reference_language": "en"
+    "voices": {
+      "voice_02": {
+        "mode": "design",
+        "prompt": "A confident adult voice with crisp articulation and natural expressive pacing.",
+        "reference_text": "This reference creates a consistent multilingual voice.",
+        "reference_language": "en"
+      }
     }
   },
   "training": {

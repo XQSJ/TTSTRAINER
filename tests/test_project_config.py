@@ -61,10 +61,10 @@ class ProjectConfigTests(unittest.TestCase):
         config = load_project_config("training_configs/train2.json")
         self.assertEqual(config["experiment"]["name"], "model_2")
         self.assertEqual(config["experiment"]["languages"], ["en", "fr", "es", "pt"])
-        self.assertEqual(config["generation"]["voice"]["mode"], "design")
+        self.assertEqual(config["generation"]["voices"]["voice_02"]["mode"], "design")
         self.assertEqual(config["model"]["hidden_channels"], 256)
         self.assertEqual(config["generation"]["generation_kwargs"]["max_new_tokens"], 2048)
-        self.assertEqual(config["generation"]["voice"]["id"], "voice_02")
+        self.assertEqual(config["generation"]["voices"]["voice_02"]["id"], "voice_02")
         self.assertEqual(config["text_generation"]["sentences_per_language"], 2000)
 
     def test_public_dataset_block_expands_to_internal_pipeline_config(self):
@@ -90,13 +90,66 @@ class ProjectConfigTests(unittest.TestCase):
             )
             self.assertEqual(config["generation"]["include_metadata"], ["old.csv"])
 
+    def test_multiple_public_voices_have_explicit_task_and_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "voices.json"
+            path.write_text(json.dumps({
+                "task": "prepare",
+                "experiment": {"name": "voices", "languages": ["en"]},
+                "dataset": {
+                    "sentences_per_language": 12,
+                    "voices": {
+                        "warm": {"mode": "design", "prompt": "Warm"},
+                        "clone": {"mode": "clone", "reference_audio": "voice.wav"},
+                    },
+                },
+            }), encoding="utf-8")
+            config = load_project_config(path)
+            self.assertEqual(config["task"], "prepare")
+            self.assertEqual(set(config["generation"]["voices"]), {"warm", "clone"})
+            self.assertEqual(config["generation"]["voices"]["warm"]["id"], "warm")
+            self.assertNotIn("speaker_assignments", config["generation"])
+
+    def test_task_validation_prevents_ambiguous_workflows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prepare = root / "prepare.json"
+            prepare.write_text(json.dumps({
+                "task": "prepare",
+                "dataset": {
+                    "voices": {"a": {"mode": "design"}},
+                    "speakers": {"reader": "a"},
+                },
+            }))
+            with self.assertRaisesRegex(ValueError, "does not use dataset.speakers"):
+                load_project_config(prepare)
+
+            train = root / "train.json"
+            train.write_text(json.dumps({
+                "task": "train",
+                "dataset": {"voices": {"a": {"mode": "design"}}},
+            }))
+            with self.assertRaisesRegex(ValueError, "requires dataset.speakers"):
+                load_project_config(train)
+
+            invalid = root / "invalid.json"
+            invalid.write_text('{"task":"guess"}')
+            with self.assertRaisesRegex(ValueError, "task must be prepare or train"):
+                load_project_config(invalid)
+
     def test_public_workflow_examples_resolve(self):
         clone = load_project_config("training_configs/clone.example.json")
+        prepare = load_project_config("training_configs/prepare-voices.example.json")
         resume = load_project_config("training_configs/resume.example.json")
         warm_start = load_project_config("training_configs/sdp-warm-start.example.json")
         expand = load_project_config("training_configs/add-speaker.example.json")
         multi = load_project_config("training_configs/multi-speaker.example.json")
-        self.assertEqual(clone["generation"]["voice"]["mode"], "clone")
+        self.assertEqual(clone["generation"]["voices"]["my_voice"]["mode"], "clone")
+        self.assertEqual(prepare["task"], "prepare")
+        self.assertEqual(
+            set(prepare["generation"]["voices"]),
+            {"voice_xiaoling_a", "voice_xiaoling_b"},
+        )
         self.assertEqual(resume["experiment"]["initialization"]["mode"], "resume")
         self.assertEqual(
             warm_start["experiment"]["initialization"]["mode"], "warm_start",

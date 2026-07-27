@@ -1,5 +1,6 @@
 {
   "_comment": "使用两个已生成的公共音色从零训练一个模型 / Train one model from two prepared shared voices",
+  "task": "train",
   "preset": "quality",
   "experiment": {
     "name": "model_two_voices",
@@ -7,7 +8,7 @@
     "device": "cuda:0"
   },
   "dataset": {
-    "_comment": "左侧是当前模型内 speaker 名称，右侧是已生成的公共 voice.id / Left: model-local speaker name; right: prepared public voice ID",
+    "_comment": "左侧是当前模型内 speaker 名称，右侧是已生成的公共 voice_id / Left: model-local speaker name; right: prepared public voice ID",
     "sentences_per_language": 2000,
     "speakers": {
       "xiaoling_a": "voice_xiaoling_a",

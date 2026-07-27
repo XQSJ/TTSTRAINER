@@ -3,14 +3,19 @@
 用 Qwen3-TTS 生成训练数据，训练多语言、多音色 VITS，并导出移动端可用的
 ONNX 资源。
 
-## 先理解两个名字
+## 三个配置概念
 
 | 名称 | 属于哪里 | 作用 |
 |---|---|---|
-| `voice.id` | 公共音色数据 | 决定音色目录、Prompt/参考录音、文本和 WAV 缓存 |
-| `speaker` | 某个 VITS 模型 | 决定该音色在当前模型里的 speaker embedding 和推理名称 |
+| `task` | 自动流水线 | `prepare` 只准备音色数据；`train` 准备数据并训练、导出 |
+| `dataset.voices` | 公共音色数据 | 声明一个或多个需要生成/补齐的 `voice_id` 及生成方式 |
+| `dataset.speakers` | 某个 VITS 模型 | 把模型内 speaker 名称映射到公共 `voice_id` |
 
-公共音色本身没有 speaker。同一个 `voice.id` 可以在不同模型中分配不同 speaker：
+程序不会再通过“配置中有哪些字段”猜测用户想做什么，`task` 是自动入口
+`run-pipeline` 的明确执行模式。直接子命令（如 `generate-samples`、`train-vits`）本身
+已有明确动作，不依赖推断。旧配置未写 `task` 时默认按 `train` 处理。
+
+公共音色本身没有 speaker。同一个 `voice_id` 可以在不同模型中分配不同 speaker：
 
 ```text
 datasets/voices/voice_xiaoling_a/       # 公共音色与 WAV
@@ -26,9 +31,9 @@ datasets/voices/voice_xiaoling_a/       # 公共音色与 WAV
 
 | 目标 | 阅读 |
 |---|---|
-| 第一次跑通，直接训练一个音色 | 路径一 |
-| 只准备可复用的音色与 WAV | 路径二 |
-| 把两个或更多已有音色训练进一个模型 | 路径三 |
+| 一个配置生成新音色并直接训练 | 用法一 |
+| 一次只准备一个或多个公共音色 | 用法二 |
+| 使用已有音色训练模型 | 用法三 |
 
 ## 安装
 
@@ -56,9 +61,9 @@ source .venv/bin/activate
 
 `flash-attn` 不是必需依赖。没有安装时会自动使用 PyTorch SDPA。
 
-## 路径一：一个配置直接训练单音色模型
+## 用法一：生成音色并直接训练
 
-这是最简单的用法。配置同时声明公共音色和它在当前模型里的 speaker：
+这是最简单的用法。`voices` 负责生成，`speakers` 负责分配模型内名称：
 
 ```bash
 cp training_configs/train1.json training_configs/my_model.json
@@ -66,6 +71,7 @@ cp training_configs/train1.json training_configs/my_model.json
 
 ```json
 {
+  "task": "train",
   "preset": "quality",
   "experiment": {
     "name": "my_model",
@@ -80,12 +86,13 @@ cp training_configs/train1.json training_configs/my_model.json
     "text": {
       "provider": "builtin"
     },
-    "voice": {
-      "id": "voice_xiaoling",
-      "mode": "design",
-      "prompt": "A warm, natural young adult female voice with conversational pacing.",
-      "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
-      "reference_language": "zh"
+    "voices": {
+      "voice_xiaoling": {
+        "mode": "design",
+        "prompt": "A warm, natural young adult female voice with conversational pacing.",
+        "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
+        "reference_language": "zh"
+      }
     }
   },
   "training": {
@@ -117,13 +124,16 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 示例中的 `builtin` 文本只适合跑通流程；正式模型请换成 OpenAI-compatible 服务或经过
 审核的 CSV，见“文本来源”。
 
-## 路径二：先只生成公共音色
+## 用法二：一次准备多个公共音色
 
-纯生成配置不写 `speaker`，因为此时还没有组装 VITS 模型：
+复制 [prepare-voices.example.json](training_configs/prepare-voices.example.json)。设置
+`task: "prepare"`，在 `voices` 中可以同时声明任意数量的新音色；不要填写
+`speakers`，因为此时还没有组装 VITS 模型：
 
 ```json
 {
-  "_comment": "只生成公共音色 / Generate one shared voice only",
+  "_comment": "一次准备多个公共音色 / Prepare multiple shared voices",
+  "task": "prepare",
   "preset": "quality",
   "experiment": {
     "name": "prepare_xiaoling_a",
@@ -138,12 +148,19 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
       "model": "your-model",
       "api_key_env": "TEXT_LLM_API_KEY"
     },
-    "voice": {
-      "id": "voice_xiaoling_a",
-      "mode": "design",
-      "prompt": "A warm natural young adult female voice.",
-      "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
-      "reference_language": "zh"
+    "voices": {
+      "voice_xiaoling_a": {
+        "mode": "design",
+        "prompt": "A warm natural young adult female voice.",
+        "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
+        "reference_language": "zh"
+      },
+      "voice_xiaoling_b": {
+        "mode": "clone",
+        "reference_audio": "voices/xiaoling_b.wav",
+        "reference_text": "与参考录音逐字一致的文本",
+        "reference_language": "zh"
+      }
     }
   }
 }
@@ -154,26 +171,31 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 ```bash
 export TEXT_LLM_API_KEY='你的实际密钥'
 
-PYTHONPATH=src .venv/bin/python -m tts_trainer generate-samples \
-  --config training_configs/prepare_xiaoling_a.json
+PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
+  --config training_configs/prepare-voices.example.json
 ```
 
 结果位于：
 
 ```text
-datasets/voices/voice_xiaoling_a/
-├── voice.json
-├── texts.csv
-├── manifest.csv              # audio/text/language，无 speaker
-├── references/
-└── wavs/
+datasets/voices/
+├── voice_xiaoling_a/
+│   ├── voice.json
+│   ├── texts.csv
+│   ├── manifest.csv
+│   ├── references/
+│   └── wavs/
+└── voice_xiaoling_b/
+    └── ...
+
+runs/prepare_public_voices/prepared-voices.json
 ```
 
-生成第二个音色时使用新的 `voice.id` 和 Prompt。不同音色不能共用同一个 `voice.id`。
+`voices` 对象的键就是公共 `voice_id`，不再重复填写 `id`。不同声音必须使用不同键。
 
-## 路径三：用多个公共音色训练一个模型
+## 用法三：用已有公共音色训练模型
 
-先确保各个 `voice.id` 已通过路径二生成。然后复制：
+先确保各个 `voice_id` 已准备好，然后复制：
 
 ```bash
 cp training_configs/multi-speaker.example.json \
@@ -184,6 +206,7 @@ cp training_configs/multi-speaker.example.json \
 
 ```json
 {
+  "task": "train",
   "preset": "quality",
   "experiment": {
     "name": "my_multi_voice_model",
@@ -207,7 +230,7 @@ cp training_configs/multi-speaker.example.json \
 映射方向始终是：
 
 ```text
-"模型内 speaker 名称": "公共 voice.id"
+"模型内 speaker 名称": "公共 voice_id"
 ```
 
 启动：
@@ -217,26 +240,51 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
   --config training_configs/my_multi_voice_model.json
 ```
 
-这个配置不会调用文本 LLM 或 Qwen。程序会检查两个公共音色是否满足所选语言和数量，
+因为没有 `voices`，这个配置不会调用文本 LLM 或 Qwen。程序会检查两个公共音色是否
+满足所选语言和数量，
 然后生成当前模型的 metadata 并开始训练。音频仍在公共目录，不会复制。
+
+也可以把“尚未生成的音色”与“已有音色”放在同一份训练配置里：
+
+```json
+"dataset": {
+  "sentences_per_language": 2000,
+  "text": {"provider": "builtin"},
+  "voices": {
+    "voice_new": {
+      "mode": "design",
+      "prompt": "A bright and friendly adult voice.",
+      "reference_text": "你好，这是新音色的参考录音。",
+      "reference_language": "zh"
+    }
+  },
+  "speakers": {
+    "gentle": "voice_existing",
+    "bright": "voice_new"
+  }
+}
+```
+
+程序只生成/补齐 `voice_new`，直接复用 `voice_existing`，最后把两者组装进当前模型。
 
 ## 最常调整的配置
 
 | 字段 | 作用 |
 |---|---|
+| `task` | `prepare` 只准备数据；`train` 完整训练并导出 |
 | `experiment.name` | 模型任务名称，决定 `datasets/runs/artifacts` 目录 |
 | `experiment.languages` | 本次使用的语言；顺序决定 language ID |
 | `experiment.device` | VITS 和 Qwen 默认设备，例如 `cuda:0` |
 | `dataset.sentences_per_language` | 每个音色、每种语言选用的样本数 |
 | `dataset.text` | 文本来源，仅生成新音色时需要 |
-| `dataset.voice` | 要生成或补齐的一个公共音色 |
-| `dataset.speakers` | 当前模型的 `speaker → voice.id` 映射 |
+| `dataset.voices` | 要生成或补齐的公共音色集合，键是 `voice_id` |
+| `dataset.speakers` | 当前模型的 `speaker → voice_id` 映射 |
 | `training.batch_size` | 显存不足时优先调小 |
 | `training.epochs` | 总训练轮数 |
 
 ## 数据复用规则
 
-每个公开 `voice.id` 只有一个目录：
+每个公开 `voice_id` 只有一个目录：
 
 ```text
 datasets/voices/voice_xiaoling/
@@ -257,16 +305,16 @@ datasets/voices/voice_xiaoling/
 - 已有中英日韩各 2,000 条，本次只训练中文 500 条：不生成，只选择中文前 500 条。
 - 已有中文 500 条，本次需要中文 2,000 条：只补 1,500 条。
 - 已有中文，本次增加英文：只向同一个目录增加英文文本和 WAV。
-- 另一个模型使用相同 `voice.id`：直接复用，不复制数据。
+- 另一个模型使用相同 `voice_id`：直接复用，不复制数据。
 - 减少语言或数量不会删除旧数据，以后仍可恢复使用。
 
 `voice.json` 锁定音色身份，包括 prompt 或参考录音校验值、Qwen 模型、采样率和关键
-生成参数。同一个 ID 不能混入另一种音色；要更换声音，请使用新的 `voice.id`。
+生成参数。同一个 ID 不能混入另一种音色；要更换声音，请使用新的 `voice_id`。
 
 文本数量和语言不属于音色身份，可以随时增减。文本池会保留曾经生成过的所有语言；
 当前模型的 `metadata.csv` 只引用本次配置需要的子集。
 
-老版本的 `<voice_id>/<revision>/` 会在首次使用时迁移到公开 `voice.id` 根目录，并保留
+老版本的 `<voice_id>/<revision>/` 会在首次使用时迁移到公开 `voice_id` 根目录，并保留
 旧 metadata 可继续访问的兼容路径。旧音色目录如果没有无 speaker 的 `manifest.csv`，
 首次用于新模型时会从已有 metadata 自动建立，不会重新生成 WAV。
 
@@ -328,16 +376,17 @@ Hello, welcome to the speech system.,en
 ### Prompt 设计音色
 
 ```json
-"voice": {
-  "id": "voice_01",
-  "mode": "design",
-  "prompt": "A warm adult voice with natural conversational pacing.",
-  "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
-  "reference_language": "zh"
+"voices": {
+  "voice_01": {
+    "mode": "design",
+    "prompt": "A warm adult voice with natural conversational pacing.",
+    "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
+    "reference_language": "zh"
+  }
 }
 ```
 
-Qwen VoiceDesign 只在该 `voice.id` 尚无参考音色时运行一次。后续补语言或补数量会复用
+Qwen VoiceDesign 只在该 `voice_id` 尚无参考音色时运行一次。后续补语言或补数量会复用
 同一参考音色。
 
 ### 上传参考录音
@@ -345,12 +394,13 @@ Qwen VoiceDesign 只在该 `voice.id` 尚无参考音色时运行一次。后续
 复制 [clone.example.json](training_configs/clone.example.json)。关键字段：
 
 ```json
-"voice": {
-  "id": "my_voice",
-  "mode": "clone",
-  "reference_audio": "datasets/references/my_voice.wav",
-  "reference_text": "与参考录音逐字一致的文本",
-  "x_vector_only_mode": false
+"voices": {
+  "my_voice": {
+    "mode": "clone",
+    "reference_audio": "datasets/references/my_voice.wav",
+    "reference_text": "与参考录音逐字一致的文本",
+    "x_vector_only_mode": false
+  }
 }
 ```
 
@@ -433,7 +483,8 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer frontend-info \
 }
 ```
 
-数据阶段不必关闭。单音色模型保持原来的 `dataset.voice` 和 `dataset.speakers`；
+数据阶段不必关闭。需要检查/补齐音色时，保持原来的 `dataset.voices` 和
+`dataset.speakers`；所有音色已准备好时，只保留 `dataset.speakers` 即可。
 由多个公共音色组装的模型则保持原来的 `dataset.speakers` 映射。程序会重建当前模型
 metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程序也会保留其他音色，
 不需要手写 metadata 路径。
@@ -455,9 +506,10 @@ metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程
   },
   "sentences_per_language": 2000,
   "text": {"provider": "builtin"},
-  "voice": {
-    "id": "voice_02",
-    "mode": "design"
+  "voices": {
+    "voice_02": {
+      "mode": "design"
+    }
   }
 }
 ```
@@ -488,8 +540,8 @@ runs/<model_name>/
 artifacts/<model_name>/
 ```
 
-相同 `voice.id` 仍引用同一份公共数据。并行任务最好使用不同 GPU；不要让两个进程同时
-补写同一个尚未完成的 `voice.id`。
+相同 `voice_id` 仍引用同一份公共数据。并行任务最好使用不同 GPU；不要让两个进程同时
+补写同一个尚未完成的 `voice_id`。
 
 ## 输出在哪里
 
@@ -522,6 +574,9 @@ artifacts/<model_name>/
 
 务必保留 `runs/<model_name>/checkpoints/`。ONNX 用于推理，checkpoint 用于续训、增加
 音色、迁移结构和后续压缩。
+
+旧配置中的单数 `dataset.voice` 仍可读取，以避免已有训练任务失效；新配置统一使用
+`dataset.voices`。
 
 ## 测试导出的 ONNX
 

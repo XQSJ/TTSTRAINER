@@ -24,7 +24,12 @@ def _normalize_dataset_config(raw: dict) -> dict:
     """Expand the small public `dataset` block into internal pipeline settings."""
     dataset = raw.get("dataset")
     if dataset is None:
-        return raw
+        result = dict(raw)
+        task = str(result.get("task", "train")).strip().lower()
+        if task not in {"prepare", "train"}:
+            raise ValueError("task must be prepare or train")
+        result["task"] = task
+        return result
     if not isinstance(dataset, dict):
         raise ValueError("dataset must be a JSON object")
     result = dict(raw)
@@ -36,15 +41,40 @@ def _normalize_dataset_config(raw: dict) -> dict:
         text_override["sentences_per_language"] = dataset["sentences_per_language"]
     text_override.setdefault(
         "enabled",
-        bool(dataset.get("voice")) or not bool(dataset.get("speakers")),
+        bool(dataset.get("voice") or dataset.get("voices"))
+        or not bool(dataset.get("speakers")),
     )
     result["text_generation"] = _deep_merge(
         result.get("text_generation", {}), text_override,
     )
 
     generation_override = {}
+    if "voice" in dataset and "voices" in dataset:
+        raise ValueError("dataset cannot define both voice and voices")
     if "voice" in dataset:
         generation_override["voice"] = dataset["voice"]
+    if "voices" in dataset:
+        voices = dataset["voices"]
+        if not isinstance(voices, dict) or not voices:
+            raise ValueError("dataset.voices must be a non-empty object keyed by voice ID")
+        normalized_voices = {}
+        for voice_id, settings in voices.items():
+            voice_id = str(voice_id).strip()
+            if not voice_id:
+                raise ValueError("dataset.voices contains an empty voice ID")
+            if settings is None:
+                settings = {}
+            if not isinstance(settings, dict):
+                raise ValueError(
+                    f"dataset.voices.{voice_id} must be a JSON object"
+                )
+            configured_id = str(settings.get("id") or voice_id).strip()
+            if configured_id != voice_id:
+                raise ValueError(
+                    f"dataset.voices.{voice_id}.id must match its object key"
+                )
+            normalized_voices[voice_id] = {**settings, "id": voice_id}
+        generation_override["voices"] = normalized_voices
     if "speakers" in dataset:
         generation_override["speaker_assignments"] = dataset["speakers"]
     if "include" in dataset:
@@ -54,6 +84,22 @@ def _normalize_dataset_config(raw: dict) -> dict:
     result["generation"] = _deep_merge(
         result.get("generation", {}), generation_override,
     )
+    task = str(result.get("task", "train")).strip().lower()
+    if task not in {"prepare", "train"}:
+        raise ValueError("task must be prepare or train")
+    result["task"] = task
+    if task == "prepare" and dataset.get("speakers"):
+        raise ValueError(
+            "task=prepare does not use dataset.speakers; assign speakers in a train config"
+        )
+    if task == "prepare" and not (dataset.get("voice") or dataset.get("voices")):
+        raise ValueError(
+            "task=prepare requires dataset.voices (or legacy dataset.voice)"
+        )
+    if task == "train" and dataset.get("voices") and not dataset.get("speakers"):
+        raise ValueError(
+            "task=train with dataset.voices requires dataset.speakers"
+        )
     return result
 
 

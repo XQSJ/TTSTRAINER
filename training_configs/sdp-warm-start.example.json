@@ -1,5 +1,6 @@
 {
   "_comment": "把 format 3 模型迁移到随机时长模型；高级用法 / Migrate a format-3 model to stochastic duration; advanced use",
+  "task": "train",
   "preset": "quality",
   "experiment": {
     "name": "model_1_sdp",
@@ -20,12 +21,13 @@
     "text": {
       "provider": "builtin"
     },
-    "voice": {
-      "id": "voice_01",
-      "mode": "design",
-      "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, and conversational pacing.",
-      "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
-      "reference_language": "zh"
+    "voices": {
+      "voice_01": {
+        "mode": "design",
+        "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, and conversational pacing.",
+        "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
+        "reference_language": "zh"
+      }
     }
   },
   "training": {

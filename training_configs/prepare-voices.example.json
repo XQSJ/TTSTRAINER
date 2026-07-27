@@ -1,0 +1,35 @@
+{
+  "_comment": "一次准备多个可复用公共音色，不启动训练 / Prepare multiple reusable shared voices without training",
+  "task": "prepare",
+  "preset": "quality",
+  "experiment": {
+    "name": "prepare_public_voices",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "cuda:0"
+  },
+  "dataset": {
+    "sentences_per_language": 2000,
+    "text": {
+      "provider": "openai_compatible",
+      "endpoint": "https://example.com/v1",
+      "model": "your-model",
+      "api_key_env": "TEXT_LLM_API_KEY"
+    },
+    "voices": {
+      "voice_xiaoling_a": {
+        "_comment": "通过文字描述设计音色 / Design a voice from a natural-language description",
+        "mode": "design",
+        "prompt": "A warm natural young adult female voice with conversational pacing.",
+        "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
+        "reference_language": "zh"
+      },
+      "voice_xiaoling_b": {
+        "_comment": "通过用户提供的参考录音克隆音色 / Clone a voice from a user-provided recording",
+        "mode": "clone",
+        "reference_audio": "voices/xiaoling_b.wav",
+        "reference_text": "你好，这是我用于授权声音克隆的参考录音。",
+        "reference_language": "zh"
+      }
+    }
+  }
+}

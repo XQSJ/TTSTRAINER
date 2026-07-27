@@ -442,6 +442,74 @@ class SampleGenerationTests(unittest.TestCase):
                 (root / "datasets/voices/shared_voice_a/texts.csv").is_file()
             )
 
+    def test_one_config_prepares_multiple_new_voices_and_assembles_speakers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["task"] = "train"
+            raw["experiment"]["languages"] = ["en"]
+            raw["generation"].pop("text_manifest")
+            raw["generation"].pop("voice")
+            raw["generation"]["voices"] = {
+                "warm_voice": {
+                    "id": "warm_voice",
+                    "mode": "design",
+                    "prompt": "Warm and calm adult voice.",
+                    "reference_text": "Exact reference text.",
+                    "reference_language": "en",
+                },
+                "bright_voice": {
+                    "id": "bright_voice",
+                    "mode": "design",
+                    "prompt": "Bright and friendly adult voice.",
+                    "reference_text": "Exact reference text.",
+                    "reference_language": "en",
+                },
+            }
+            raw["generation"]["speaker_assignments"] = {
+                "gentle": "warm_voice",
+                "bright": "bright_voice",
+            }
+            raw["text_generation"] = {
+                "enabled": True,
+                "provider": "builtin",
+                "sentences_per_language": 1,
+            }
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            metadata = generate_samples(config, model_loader=loader)
+            report = validate_manifest(
+                metadata, 8000, require_single_speaker=False,
+            )
+            self.assertEqual(len(report.items), 2)
+            self.assertEqual(
+                {item.speaker for item in report.items}, {"gentle", "bright"},
+            )
+            self.assertTrue(
+                (root / "datasets/voices/warm_voice/manifest.csv").is_file()
+            )
+            self.assertTrue(
+                (root / "datasets/voices/bright_voice/manifest.csv").is_file()
+            )
+            raw["task"] = "prepare"
+            raw["generation"]["speaker_assignments"] = {}
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            def must_not_load(*_args, **_kwargs):
+                self.fail("prepared voices must be reused without loading Qwen")
+
+            summary = generate_samples(config, model_loader=must_not_load)
+            prepared = json.loads(summary.read_text(encoding="utf-8"))
+            self.assertEqual(summary.name, "prepared-voices.json")
+            self.assertEqual(
+                set(prepared["voices"]), {"warm_voice", "bright_voice"},
+            )
+
     def test_qwen_device_inherits_experiment_device(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -11,6 +11,7 @@ import re
 import shutil
 import time
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -584,8 +585,49 @@ def _write_model_metadata(output: Path, rows: list[dict]) -> Path:
     return output
 
 
-def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path | None = None,
-                     model_loader: Callable = load_qwen_teacher) -> Path:
+def _checkpoint_speaker_rows(
+    layout, generation: dict, text_generation: dict,
+    replaced_speakers: set[str],
+) -> list[dict]:
+    if layout.initialization_mode not in {"resume", "warm_start", "expand_speakers"}:
+        return []
+    metadata = _checkpoint_dataset_metadata(layout)
+    if metadata is None:
+        return []
+    candidates = int(generation.get("candidates_per_text", 1))
+    target = (
+        int(text_generation.get("sentences_per_language", 100)) * candidates
+        if "sentences_per_language" in text_generation else None
+    )
+    rows = []
+    counts = Counter()
+    for item in read_manifest(metadata):
+        if item.language not in layout.languages or item.speaker in replaced_speakers:
+            continue
+        profile = (item.speaker, item.language)
+        if target is not None and counts[profile] >= target:
+            continue
+        counts[profile] += 1
+        rows.append({
+            "audio": item.audio.resolve(),
+            "text": item.text,
+            "language": item.language,
+            "speaker": item.speaker,
+        })
+    if rows:
+        logger.info(
+            "CHECKPOINT SPEAKERS REUSED | source=%s | speakers=%s | samples=%d",
+            metadata, ",".join(sorted({row["speaker"] for row in rows})), len(rows),
+            extra={"tts_style": "success"},
+        )
+    return rows
+
+
+def _generate_samples_single(
+    config_path: str | Path, *,
+    text_manifest_path: str | Path | None = None,
+    model_loader: Callable = load_qwen_teacher,
+) -> Path:
     """Generate a named VITS dataset using the official Qwen teacher runtime.
 
     Voice modes follow the official Qwen3-TTS README:
@@ -617,9 +659,12 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             raise ValueError(
                 "dataset must define voice for generation or speakers for model assembly"
             )
-        rows = _assigned_voice_rows(
-            assignments, layout, generation, text_generation,
+        rows = _checkpoint_speaker_rows(
+            layout, generation, text_generation, set(assignments),
         )
+        rows.extend(_assigned_voice_rows(
+            assignments, layout, generation, text_generation,
+        ))
         _write_model_metadata(output_metadata, rows)
         (layout.dataset_dir / "dataset.json").write_text(json.dumps({
             "format": 3,
@@ -1038,3 +1083,91 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         extra={"tts_style": "success"},
     )
     return output_metadata
+
+
+def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path | None = None,
+                     model_loader: Callable = load_qwen_teacher) -> Path:
+    """Prepare every declared public voice, then assemble model speakers if requested."""
+    raw, layout = resolve_experiment(config_path)
+    voices = raw.get("generation", {}).get("voices") or {}
+    if not voices:
+        return _generate_samples_single(
+            config_path, text_manifest_path=text_manifest_path,
+            model_loader=model_loader,
+        )
+
+    prepare_experiment(layout, raw, config_path)
+    job_root = layout.run_dir / "voice-jobs"
+    job_root.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "MULTI VOICE PLAN | task=%s | voices=%d | ids=%s",
+        raw.get("task", "train"), len(voices), ",".join(voices),
+        extra={"tts_style": "success"},
+    )
+    for index, (voice_id, voice) in enumerate(voices.items(), 1):
+        job = deepcopy(raw)
+        job.pop("dataset", None)
+        job["task"] = "prepare"
+        job_generation = job.setdefault("generation", {})
+        job_generation.pop("voices", None)
+        job_generation["voice"] = dict(voice)
+        job_generation["speaker_assignments"] = {}
+        job_generation["raw_metadata"] = str(
+            job_root / f"{index:02d}-{voice_id}.metadata.csv"
+        )
+        job_path = job_root / f"{index:02d}-{voice_id}.json"
+        job_path.write_text(
+            json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
+        logger.info(
+            "MULTI VOICE %d/%d | voice_id=%s | action=generate_or_reuse",
+            index, len(voices), voice_id,
+        )
+        _generate_samples_single(
+            job_path, text_manifest_path=text_manifest_path,
+            model_loader=model_loader,
+        )
+
+    if raw.get("task", "train") == "prepare":
+        prepare_experiment(layout, raw, config_path)
+        summary = layout.run_dir / "prepared-voices.json"
+        summary.write_text(json.dumps({
+            "format": 1,
+            "task": "prepare",
+            "voices": {
+                voice_id: {
+                    "directory": str(
+                        (layout.dataset_dir.parent / "voices" / voice_id).resolve()
+                    ),
+                    "manifest": str(
+                        (
+                            layout.dataset_dir.parent / "voices"
+                            / voice_id / "manifest.csv"
+                        ).resolve()
+                    ),
+                }
+                for voice_id in voices
+            },
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(
+            "MULTI VOICE PREPARE DONE | voices=%d | summary=%s | output_root=%s",
+            len(voices), summary, layout.dataset_dir.parent / "voices",
+            extra={"tts_style": "success"},
+        )
+        return summary
+
+    assembly = deepcopy(raw)
+    assembly.pop("dataset", None)
+    assembly_generation = assembly.setdefault("generation", {})
+    assembly_generation.pop("voices", None)
+    assembly_generation.pop("voice", None)
+    assembly.setdefault("text_generation", {})["enabled"] = False
+    assembly_path = job_root / "assemble-model.json"
+    assembly_path.write_text(
+        json.dumps(assembly, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+    result = _generate_samples_single(
+        assembly_path, model_loader=model_loader,
+    )
+    prepare_experiment(layout, raw, config_path)
+    return result

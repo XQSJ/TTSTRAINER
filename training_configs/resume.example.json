@@ -1,5 +1,6 @@
 {
   "_comment": "继续训练旧模型；数据阶段保持开启并自动命中缓存 / Resume a model while dataset stages remain safely cache-aware",
+  "task": "train",
   "preset": "quality",
   "experiment": {
     "name": "model_1_resume",
@@ -18,13 +19,14 @@
     "text": {
       "provider": "builtin"
     },
-    "_comment_voice": "必须与原模型完全一致；命中缓存后不会调用 Qwen / Must match the original model; a cache hit does not invoke Qwen",
-    "voice": {
-      "id": "voice_01",
-      "mode": "design",
-      "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, and conversational pacing.",
-      "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
-      "reference_language": "zh"
+    "_comment_voices": "必须与原模型完全一致；命中缓存后不会调用 Qwen / Must match the original model; a cache hit does not invoke Qwen",
+    "voices": {
+      "voice_01": {
+        "mode": "design",
+        "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, and conversational pacing.",
+        "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
+        "reference_language": "zh"
+      }
     }
   },
   "training": {

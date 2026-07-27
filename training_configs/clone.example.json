@@ -1,5 +1,6 @@
 {
   "_comment": "上传参考录音并训练克隆音色 / Train a cloned voice from an uploaded recording",
+  "task": "train",
   "preset": "quality",
   "experiment": {
     "name": "model_clone",
@@ -14,12 +15,13 @@
     "text": {
       "provider": "builtin"
     },
-    "voice": {
-      "id": "my_voice",
-      "mode": "clone",
-      "reference_audio": "datasets/references/my_voice.wav",
-      "reference_text": "这里必须填写与参考录音逐字一致的文本。",
-      "x_vector_only_mode": false
+    "voices": {
+      "my_voice": {
+        "mode": "clone",
+        "reference_audio": "datasets/references/my_voice.wav",
+        "reference_text": "这里必须填写与参考录音逐字一致的文本。",
+        "x_vector_only_mode": false
+      }
     }
   },
   "training": {
