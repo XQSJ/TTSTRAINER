@@ -809,8 +809,10 @@ def _append_partial_rows(path: Path, fingerprint: str,
         os.fsync(stream.fileno())
 
 
-def text_corpus_path(config: dict, layout) -> Path:
+def text_corpus_path(config: dict, layout, *, voice_id: str | None = None) -> Path:
     """Resolve the shared corpus path without generating or mutating it."""
+    if voice_id and not any(config.get(key) for key in ("output", "root", "corpus_name")):
+        return layout.dataset_dir.parent / "voices" / voice_id / "texts.csv"
     corpus_id, _ = _corpus_identity(config, layout)
     output, _ = _corpus_paths(config, layout, corpus_id)
     return output
@@ -838,6 +840,226 @@ def _cached_corpus_status(output: Path, report_path: Path, fingerprint: str,
     return "complete"
 
 
+def _write_text_pool(path: Path, rows: list[GeneratedText]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream, fieldnames=["id", "text", "language", "category", "source"],
+        )
+        writer.writeheader()
+        serials = Counter()
+        for row in rows:
+            serials[row.language] += 1
+            writer.writerow({
+                "id": f"{row.language}_{serials[row.language]:07d}",
+                "text": row.text,
+                "language": row.language,
+                "category": row.category,
+                "source": row.source,
+            })
+    temporary.replace(path)
+
+
+def _voice_text_pool(
+    raw: dict, layout, config: dict, voice_id: str, requester,
+) -> Path:
+    """Grow one append-only multilingual text pool owned by a public voice ID."""
+    provider = str(config.get("provider", "builtin"))
+    target = int(config.get("sentences_per_language", 100))
+    reuse = bool(config.get("reuse", True))
+    overwrite = bool(config.get("overwrite", False))
+    output = layout.dataset_dir.parent / "voices" / voice_id / "texts.csv"
+    report_path = output.with_suffix(".report.json")
+    family_fingerprint = _corpus_family_fingerprint(config, layout)
+    partial_path = output.with_suffix(".partial.jsonl")
+
+    existing = []
+    if reuse and not overwrite and output.is_file():
+        existing = _file_rows(output, layout.language_registry)
+    elif overwrite or not reuse:
+        partial_path.unlink(missing_ok=True)
+    reusable = []
+    if reuse and not overwrite:
+        reusable = _compatible_corpus_rows(
+            config, layout, output, target, family_fingerprint,
+        )
+
+    # Preserve every language already owned by this voice. Only the configured
+    # subset participates in this run and may receive new rows.
+    pool = []
+    seen = set()
+    pool_counts = Counter()
+    for row in (*existing, *reusable):
+        text = normalize(row.text, row.language)
+        key = (row.language, text.casefold())
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        pool.append(GeneratedText(text, row.language, row.category, row.source))
+        pool_counts[row.language] += 1
+    missing = {
+        language: max(target - pool_counts[language], 0)
+        for language in layout.languages
+    }
+    logger.info(
+        "VOICE TEXT PLAN | voice_id=%s | target=%d/language | existing=%s | missing=%s | output=%s",
+        voice_id, target, dict(sorted(pool_counts.items())),
+        {key: value for key, value in missing.items() if value}, output,
+    )
+    imported = len(pool) > len(existing)
+    if not any(missing.values()) and not imported:
+        partial_path.unlink(missing_ok=True)
+        logger.info(
+            "VOICE TEXT CACHE HIT | voice_id=%s | selected=%d | pool=%d",
+            voice_id, target * len(layout.languages), len(pool),
+            extra={"tts_style": "success"},
+        )
+        return output
+
+    filters = config.get("filters", {})
+    min_chars = int(filters.get("min_characters", 5))
+    max_chars = int(filters.get("max_characters", 180))
+    reject_mixed = bool(filters.get("reject_mixed_language", True))
+    require_g2p = bool(filters.get("require_g2p_pass", False))
+    frontend = frontend_from_config(
+        raw.get("frontend"), languages=layout.languages,
+        language_registry=raw.get("language_registry"),
+    ) if require_g2p else None
+    rejected = Counter()
+    rejected_examples = []
+
+    def accept(rows: list[GeneratedText]) -> None:
+        for row in rows:
+            if row.language not in layout.language_specs \
+                    or pool_counts[row.language] >= target:
+                continue
+            text = normalize(row.text, row.language)
+            key = (row.language, text.casefold())
+            reason = None
+            if not text or len(text) < min_chars or len(text) > max_chars:
+                reason = "length"
+            elif bool(filters.get("deduplicate", True)) and key in seen:
+                reason = "duplicate"
+            elif reject_mixed and not _script_matches(text, row.language):
+                reason = "script"
+            elif frontend is not None:
+                try:
+                    frontend.phonemize(text, row.language)
+                except Exception as exc:
+                    reason = "g2p"
+                    if len(rejected_examples) < 20:
+                        rejected_examples.append({
+                            "reason": reason, "language": row.language,
+                            "text": text, "error": str(exc),
+                        })
+            if reason:
+                rejected[reason] += 1
+                if len(rejected_examples) < 20 and reason != "g2p":
+                    rejected_examples.append({
+                        "reason": reason, "language": row.language, "text": text,
+                    })
+                continue
+            seen.add(key)
+            pool.append(GeneratedText(text, row.language, row.category, row.source))
+            pool_counts[row.language] += 1
+
+    if provider == "builtin":
+        for language in layout.languages:
+            if missing[language]:
+                accept(_builtin_rows(language, target, config))
+    elif provider == "file":
+        input_path = config.get("input")
+        if not input_path:
+            raise ValueError("text_generation provider=file requires input")
+        accept(_file_rows(input_path, layout.language_specs))
+    elif provider == "openai_compatible":
+        request_config = _openai_compatible_config(config)
+        batch_size = _request_batch_size(config)
+        logger.info(
+            "LLM request plan batch_size=%d timeout_seconds=%g max_retries=%d",
+            batch_size, float(request_config.get("timeout_seconds", 180)),
+            int(request_config.get("max_retries", 4)),
+        )
+        try:
+            pending = _load_partial_rows(partial_path, family_fingerprint) if reuse else []
+        except RuntimeError:
+            logger.warning(
+                "VOICE TEXT CHECKPOINT RESET | voice_id=%s | reason=settings_changed",
+                voice_id,
+            )
+            partial_path.unlink(missing_ok=True)
+            pending = []
+        accept(pending)
+
+        def save_request_batch(batch: list[GeneratedText]) -> None:
+            _append_partial_rows(partial_path, family_fingerprint, batch)
+
+        for language, spec in layout.language_specs.items():
+            count = max(target - pool_counts[language], 0)
+            if count:
+                accept(_llm_rows(
+                    language, spec.name, count, config, requester,
+                    on_batch=save_request_batch,
+                    round_offset=pool_counts[language] // batch_size,
+                ))
+        for refill_round in range(max(0, int(config.get("refill_rounds", 5)))):
+            remaining = {
+                language: target - pool_counts[language]
+                for language in layout.languages if pool_counts[language] < target
+            }
+            if not remaining:
+                break
+            for language, count in remaining.items():
+                request_count = max(count, min(batch_size, max(4, count * 2)))
+                logger.info(
+                    "LLM text refill language=%s round=%d missing=%d requesting=%d",
+                    language, refill_round + 1, count, request_count,
+                )
+                accept(_llm_rows(
+                    language, layout.language_specs[language].name,
+                    request_count, config, requester,
+                    on_batch=save_request_batch,
+                ))
+    else:
+        raise ValueError("text_generation.provider must be builtin, file, or openai_compatible")
+
+    _write_text_pool(output, pool)
+    missing = {
+        language: target - pool_counts[language]
+        for language in layout.languages if pool_counts[language] < target
+    }
+    report = {
+        "format": 2,
+        "storage": "voice-id",
+        "voice_id": voice_id,
+        "provider": provider,
+        "output": str(output.resolve()),
+        "requested_languages": list(layout.languages),
+        "target_per_language": target,
+        "accepted": dict(sorted(pool_counts.items())),
+        "rejected": dict(sorted(rejected.items())),
+        "rejected_examples": rejected_examples,
+        "generation_family": family_fingerprint,
+    }
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
+    partial_path.unlink(missing_ok=True)
+    logger.info(
+        "VOICE TEXT DONE | voice_id=%s | pool=%d | counts=%s | added=%d",
+        voice_id, len(pool), dict(sorted(pool_counts.items())), len(pool) - len(existing),
+        extra={"tts_style": "success"},
+    )
+    if missing and not bool(config.get("allow_fewer", False)):
+        raise RuntimeError(
+            "text generation did not reach target counts: "
+            + ", ".join(f"{language} missing {count}" for language, count in missing.items())
+            + f"; inspect {report_path} or set dataset.text.allow_fewer=true"
+        )
+    return output
+
+
 def generate_texts(config_path: str | Path, *, requester=_openai_compatible_request) -> Path:
     raw, layout = resolve_experiment(config_path)
     configure_logging_from_config(raw)
@@ -846,6 +1068,19 @@ def generate_texts(config_path: str | Path, *, requester=_openai_compatible_requ
     if not config.get("enabled", False):
         raise ValueError("text generation is disabled in this config")
     validate_text_generation_config(config)
+    voice_id = str(
+        (raw.get("generation", {}).get("voice") or {}).get("id") or ""
+    ).strip()
+    if voice_id and not CORPUS_NAME.fullmatch(voice_id):
+        raise ValueError(
+            "dataset.voice.id must contain only letters, numbers, '.', '_' and '-', "
+            "and cannot start with punctuation"
+        )
+    uses_default_storage = not any(
+        config.get(key) for key in ("output", "root", "corpus_name")
+    )
+    if voice_id and uses_default_storage:
+        return _voice_text_pool(raw, layout, config, voice_id, requester)
     provider = str(config.get("provider", "builtin"))
     total = int(config.get("sentences_per_language", 100))
     corpus_id, fingerprint = _corpus_identity(config, layout)

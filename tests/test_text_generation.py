@@ -77,6 +77,64 @@ class TextGenerationTests(unittest.TestCase):
             self.assertNotIn("reader-a", second.parts)
             self.assertNotIn("reader-b", second.parts)
 
+    def test_voice_text_pool_reuses_reductions_and_appends_expansions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._config(
+                root,
+                {"provider": "builtin", "sentences_per_language": 4},
+                languages=("en",),
+            )
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["generation"] = {"voice": {"id": "public_voice"}}
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            output = generate_texts(config)
+            self.assertEqual(
+                output.resolve(),
+                (root / "datasets/voices/public_voice/texts.csv").resolve(),
+            )
+            self.assertEqual(len(self._rows(output)), 4)
+
+            reduced = json.loads(config.read_text(encoding="utf-8"))
+            reduced["text_generation"]["sentences_per_language"] = 2
+            reduced["experiment"]["name"] = "reduced-model"
+            config.write_text(json.dumps(reduced), encoding="utf-8")
+            self.assertEqual(generate_texts(config), output)
+            self.assertEqual(len(self._rows(output)), 4)
+
+            expanded = json.loads(config.read_text(encoding="utf-8"))
+            expanded["text_generation"]["sentences_per_language"] = 6
+            expanded["experiment"]["languages"] = ["en", "fr"]
+            expanded["experiment"]["name"] = "expanded-model"
+            config.write_text(json.dumps(expanded), encoding="utf-8")
+            self.assertEqual(generate_texts(config), output)
+            rows = self._rows(output)
+            self.assertEqual(len(rows), 12)
+            self.assertEqual(sum(row["language"] == "en" for row in rows), 6)
+            self.assertEqual(sum(row["language"] == "fr" for row in rows), 6)
+
+    def test_voice_text_pool_imports_compatible_legacy_corpus(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = self._config(
+                root,
+                {"provider": "builtin", "sentences_per_language": 3},
+                languages=("en",),
+            )
+            legacy = generate_texts(config)
+            legacy_rows = self._rows(legacy)
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["generation"] = {"voice": {"id": "migrated_voice"}}
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            migrated = generate_texts(config)
+            self.assertEqual(
+                migrated.resolve(),
+                (root / "datasets/voices/migrated_voice/texts.csv").resolve(),
+            )
+            self.assertEqual(self._rows(migrated), legacy_rows)
+
     def test_smaller_language_selection_reuses_compatible_larger_corpus(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -154,16 +155,16 @@ def _write_legacy_voice_alias(legacy: Path, destination: Path, previous: dict) -
 
 def _voice_dataset(raw: dict, layout, generation: dict,
                    voice: dict) -> tuple[str, Path, dict]:
-    """Resolve the append-only shared dataset owned by generation.voice.id."""
+    """Resolve the append-only shared dataset owned by public dataset.voice.id."""
     voice_id = str(voice.get("id") or "").strip()
     if not voice_id:
         raise ValueError(
-            "generation.voice.id is required and is the only key used for shared "
+            "dataset.voice.id is required and is the only key used for shared "
             "voice dataset storage"
         )
     if not VOICE_ID.fullmatch(voice_id):
         raise ValueError(
-            "generation.voice.id must contain only letters, numbers, '.', '_' and '-', "
+            "dataset.voice.id must contain only letters, numbers, '.', '_' and '-', "
             "and cannot start with punctuation"
         )
     identity = _voice_identity(raw, generation, voice)
@@ -203,7 +204,7 @@ def _voice_dataset(raw: dict, layout, generation: dict,
             raise ValueError(
                 f"voice_id {voice_id!r} is already locked to different voice settings at "
                 f"{record}; keep the original prompt/reference/Qwen settings or choose a "
-                "new generation.voice.id"
+                "new dataset.voice.id"
             )
     else:
         legacy_records = sorted(
@@ -214,7 +215,7 @@ def _voice_dataset(raw: dict, layout, generation: dict,
             raise ValueError(
                 f"voice_id {voice_id!r} already has a legacy cache with different voice "
                 f"settings at {legacy_records[0]}; keep those settings or choose a new "
-                "generation.voice.id"
+                "dataset.voice.id"
             )
         unmanaged = [] if migrated_legacy else [
             path for path in (destination / "references", destination / "wavs")
@@ -270,9 +271,11 @@ def read_generation_texts(path: str | Path, supported_languages=None) -> list[Ge
     return result
 
 
-def _runtime_kwargs(config: dict) -> tuple[str, dict]:
+def _runtime_kwargs(config: dict, inherited_device: str = "auto") -> tuple[str, dict]:
     runtime = config.get("runtime", {})
     requested = runtime.get("device", "auto")
+    if requested == "auto" and inherited_device != "auto":
+        requested = inherited_device
     if requested == "auto":
         device = "cuda:0" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     else:
@@ -371,6 +374,26 @@ def _qwen_reference_input(value):
     return str(value) if isinstance(value, Path) else value
 
 
+def _checkpoint_dataset_metadata(layout) -> Path | None:
+    """Find the raw dataset belonging to a resume/expand checkpoint."""
+    checkpoint = layout.initialization_checkpoint
+    if checkpoint is None:
+        return None
+    run_layout_path = checkpoint.parent.parent / "run-layout.json"
+    if not run_layout_path.is_file():
+        return None
+    try:
+        previous = json.loads(run_layout_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    dataset_dir = Path(str(previous.get("dataset_dir") or ""))
+    raw_metadata = dataset_dir / "metadata.csv"
+    if raw_metadata.is_file():
+        return raw_metadata
+    phoneme_metadata = Path(str(previous.get("metadata") or ""))
+    return phoneme_metadata if phoneme_metadata.is_file() else None
+
+
 def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path | None = None,
                      model_loader: Callable = load_qwen_teacher) -> Path:
     """Generate a named VITS dataset using the official Qwen teacher runtime.
@@ -393,9 +416,13 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     )
 
     text_generation = raw.get("text_generation", {})
+    voice = generation.get("voice") or {}
+    voice_id_hint = str(voice.get("id") or "").strip() or None
     generated_default = None
     if text_generation.get("enabled", False):
-        generated_default = text_corpus_path(text_generation, layout)
+        generated_default = text_corpus_path(
+            text_generation, layout, voice_id=voice_id_hint,
+        )
     text_manifest = Path(
         text_manifest_path or generation.get("text_manifest")
         or generated_default or layout.dataset_dir / "texts.csv"
@@ -403,6 +430,17 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     output_metadata = Path(generation.get("raw_metadata") or layout.dataset_dir / "metadata.csv")
     all_texts = read_generation_texts(text_manifest, registry)
     texts = [item for item in all_texts if item.language in layout.languages]
+    if text_generation.get("enabled", False):
+        target = int(text_generation.get("sentences_per_language", 100))
+        selected_counts = {}
+        selected_texts = []
+        for item in texts:
+            count = selected_counts.get(item.language, 0)
+            if count >= target:
+                continue
+            selected_texts.append(item)
+            selected_counts[item.language] = count + 1
+        texts = selected_texts
     missing_text_languages = sorted(set(layout.languages) - {item.language for item in texts})
     if missing_text_languages:
         raise ValueError(
@@ -418,13 +456,12 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
                 "and supply your own metadata, or configure a supported teacher"
             )
         teacher_languages[language] = spec.teacher_language
-    voice = generation.get("voice") or {}
     mode = voice.get("mode")
     if mode not in {"design", "clone"}:
-        raise ValueError("generation.voice.mode must be design or clone")
+        raise ValueError("dataset.voice.mode must be design or clone")
     speaker = voice.get("speaker", "voice_01").strip()
     if not speaker:
-        raise ValueError("generation.voice.speaker must not be empty")
+        raise ValueError("dataset.voice.speaker must not be empty")
 
     candidates = int(generation.get("candidates_per_text", 1))
     if candidates < 1:
@@ -475,7 +512,7 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     )
 
     if pending:
-        device, load_kwargs = _runtime_kwargs(generation)
+        device, load_kwargs = _runtime_kwargs(generation, layout.device)
         common = {
             "download_if_missing": bool(generation.get("auto_download_models", True)),
             "runtime_mode": generation.get("qwen_runtime", "installed"),
@@ -491,7 +528,7 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             prompt = voice.get("prompt", "").strip()
             reference_language = voice.get("reference_language", "en").lower()
             if not prompt or not reference_text:
-                raise ValueError("design mode requires generation.voice.prompt and reference_text")
+                raise ValueError("design mode requires dataset.voice.prompt and reference_text")
             if reference_language not in registry:
                 raise ValueError(f"unsupported design reference language: {reference_language}")
             reference_spec = registry[reference_language]
@@ -530,7 +567,7 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         else:
             reference_value = voice.get("reference_audio")
             if not reference_value:
-                raise ValueError("clone mode requires generation.voice.reference_audio")
+                raise ValueError("clone mode requires dataset.voice.reference_audio")
             if not reference_text and not x_vector_only:
                 raise ValueError("clone mode requires the exact reference_text unless x_vector_only_mode is true")
             uploaded = Path(reference_value).expanduser()
@@ -661,28 +698,64 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             "results": trimmed,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    included_manifests = [
+        (Path(value), False) for value in generation.get("include_metadata", [])
+    ]
+    previous_metadata = (
+        _checkpoint_dataset_metadata(layout)
+        if layout.initialization_mode in {"resume", "expand_speakers"} else None
+    )
+    if previous_metadata is not None and all(
+        path.resolve() != previous_metadata.resolve()
+        for path, _ in included_manifests
+    ):
+        included_manifests.append((previous_metadata, True))
+        logger.info(
+            "METADATA AUTO REUSE | mode=%s | source=%s | current_speaker=%s",
+            layout.initialization_mode, previous_metadata, speaker,
+            extra={"tts_style": "success"},
+        )
     logger.info(
         "METADATA BUILD START | generated_jobs=%d | included_manifests=%d | output=%s",
-        len(jobs), len(generation.get("include_metadata", [])), output_metadata,
+        len(jobs), len(included_manifests), output_metadata,
     )
     rows = []
     seen = set()
-    for included_path in generation.get("include_metadata", []):
+    included_counts = Counter()
+    skipped_languages = Counter()
+    target_per_profile = (
+        int(text_generation.get("sentences_per_language", 100)) * candidates
+        if text_generation.get("enabled", False) else None
+    )
+    for included_path, automatic in included_manifests:
         for item in read_manifest(included_path):
             if item.language not in layout.languages:
-                raise ValueError(
-                    f"included metadata contains language {item.language!r} not enabled by experiment.languages"
-                )
+                skipped_languages[item.language] += 1
+                continue
+            # The currently configured voice is rebuilt from its append-only
+            # cache. Automatic checkpoint reuse only carries the other voices.
+            if automatic and item.speaker == speaker:
+                continue
+            profile = (item.speaker, item.language)
+            if automatic and target_per_profile is not None \
+                    and included_counts[profile] >= target_per_profile:
+                continue
             key = (str(item.audio), item.text, item.language, item.speaker)
             if key in seen:
                 continue
             seen.add(key)
+            included_counts[profile] += 1
             rows.append({
                 "audio": os.path.relpath(item.audio.resolve(), output_metadata.parent.resolve()),
                 "text": item.text,
                 "language": item.language,
                 "speaker": item.speaker,
             })
+    if skipped_languages:
+        logger.info(
+            "METADATA FILTER | skipped_disabled_languages=%s",
+            dict(sorted(skipped_languages.items())),
+        )
     for job in jobs:
         key = (str(job.output.resolve()), job.item.text, job.item.language, speaker)
         if key in seen:

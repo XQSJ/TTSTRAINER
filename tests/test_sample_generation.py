@@ -194,6 +194,41 @@ class SampleGenerationTests(unittest.TestCase):
             self.assertEqual(len(report.items), 3)
             self.assertEqual({item.speaker for item in report.items}, {"voice_old", "voice_a"})
 
+    def test_expand_speakers_automatically_reuses_checkpoint_dataset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, old_calls = self._base(root, "clone")
+            old_metadata = generate_samples(
+                config, model_loader=lambda key, **kwargs: FakeCloneModel(old_calls),
+            )
+            old_layout = root / "runs/old-model"
+            checkpoint = old_layout / "checkpoints/last"
+            checkpoint.mkdir(parents=True)
+            (old_layout / "run-layout.json").write_text(json.dumps({
+                "dataset_dir": str(old_metadata.parent),
+                "metadata": str(old_metadata.parent / "metadata.phonemes.csv"),
+            }), encoding="utf-8")
+
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["experiment"]["name"] = "expanded-model"
+            raw["experiment"]["initialization"] = {
+                "mode": "expand_speakers",
+                "checkpoint": str(checkpoint),
+            }
+            raw["generation"]["voice"]["id"] = "shared_voice_b"
+            raw["generation"]["voice"]["speaker"] = "voice_b"
+            expanded_config = root / "expanded.json"
+            expanded_config.write_text(json.dumps(raw), encoding="utf-8")
+            new_calls = []
+
+            metadata = generate_samples(
+                expanded_config,
+                model_loader=lambda key, **kwargs: FakeCloneModel(new_calls),
+            )
+            report = validate_manifest(metadata, 8000, require_single_speaker=False)
+            self.assertEqual(len(report.items), 4)
+            self.assertEqual({item.speaker for item in report.items}, {"voice_a", "voice_b"})
+
     def test_same_voice_dataset_is_reused_by_different_models(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -304,6 +339,52 @@ class SampleGenerationTests(unittest.TestCase):
                 ]),
                 (root / "datasets/voices/shared_voice_a").resolve(),
             )
+
+    def test_voice_text_pool_is_limited_to_requested_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            texts = root / "datasets/voices/shared_voice_a/texts.csv"
+            texts.parent.mkdir(parents=True)
+            with texts.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=["text", "language"])
+                writer.writeheader()
+                for index in range(3):
+                    writer.writerow({
+                        "text": f"English sentence number {index}.", "language": "en",
+                    })
+            raw["experiment"]["languages"] = ["en"]
+            raw["text_generation"] = {
+                "enabled": True, "provider": "builtin",
+                "sentences_per_language": 1,
+            }
+            raw["generation"]["text_manifest"] = None
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            metadata = generate_samples(config, model_loader=loader)
+            self.assertEqual(len(validate_manifest(metadata, 8000).items), 1)
+
+    def test_qwen_device_inherits_experiment_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "clone")
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["experiment"]["device"] = "cuda:1"
+            raw["generation"]["runtime"].pop("device")
+            config.write_text(json.dumps(raw), encoding="utf-8")
+            load_kwargs = []
+
+            def loader(key, **kwargs):
+                load_kwargs.append(kwargs)
+                return FakeCloneModel(calls)
+
+            generate_samples(config, model_loader=loader)
+            self.assertEqual(load_kwargs[0]["device_map"], "cuda:1")
 
     def test_same_voice_id_rejects_changed_identity(self):
         with tempfile.TemporaryDirectory() as directory:

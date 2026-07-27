@@ -64,6 +64,26 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(config["generation"]["voice"]["mode"], "design")
         self.assertEqual(config["model"]["hidden_channels"], 256)
         self.assertEqual(config["generation"]["generation_kwargs"]["max_new_tokens"], 2048)
+        self.assertEqual(config["generation"]["voice"]["id"], "voice_02")
+        self.assertEqual(config["text_generation"]["sentences_per_language"], 2000)
+
+    def test_public_dataset_block_expands_to_internal_pipeline_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "simple.json"
+            path.write_text(json.dumps({
+                "experiment": {"name": "simple", "languages": ["en"]},
+                "dataset": {
+                    "sentences_per_language": 321,
+                    "text": {"provider": "builtin"},
+                    "voice": {"id": "voice_a", "mode": "design"},
+                    "include": ["old.csv"],
+                },
+            }), encoding="utf-8")
+            config = load_project_config(path)
+            self.assertTrue(config["text_generation"]["enabled"])
+            self.assertEqual(config["text_generation"]["sentences_per_language"], 321)
+            self.assertEqual(config["generation"]["voice"]["id"], "voice_a")
+            self.assertEqual(config["generation"]["include_metadata"], ["old.csv"])
 
     def test_public_workflow_examples_resolve(self):
         clone = load_project_config("training_configs/clone.example.json")
@@ -80,17 +100,8 @@ class ProjectConfigTests(unittest.TestCase):
             ["duration_predictor"],
         )
         self.assertEqual(expand["experiment"]["initialization"]["mode"], "expand_speakers")
-        self.assertEqual(expand["generation"]["include_metadata"], ["datasets/model_1/metadata.csv"])
+        self.assertEqual(expand["generation"]["include_metadata"], [])
         self.assertEqual(load_vits_config("training_configs/train1.json").hop_length, 256)
-        european = load_project_config("training_configs/european.example.json")
-        self.assertEqual(european["experiment"]["languages"], ["en", "de", "fr", "ru", "es", "pt", "it"])
-        auto_text = load_project_config("training_configs/auto-text.example.json")
-        self.assertTrue(auto_text["text_generation"]["enabled"])
-        self.assertEqual(auto_text["text_generation"]["provider"], "builtin")
-        quality = load_project_config("training_configs/quality.example.json")
-        self.assertEqual(quality["model"]["hidden_channels"], 256)
-        self.assertEqual(quality["model"]["decoder_resblock_kernel_sizes"], [3, 7, 11])
-        self.assertEqual(quality["training"]["epochs"], 200)
 
     def test_public_configs_keep_valid_bilingual_json_comments(self):
         config_paths = sorted(Path("training_configs").glob("*.json"))

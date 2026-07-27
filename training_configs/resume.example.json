@@ -1,30 +1,32 @@
 {
-  "_comment": "从旧 checkpoint 完整续训的示例 / Example: fully resume training from an existing checkpoint",
-  "preset": "compact",
+  "_comment": "继续训练旧模型；数据阶段保持开启并自动命中缓存 / Resume a model while dataset stages remain safely cache-aware",
+  "preset": "quality",
   "experiment": {
-    "_comment": "languages 及顺序必须与旧 checkpoint 完全一致 / Languages and their order must exactly match the checkpoint",
     "name": "model_1_resume",
     "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
-    "metadata": "datasets/model_1/metadata.phonemes.csv",
-    "device": "auto",
+    "device": "cuda:0",
     "initialization": {
-      "_comment": "resume 仅用于相同 checkpoint format/结构，会恢复 Generator、Discriminator、Optimizer、epoch 和 step；format 3 升级请用 sdp-warm-start.example.json / resume requires the same checkpoint format/architecture and restores Generator, Discriminator, optimizers, epoch and step; use sdp-warm-start.example.json to migrate format 3",
       "mode": "resume",
       "checkpoint": "runs/model_1/checkpoints/last"
     }
   },
-  "generation": {
-    "_comment": "续训直接使用已有数据，不重新调用 Qwen / Reuse existing data and do not call Qwen again",
-    "enabled": false
-  },
-  "pipeline": {
-    "_comment": "已有冻结音素 metadata，因此跳过生成和音素化 / Existing metadata already contains frozen phonemes, so generation and phonemization are skipped",
-    "generate_samples": false,
-    "phonemize": false
+  "dataset": {
+    "sentences_per_language": 2000,
+    "text": {
+      "provider": "builtin"
+    },
+    "_comment_voice": "必须与原模型完全一致；命中缓存后不会调用 Qwen / Must match the original model; a cache hit does not invoke Qwen",
+    "voice": {
+      "id": "voice_01",
+      "mode": "design",
+      "speaker": "voice_01",
+      "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, and conversational pacing.",
+      "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
+      "reference_language": "zh"
+    }
   },
   "training": {
-    "_comment": "epochs 是总目标轮数，必须大于 checkpoint 已完成轮数 / epochs is the total target and must exceed the checkpoint epoch",
-    "batch_size": 8,
-    "epochs": 1500
+    "batch_size": 4,
+    "epochs": 400
   }
 }

@@ -1,38 +1,33 @@
 {
-  "_comment": "把 format 3 确定性时长模型迁移到 format 4 随机时长模型 / Migrate a format-3 deterministic-duration model to the format-4 stochastic-duration model",
+  "_comment": "把 format 3 模型迁移到随机时长模型；高级用法 / Migrate a format-3 model to stochastic duration; advanced use",
   "preset": "quality",
   "experiment": {
-    "_comment": "必须使用新的模型名称；语言及顺序应与旧 checkpoint 一致 / Use a new model name; keep languages and their order identical to the old checkpoint",
     "name": "model_1_sdp",
     "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
-    "metadata": "datasets/model_1/metadata.phonemes.csv",
-    "device": "auto",
+    "device": "cuda:0",
     "initialization": {
-      "_comment": "warm_start 保留已学好的音色和声学模块，并重新训练 SDP / warm_start preserves learned voice/acoustic modules and retrains the SDP",
       "mode": "warm_start",
       "checkpoint": "runs/model_1/checkpoints/best",
       "exclude": ["duration_predictor"]
     }
   },
-  "text_generation": {
-    "_comment": "直接复用旧模型已经冻结的训练数据 / Reuse the old model's frozen training data",
-    "enabled": false
-  },
-  "generation": {
-    "_comment": "不重新调用 Qwen，不重新生成 WAV / Do not call Qwen or regenerate WAV files",
-    "enabled": false
-  },
-  "pipeline": {
-    "_comment": "metadata.phonemes.csv 已存在，因此跳过数据生成和音素化 / metadata.phonemes.csv already exists, so skip generation and phonemization",
-    "generate_texts": false,
-    "generate_samples": false,
-    "phonemize": false
+  "dataset": {
+    "_comment": "这里必须填写原模型使用的同一音色设置 / Use exactly the same voice settings as the original model",
+    "sentences_per_language": 2000,
+    "text": {
+      "provider": "builtin"
+    },
+    "voice": {
+      "id": "voice_01",
+      "mode": "design",
+      "speaker": "voice_01",
+      "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, and conversational pacing.",
+      "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
+      "reference_language": "zh"
+    }
   },
   "training": {
-    "_comment": "这是新的优化过程，epochs 从 1 重新计数 / This is a new optimization run and epochs restart from 1",
     "batch_size": 4,
-    "learning_rate_generator": 0.0001,
-    "learning_rate_discriminator": 0.0001,
     "epochs": 100
   }
 }

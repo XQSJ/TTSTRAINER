@@ -1,29 +1,27 @@
 {
-  "_comment": "上传参考音频克隆音色的示例 / Example: clone a voice from uploaded reference audio",
-  "preset": "compact",
+  "_comment": "上传参考录音并训练克隆音色 / Train a cloned voice from an uploaded recording",
+  "preset": "quality",
   "experiment": {
-    "_comment": "修改 name 和 languages 即可建立独立模型 / Change name and languages to create an independent model",
     "name": "model_clone",
-    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"]
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "cuda:0"
   },
-  "generation": {
-    "_comment": "使用官方 qwen-tts 包提取并复用 voice clone prompt / Use the official qwen-tts package to build and reuse a voice clone prompt",
-    "text_manifest": "datasets/texts.example.csv",
+  "dataset": {
+    "sentences_per_language": 2000,
+    "text": {
+      "provider": "builtin"
+    },
     "voice": {
-      "_comment": "reference_text 必须与录音逐字对应；仅 x_vector_only_mode=true 时可省略 / reference_text must exactly match the recording; omit it only when x_vector_only_mode=true",
-      "id": "voice_01",
+      "id": "my_voice",
       "mode": "clone",
-      "speaker": "voice_01",
-      "reference_audio": "datasets/references/voice_01.wav",
-      "reference_text": "Replace this sentence with the exact transcript of the reference audio.",
+      "speaker": "my_voice",
+      "reference_audio": "datasets/references/my_voice.wav",
+      "reference_text": "这里必须填写与参考录音逐字一致的文本。",
       "x_vector_only_mode": false
     }
   },
   "training": {
-    "_comment": "克隆音色建议先用较小学习率 / A smaller learning rate is recommended for cloned voices",
-    "batch_size": 8,
-    "learning_rate_generator": 0.0001,
-    "learning_rate_discriminator": 0.0001,
-    "epochs": 1000
+    "batch_size": 4,
+    "epochs": 200
   }
 }

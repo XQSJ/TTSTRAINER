@@ -20,6 +20,38 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _normalize_dataset_config(raw: dict) -> dict:
+    """Expand the small public `dataset` block into internal pipeline settings."""
+    dataset = raw.get("dataset")
+    if dataset is None:
+        return raw
+    if not isinstance(dataset, dict):
+        raise ValueError("dataset must be a JSON object")
+    result = dict(raw)
+    text = dataset.get("text", {})
+    if not isinstance(text, dict):
+        raise ValueError("dataset.text must be a JSON object")
+    text_override = dict(text)
+    if "sentences_per_language" in dataset:
+        text_override["sentences_per_language"] = dataset["sentences_per_language"]
+    text_override.setdefault("enabled", True)
+    result["text_generation"] = _deep_merge(
+        result.get("text_generation", {}), text_override,
+    )
+
+    generation_override = {}
+    if "voice" in dataset:
+        generation_override["voice"] = dataset["voice"]
+    if "include" in dataset:
+        generation_override["include_metadata"] = dataset["include"]
+    if "enabled" in dataset:
+        generation_override["enabled"] = bool(dataset["enabled"])
+    result["generation"] = _deep_merge(
+        result.get("generation", {}), generation_override,
+    )
+    return result
+
+
 def _preset_path(source: Path, preset: str) -> Path:
     relative = PRESET_FILES.get(preset)
     if relative is None:
@@ -56,5 +88,7 @@ def load_project_config(path: str | Path, _seen: set[Path] | None = None) -> dic
     elif parent is not None:
         parent_path = (source.parent / parent).resolve()
     else:
-        return raw
-    return _deep_merge(load_project_config(parent_path, seen), raw)
+        return _normalize_dataset_config(raw)
+    return _normalize_dataset_config(
+        _deep_merge(load_project_config(parent_path, seen), raw),
+    )

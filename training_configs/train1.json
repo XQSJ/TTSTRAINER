@@ -1,33 +1,27 @@
 {
-  "_comment": "示例一：一个配置文件训练一个独立模型 / Example 1: one config file trains one independent model",
+  "_comment": "最常用的 Prompt 音色训练配置 / Minimal prompt-designed voice training config",
   "preset": "quality",
   "experiment": {
-    "_comment": "模型名称和语言；name 自动决定 datasets/runs/artifacts 目录 / Model name and languages; name automatically determines datasets/runs/artifacts directories",
     "name": "model_1",
-    "_comment_languages": "内置可选 zh/en/ja/ko/de/fr/ru/pt/es/it；顺序决定 language ID / Built-ins: zh/en/ja/ko/de/fr/ru/pt/es/it; order defines language IDs",
-    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"]
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "cuda:0"
   },
-  "text_generation": {
-    "_comment": "默认自动生成少量流程验证文本；产品训练请关闭并提供人工审核 CSV / Generates a small smoke-test corpus by default; disable it and provide reviewed CSV text for production",
-    "enabled": true,
-    "provider": "builtin",
-    "sentences_per_language": 20
-  },
-  "generation": {
-    "_comment": "使用 Qwen 根据音色设置生成训练音频 / Use Qwen to generate training audio from the voice settings",
+  "dataset": {
+    "_comment": "系统按 voice.id 检查已有文本和音频，只补缺少的语言和数量 / The system reuses this voice ID and only fills missing languages or samples",
+    "sentences_per_language": 2000,
+    "text": {
+      "provider": "builtin"
+    },
     "voice": {
-      "_comment": "design 使用文字描述设计音色 / design creates a voice from a natural-language description",
-      "_comment_id": "id 决定可跨模型复用的公共音频目录；speaker 是模型内标签 / id selects the reusable shared audio directory; speaker is the in-model label",
       "id": "voice_01",
       "mode": "design",
       "speaker": "voice_01",
-      "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, steady pace, and calm friendly delivery.",
-      "reference_text": "Hello, this is the reference voice used to create a consistent multilingual speaker.",
-      "reference_language": "en"
+      "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, and conversational pacing.",
+      "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
+      "reference_language": "zh"
     }
   },
   "training": {
-    "_comment": "普通用户只需调整批大小和训练轮数 / Most users only need to tune batch size and epochs",
     "batch_size": 4,
     "epochs": 200
   }
