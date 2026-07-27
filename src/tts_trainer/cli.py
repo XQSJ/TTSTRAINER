@@ -92,6 +92,9 @@ def _dispatch(argv=None) -> int:
     synthesize.add_argument("--model-dir", required=True); synthesize.add_argument("--text", required=True)
     synthesize.add_argument("--language", required=True); synthesize.add_argument("--speaker", required=True)
     synthesize.add_argument("--output", default="output.wav")
+    synthesize.add_argument("--noise-scale", type=float, default=0.667)
+    synthesize.add_argument("--length-scale", type=float, default=1.0)
+    synthesize.add_argument("--duration-noise-scale", type=float, default=0.35)
     models = sub.add_parser("models", help="manage project-local Qwen models")
     model_sub = models.add_subparsers(dest="model_command", required=True)
     status = model_sub.add_parser("status"); status.add_argument("key", nargs="?", choices=MODEL_SPECS)
@@ -211,7 +214,12 @@ def _dispatch(argv=None) -> int:
         if args.validate_runtime: print(f"onnxruntime output shape: {validate_onnx_runtime(result)}")
     elif args.command == "synthesize-onnx":
         runtime = OnnxTTS(args.model_dir)
-        samples = runtime.synthesize_text(args.text, language=args.language, speaker=args.speaker)
+        samples = runtime.synthesize_text(
+            args.text, language=args.language, speaker=args.speaker,
+            noise_scale=args.noise_scale,
+            length_scale=args.length_scale,
+            duration_noise_scale=args.duration_noise_scale,
+        )
         print(write_wav(args.output, samples, runtime.sample_rate))
     elif args.command == "qwen-runtime":
         status = inspect_qwen_runtime(args.mode, args.source_path)

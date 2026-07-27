@@ -8,7 +8,7 @@
     "metadata": "datasets/model_1/metadata.phonemes.csv",
     "device": "auto",
     "initialization": {
-      "_comment": "resume 会恢复 Generator、Discriminator、Optimizer、epoch 和 step / resume restores Generator, Discriminator, optimizers, epoch and step",
+      "_comment": "resume 仅用于相同 checkpoint format/结构，会恢复 Generator、Discriminator、Optimizer、epoch 和 step；format 3 升级请用 sdp-warm-start.example.json / resume requires the same checkpoint format/architecture and restores Generator, Discriminator, optimizers, epoch and step; use sdp-warm-start.example.json to migrate format 3",
       "mode": "resume",
       "checkpoint": "runs/model_1/checkpoints/last"
     }

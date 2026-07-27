@@ -124,23 +124,68 @@ class PosteriorEncoder(nn.Module):
         return latent, mean * mask, log_scale * mask, mask
 
 
-class DurationPredictor(nn.Module):
+class StochasticDurationPredictor(nn.Module):
+    """ONNX-friendly conditional distribution over log phoneme durations.
+
+    Reference VITS uses a considerably heavier flow-based stochastic duration
+    predictor. For a mobile model we instead learn a heteroscedastic log-normal
+    distribution. It retains the important one-to-many behavior, has a proper
+    likelihood objective, and exports using operators supported by ONNX Runtime.
+    """
+
     def __init__(self, hidden_channels: int, condition_channels: int):
         super().__init__()
         self.condition = nn.Conv1d(condition_channels, hidden_channels, 1)
         self.convs = nn.ModuleList((
             nn.Conv1d(hidden_channels, hidden_channels, 3, padding=1),
             nn.Conv1d(hidden_channels, hidden_channels, 3, padding=1),
+            nn.Conv1d(hidden_channels, hidden_channels, 3, padding=1),
         ))
-        self.norms = nn.ModuleList((nn.LayerNorm(hidden_channels), nn.LayerNorm(hidden_channels)))
-        self.projection = nn.Conv1d(hidden_channels, 1, 1)
+        self.norms = nn.ModuleList(
+            nn.LayerNorm(hidden_channels) for _ in self.convs
+        )
+        self.projection = nn.Conv1d(hidden_channels, 2, 1)
+        nn.init.zeros_(self.projection.weight)
+        nn.init.zeros_(self.projection.bias)
+        # softplus(-1.5) + 0.08 ~= 0.28 log-duration standard deviation:
+        # enough variance to learn immediately without wildly random timing.
+        with torch.no_grad():
+            self.projection.bias[1] = -1.5
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
+    def statistics(
+        self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden = x.detach() + self.condition(g.detach())
         for conv, norm in zip(self.convs, self.norms):
             hidden = conv(hidden * mask).transpose(1, 2)
             hidden = F.silu(norm(hidden)).transpose(1, 2)
-        return self.projection(hidden * mask) * mask
+        mean, raw_scale = self.projection(hidden * mask).chunk(2, dim=1)
+        # A positive floor prevents likelihood collapse. The upper bound keeps
+        # early checkpoints from sampling unusably long or short phonemes.
+        scale = (F.softplus(raw_scale) + 0.08).clamp_max(1.5)
+        return mean * mask, torch.log(scale) * mask
+
+    def loss(
+        self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor,
+        durations: torch.Tensor,
+    ) -> torch.Tensor:
+        mean, log_scale = self.statistics(x, mask, g)
+        target = torch.log(durations.clamp_min(1.0)) * mask
+        inverse_scale = torch.exp(-log_scale)
+        negative_log_likelihood = (
+            0.5 * ((target - mean) * inverse_scale).square()
+            + log_scale
+            + 0.5 * math.log(2.0 * math.pi)
+        )
+        return (negative_log_likelihood * mask).sum() / mask.sum().clamp_min(1.0)
+
+    def sample(
+        self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor,
+        noise_scale: float | torch.Tensor,
+    ) -> torch.Tensor:
+        mean, log_scale = self.statistics(x, mask, g)
+        noise = torch.randn_like(mean) * torch.exp(log_scale) * noise_scale
+        return (mean + noise) * mask
 
 
 def sinusoidal_position_encoding(length: int, channels: int, *, device, dtype) -> torch.Tensor:

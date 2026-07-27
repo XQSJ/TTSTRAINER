@@ -6,8 +6,10 @@ from pathlib import Path
 
 
 # Formats 1 and 2 were produced with broken text-prior training semantics.
-# Do not silently present those checkpoints as compatible with format 3.
-CHECKPOINT_FORMAT = 3
+# Format 3 is usable as a backbone warm start, but its deterministic duration
+# predictor is not compatible with the stochastic duration model in format 4.
+CHECKPOINT_FORMAT = 4
+WARM_START_FORMATS = frozenset((3, CHECKPOINT_FORMAT))
 
 
 def require_checkpoint_format(value: int) -> None:
@@ -23,10 +25,23 @@ def require_checkpoint_format(value: int) -> None:
             "text encoder and an affine flow incompatible with its KL objective; "
             "update TTSTRAINER and retrain from scratch with a new experiment.name"
         )
+    if value == 3:
+        raise ValueError(
+            "checkpoint format 3 uses the legacy deterministic duration predictor; "
+            "start a new experiment with initialization.mode=warm_start to reuse its "
+            "text encoder, speaker/language embeddings, flow and decoder"
+        )
     if value != CHECKPOINT_FORMAT:
         raise ValueError(
             f"unsupported checkpoint format {value}; expected {CHECKPOINT_FORMAT}"
         )
+
+
+def require_warm_start_checkpoint_format(value: int) -> None:
+    """Accept only checkpoints whose inference backbone is safe to transfer."""
+    if value in WARM_START_FORMATS:
+        return
+    require_checkpoint_format(value)
 
 
 def save_training_checkpoint(directory: str | Path, *, generator, discriminator,

@@ -11,6 +11,7 @@ import torch
 
 from tts_trainer.checkpoints import (load_training_checkpoint,
                                      require_checkpoint_format,
+                                     require_warm_start_checkpoint_format,
                                      save_training_checkpoint)
 from tts_trainer.vits import MultilingualVITS, VitsConfig, VitsDiscriminator
 from tts_trainer.vits.data import slice_waveforms
@@ -18,6 +19,7 @@ from tts_trainer.vits.losses import discriminator_loss, generator_adversarial_lo
 from tts_trainer.vits.modules import maximum_path, sinusoidal_position_encoding
 from tts_trainer.vits.trainer import _semantic_reference_root, train_vits
 from tts_trainer.vits.trainer import (_load_expanded_generator,
+                                      _load_warm_start_generator,
                                       _resolve_frontend_contract)
 from tts_trainer.vits.exporter import (PiperInferenceWrapper, export_vits_onnx,
                                        validate_onnx_runtime, voice_profiles)
@@ -44,6 +46,9 @@ class VitsTests(unittest.TestCase):
             require_checkpoint_format(1)
         with self.assertRaisesRegex(ValueError, "position-free text encoder"):
             require_checkpoint_format(2)
+        with self.assertRaisesRegex(ValueError, "deterministic duration predictor"):
+            require_checkpoint_format(3)
+        require_warm_start_checkpoint_format(3)
 
     def test_semantic_quality_uses_shared_voice_reference_directory(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -170,6 +175,40 @@ class VitsTests(unittest.TestCase):
         self.assertEqual(audio.shape[-1], int(lengths.max()) * self.config.hop_length)
         self.assertEqual(attention.shape[2], 3)
 
+    def test_stochastic_duration_predictor_has_deterministic_zero_noise_mode(self):
+        tokens = torch.tensor([[2, 4, 3]])
+        lengths = torch.tensor([3])
+        language_ids = torch.tensor([2])
+        speaker_ids = torch.tensor([1])
+        condition = self.model.conditioning(language_ids, speaker_ids)
+        hidden, _, _, mask = self.model.text_encoder(tokens, lengths, condition)
+
+        deterministic_a = self.model.duration_predictor.sample(
+            hidden, mask, condition, 0.0,
+        )
+        deterministic_b = self.model.duration_predictor.sample(
+            hidden, mask, condition, 0.0,
+        )
+        stochastic = self.model.duration_predictor.sample(
+            hidden, mask, condition, 0.6,
+        )
+        self.assertTrue(torch.equal(deterministic_a, deterministic_b))
+        self.assertFalse(torch.equal(deterministic_a, stochastic))
+
+    def test_stochastic_duration_likelihood_trains_mean_and_scale(self):
+        tokens = torch.tensor([[2, 4, 5, 3]])
+        lengths = torch.tensor([4])
+        condition = self.model.conditioning(torch.tensor([0]), torch.tensor([0]))
+        hidden, _, _, mask = self.model.text_encoder(tokens, lengths, condition)
+        loss = self.model.duration_predictor.loss(
+            hidden, mask, condition, torch.tensor([[[1.0, 2.0, 4.0, 1.0]]]),
+        )
+        loss.backward()
+        gradient = self.model.duration_predictor.projection.weight.grad
+        self.assertIsNotNone(gradient)
+        self.assertGreater(float(gradient[0].abs().sum()), 0.0)
+        self.assertGreater(float(gradient[1].abs().sum()), 0.0)
+
     def test_piper_sid_splits_into_language_and_speaker(self):
         wrapper = PiperInferenceWrapper(self.model.eval())
         captured = {}
@@ -251,6 +290,42 @@ class VitsTests(unittest.TestCase):
                 self.model.text_encoder.embedding.weight,
             ))
 
+    def test_format_three_checkpoint_warm_starts_backbone_but_resets_duration(self):
+        discriminator = VitsDiscriminator(periods=(2,))
+        optimizer_g = torch.optim.AdamW(self.model.parameters())
+        optimizer_d = torch.optim.AdamW(discriminator.parameters())
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "old"
+            save_training_checkpoint(
+                checkpoint, generator=self.model, discriminator=discriminator,
+                optimizer_g=optimizer_g, optimizer_d=optimizer_d,
+                epoch=200, global_step=95000, config=self.config,
+                language_map={"zh": 0}, speaker_map={"voice_01": 0},
+                tokens=["_", "^", "$", " ", "<unk>"],
+            )
+            metadata_path = checkpoint / "metadata.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["format"] = 3
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            state_path = checkpoint / "training-state.pt"
+            state = torch.load(state_path, map_location="cpu", weights_only=False)
+            state["format"] = 3
+            state["generator"]["duration_predictor.projection.weight"].fill_(9.0)
+            torch.save(state, state_path)
+
+            target = MultilingualVITS(self.config)
+            duration_before = target.duration_predictor.projection.weight.detach().clone()
+            report = _load_warm_start_generator(target, checkpoint, ())
+            self.assertEqual(report["checkpoint_format"], 3)
+            self.assertIn("duration_predictor", report["excluded_modules"])
+            self.assertTrue(torch.equal(
+                target.conditioning.language_embedding.weight,
+                self.model.conditioning.language_embedding.weight,
+            ))
+            self.assertTrue(torch.equal(
+                target.duration_predictor.projection.weight, duration_before,
+            ))
+
     def test_resume_uses_checkpoint_frontend_when_lock_was_not_copied(self):
         previous_contract = frontend_contract_from_config({}, ("en",)).to_dict()
         previous_contract["languages"]["en"]["engine_version"] = "eSpeak NG frozen"
@@ -314,12 +389,24 @@ class VitsTests(unittest.TestCase):
             self.assertEqual(frontend["provider"], "language-router")
             self.assertEqual(frontend["languages"]["ja"]["provider"], "openjtalk")
             self.assertEqual(frontend["languages"]["en"]["provider"], "espeak-ng")
+            deployment = json.loads(
+                (target.parent / "model.onnx.json").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(deployment["format"], 2)
+            self.assertEqual(
+                deployment["scales"],
+                ["noise_scale", "length_scale", "duration_noise_scale"],
+            )
+            self.assertEqual(deployment["scales_default"], [0.667, 1.0, 0.35])
             self.assertEqual(list(target.parent.glob("*.onnx")), [target])
             self.assertTrue((target.parent / "frontend.conformance.json").is_file())
             shape = validate_onnx_runtime(target)
             self.assertEqual(shape[0:2], (1, 1))
             runtime = OnnxTTS(target.parent)
-            audio = runtime.synthesize_units(("a",), language="en", speaker="voice_02", noise_scale=0.0)
+            audio = runtime.synthesize_units(
+                ("a",), language="en", speaker="voice_02",
+                noise_scale=0.0, duration_noise_scale=0.0,
+            )
             self.assertGreater(audio.shape[0], 0)
 
     def test_one_step_training_smoke(self):

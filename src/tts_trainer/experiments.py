@@ -29,6 +29,7 @@ class ExperimentLayout:
     device: str
     initialization_mode: str
     initialization_checkpoint: Path | None
+    initialization_exclude: tuple[str, ...]
 
 
 def validate_model_name(name: str) -> str:
@@ -70,12 +71,25 @@ def resolve_experiment(config_path: str | Path, *, metadata_override: str | None
     artifacts_dir = Path(experiment.get("artifact_root", "artifacts")) / name
     initialization = experiment.get("initialization", {"mode": "scratch"})
     mode = initialization.get("mode", "scratch")
-    if mode not in {"scratch", "resume", "expand_speakers"}:
-        raise ValueError("experiment.initialization.mode must be scratch, resume, or expand_speakers")
+    if mode not in {"scratch", "resume", "warm_start", "expand_speakers"}:
+        raise ValueError(
+            "experiment.initialization.mode must be scratch, resume, warm_start, "
+            "or expand_speakers"
+        )
     checkpoint_value = initialization.get("checkpoint")
     checkpoint = Path(checkpoint_value) if checkpoint_value else None
     if mode != "scratch" and checkpoint is None:
         raise ValueError(f"initialization mode {mode} requires a checkpoint")
+    exclude_raw = initialization.get("exclude", [])
+    if not isinstance(exclude_raw, list) or not all(
+        isinstance(value, str) and value.strip() for value in exclude_raw
+    ):
+        raise ValueError("experiment.initialization.exclude must be an array of module names")
+    excludes = tuple(value.strip().rstrip(".") for value in exclude_raw)
+    if mode != "warm_start" and excludes:
+        raise ValueError(
+            "experiment.initialization.exclude is only valid with mode=warm_start"
+        )
     layout = ExperimentLayout(
         name=name,
         languages=languages,
@@ -90,6 +104,7 @@ def resolve_experiment(config_path: str | Path, *, metadata_override: str | None
         device=device_override or experiment.get("device", "auto"),
         initialization_mode=mode,
         initialization_checkpoint=checkpoint,
+        initialization_exclude=excludes,
     )
     return raw, layout
 
@@ -122,6 +137,7 @@ def prepare_experiment(layout: ExperimentLayout, resolved_config: dict, config_p
         "initialization": {
             "mode": layout.initialization_mode,
             "checkpoint": str(layout.initialization_checkpoint.resolve()) if layout.initialization_checkpoint else None,
+            "exclude": list(layout.initialization_exclude),
         },
     }
     (layout.run_dir / "run-layout.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")

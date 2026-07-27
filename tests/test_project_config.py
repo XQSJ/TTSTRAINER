@@ -53,6 +53,7 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(config["experiment"]["languages"], ["zh", "en", "ja", "ko", "fr", "es", "pt"])
         self.assertEqual(config["language_registry"]["de"]["teacher"]["language"], "German")
         self.assertTrue(config["validation"]["enabled"])
+        self.assertEqual(config["validation"]["metric"], "total")
         self.assertEqual(config["validation"]["export_checkpoint"], "best")
         self.assertTrue(config["quality"]["enabled"])
 
@@ -67,9 +68,17 @@ class ProjectConfigTests(unittest.TestCase):
     def test_public_workflow_examples_resolve(self):
         clone = load_project_config("training_configs/clone.example.json")
         resume = load_project_config("training_configs/resume.example.json")
+        warm_start = load_project_config("training_configs/sdp-warm-start.example.json")
         expand = load_project_config("training_configs/add-speaker.example.json")
         self.assertEqual(clone["generation"]["voice"]["mode"], "clone")
         self.assertEqual(resume["experiment"]["initialization"]["mode"], "resume")
+        self.assertEqual(
+            warm_start["experiment"]["initialization"]["mode"], "warm_start",
+        )
+        self.assertEqual(
+            warm_start["experiment"]["initialization"]["exclude"],
+            ["duration_predictor"],
+        )
         self.assertEqual(expand["experiment"]["initialization"]["mode"], "expand_speakers")
         self.assertEqual(expand["generation"]["include_metadata"], ["datasets/model_1/metadata.csv"])
         self.assertEqual(load_vits_config("training_configs/train1.json").hop_length, 256)

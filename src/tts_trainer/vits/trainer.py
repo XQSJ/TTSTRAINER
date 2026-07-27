@@ -16,6 +16,7 @@ import torchaudio
 from torch.nn import functional as F
 
 from ..checkpoints import (load_training_checkpoint, require_checkpoint_format,
+                           require_warm_start_checkpoint_format,
                            save_training_checkpoint)
 from ..experiments import prepare_experiment, resolve_experiment
 from ..frontend import (FrontendContract, frontend_contract_from_config,
@@ -48,9 +49,12 @@ def select_device(requested: str = "auto") -> torch.device:
     return torch.device("cpu")
 
 
-def _checkpoint_metadata(path: Path) -> dict:
+def _checkpoint_metadata(path: Path, *, warm_start: bool = False) -> dict:
     metadata = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
-    require_checkpoint_format(int(metadata["format"]))
+    if warm_start:
+        require_warm_start_checkpoint_format(int(metadata["format"]))
+    else:
+        require_checkpoint_format(int(metadata["format"]))
     return metadata
 
 
@@ -92,6 +96,76 @@ def _load_expanded_generator(generator: MultilingualVITS, checkpoint: Path) -> N
                 f"architecture mismatch for {name}: checkpoint {tuple(old_value.shape)} vs current {tuple(new_value.shape)}"
             )
     generator.load_state_dict(current)
+
+
+def _load_warm_start_generator(
+    generator: MultilingualVITS, checkpoint: Path, excludes: tuple[str, ...],
+    discriminator=None,
+) -> dict:
+    """Load compatible generator modules while resetting selected components.
+
+    Format-3 checkpoints always reset the duration predictor because its
+    deterministic one-channel head cannot represent the format-4 stochastic
+    distribution. Format-4 checkpoints can additionally exclude explicit
+    module prefixes from the public configuration.
+    """
+    state_file = torch.load(
+        checkpoint / "training-state.pt", map_location="cpu", weights_only=False,
+    )
+    checkpoint_format = int(state_file["format"])
+    require_warm_start_checkpoint_format(checkpoint_format)
+    forced = ("duration_predictor",) if checkpoint_format == 3 else ()
+    prefixes = tuple(dict.fromkeys((*forced, *excludes)))
+
+    def excluded(name: str) -> bool:
+        return any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
+
+    old_state = state_file["generator"]
+    current = generator.state_dict()
+    expandable = {
+        "conditioning.speaker_embedding.weight",
+        "text_encoder.embedding.weight",
+    }
+    loaded = []
+    skipped = []
+    for name, old_value in old_state.items():
+        if excluded(name):
+            skipped.append(name)
+            continue
+        if name not in current:
+            raise ValueError(f"warm-start parameter is absent from current model: {name}")
+        new_value = current[name]
+        if old_value.shape == new_value.shape:
+            current[name] = old_value
+        elif name in expandable and old_value.ndim == new_value.ndim \
+                and old_value.shape[1:] == new_value.shape[1:] \
+                and old_value.shape[0] <= new_value.shape[0]:
+            new_value[:old_value.shape[0]].copy_(old_value)
+            current[name] = new_value
+        else:
+            raise ValueError(
+                f"warm-start architecture mismatch for {name}: checkpoint "
+                f"{tuple(old_value.shape)} vs current {tuple(new_value.shape)}"
+            )
+        loaded.append(name)
+    missing = [name for name in current if name not in old_state and not excluded(name)]
+    if missing:
+        raise ValueError(
+            "warm-start checkpoint is missing non-excluded parameters: "
+            + ", ".join(missing[:10])
+        )
+    generator.load_state_dict(current)
+    discriminator_loaded = False
+    if discriminator is not None and state_file.get("discriminator") is not None:
+        discriminator.load_state_dict(state_file["discriminator"])
+        discriminator_loaded = True
+    return {
+        "checkpoint_format": checkpoint_format,
+        "loaded_tensors": len(loaded),
+        "skipped_tensors": len(skipped),
+        "excluded_modules": list(prefixes),
+        "discriminator_loaded": discriminator_loaded,
+    }
 
 
 def _optimizer_to(optimizer, device: torch.device) -> None:
@@ -172,7 +246,13 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                                require_phonemes=require_phonemes,
                                supported_languages=layout.language_specs)
     items = list(report.items)
-    previous = _checkpoint_metadata(layout.initialization_checkpoint) if layout.initialization_checkpoint else None
+    previous = (
+        _checkpoint_metadata(
+            layout.initialization_checkpoint,
+            warm_start=layout.initialization_mode == "warm_start",
+        )
+        if layout.initialization_checkpoint else None
+    )
     frontend_contract = _resolve_frontend_contract(raw, layout.metadata, layout.languages, previous)
     language_map = {language: index for index, language in enumerate(layout.languages)}
     data_languages = {item.language for item in items}
@@ -324,7 +404,8 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     discriminator_parameters = sum(parameter.numel() for parameter in discriminator.parameters())
     logger.info(
         "model initialized generator_parameters=%d discriminator_parameters=%d "
-        "train_batches_per_epoch=%d validation_batches=%d",
+        "duration_predictor=stochastic-log-normal train_batches_per_epoch=%d "
+        "validation_batches=%d",
         generator_parameters, discriminator_parameters, len(loader),
         len(validation_loader) if validation_loader is not None else 0,
     )
@@ -372,6 +453,23 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         start_epoch = int(restored["epoch"]) + 1
         global_step = int(restored["global_step"])
         _optimizer_to(optimizer_g, device); _optimizer_to(optimizer_d, device)
+    elif layout.initialization_mode == "warm_start":
+        warm_start_report = _load_warm_start_generator(
+            generator, layout.initialization_checkpoint,
+            layout.initialization_exclude, discriminator=discriminator,
+        )
+        logger.info(
+            "WARM START | checkpoint=%s | format=%d | loaded_tensors=%d | "
+            "skipped_tensors=%d | discriminator_loaded=%s | excluded=%s | "
+            "epoch_reset=1 | step_reset=0",
+            layout.initialization_checkpoint,
+            warm_start_report["checkpoint_format"],
+            warm_start_report["loaded_tensors"],
+            warm_start_report["skipped_tensors"],
+            warm_start_report["discriminator_loaded"],
+            ",".join(warm_start_report["excluded_modules"]) or "none",
+            extra={"tts_style": "success"},
+        )
     elif layout.initialization_mode == "expand_speakers":
         _load_expanded_generator(generator, layout.initialization_checkpoint)
     mel_transform = torchaudio.transforms.MelSpectrogram(
@@ -398,7 +496,10 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         raise ValueError(
             "validation.metric must be mel, prior_mel, duration, kl, or total"
         )
-    previous_selection = previous.get("selection") if previous else None
+    previous_selection = (
+        previous.get("selection")
+        if previous and layout.initialization_mode == "resume" else None
+    )
     best_value = float("inf")
     best_epoch = None
     if previous_selection and previous_selection.get("metric") == selection_metric:

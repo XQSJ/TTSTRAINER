@@ -34,7 +34,13 @@ class OnnxTTS:
 
     def synthesize_units(self, units: tuple[str, ...], *, language: str, speaker: str,
                          noise_scale: float = 0.667, length_scale: float = 1.0,
-                         duration_scale: float = 1.0) -> np.ndarray:
+                         duration_noise_scale: float = 0.35) -> np.ndarray:
+        if noise_scale < 0.0:
+            raise ValueError("noise_scale must not be negative")
+        if length_scale <= 0.0:
+            raise ValueError("length_scale must be positive")
+        if duration_noise_scale < 0.0:
+            raise ValueError("duration_noise_scale must not be negative")
         try:
             sid = self.profiles[(speaker, language)]
         except KeyError as exc:
@@ -43,7 +49,10 @@ class OnnxTTS:
         return self.session.run(None, {
             "input": tokens,
             "input_lengths": np.asarray([tokens.shape[1]], dtype=np.int64),
-            "scales": np.asarray([noise_scale, length_scale, duration_scale], dtype=np.float32),
+            "scales": np.asarray(
+                [noise_scale, length_scale, duration_noise_scale],
+                dtype=np.float32,
+            ),
             "sid": np.asarray([sid], dtype=np.int64),
         })[0][0, 0]
 

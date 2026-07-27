@@ -184,7 +184,16 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                     batch["tokens"][0:1, :text_length],
                     batch["text_lengths"][0:1],
                     batch["language_ids"][0:1], batch["speaker_ids"][0:1],
+                    noise_scale=0.667,
+                    duration_noise_scale=0.35,
+                    max_frames=min(max(target_frames * 2, text_length), 4000),
+                )
+                deterministic, deterministic_frames, _ = generator.infer(
+                    batch["tokens"][0:1, :text_length],
+                    batch["text_lengths"][0:1],
+                    batch["language_ids"][0:1], batch["speaker_ids"][0:1],
                     noise_scale=0.0,
+                    duration_noise_scale=0.0,
                     max_frames=min(max(target_frames * 2, text_length), 4000),
                 )
                 full_prior = generator.decode_aligned_prior(
@@ -197,6 +206,7 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                     "posterior-reconstruction.wav": output.audio[0, 0],
                     "aligned-text-prior.wav": full_prior[0, 0, :target_frames * audio_config.hop_length],
                     "text-only-inference.wav": inferred[0, 0],
+                    "text-only-deterministic.wav": deterministic[0, 0],
                 }
                 for filename, samples in audio_files.items():
                     sf.write(
@@ -204,10 +214,19 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                         audio_config.sample_rate, subtype="PCM_16",
                     )
                 (preview / "diagnostics.json").write_text(json.dumps({
-                    "format": 1,
+                    "format": 2,
                     "target_frames": target_frames,
                     "inferred_frames": int(inferred_frames[0].item()),
                     "duration_ratio": float(inferred_frames[0].item()) / max(target_frames, 1),
+                    "deterministic_frames": int(deterministic_frames[0].item()),
+                    "deterministic_duration_ratio": (
+                        float(deterministic_frames[0].item()) / max(target_frames, 1)
+                    ),
+                    "inference_scales": {
+                        "noise_scale": 0.667,
+                        "length_scale": 1.0,
+                        "duration_noise_scale": 0.35,
+                    },
                     "posterior_mel": float(mel.item()),
                     "aligned_prior_mel": float(prior_mel.item()),
                     "files": list(audio_files),

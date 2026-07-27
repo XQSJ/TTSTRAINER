@@ -6,10 +6,10 @@ import torch
 from torch import nn
 
 from .config import VitsConfig
-from .modules import (DurationPredictor, GlobalConditioning, PosteriorEncoder,
-                      ResidualCouplingFlow, TextEncoder, WaveformDecoder,
-                      duration_path, maximum_path, slice_latent,
-                      slice_latent_at)
+from .modules import (GlobalConditioning, PosteriorEncoder,
+                      ResidualCouplingFlow, StochasticDurationPredictor,
+                      TextEncoder, WaveformDecoder, duration_path,
+                      maximum_path, slice_latent, slice_latent_at)
 
 
 @dataclass
@@ -49,7 +49,9 @@ class MultilingualVITS(nn.Module):
             config.spec_channels, config.hidden_channels, config.latent_channels,
             config.conditioning_channels,
         )
-        self.duration_predictor = DurationPredictor(config.hidden_channels, config.conditioning_channels)
+        self.duration_predictor = StochasticDurationPredictor(
+            config.hidden_channels, config.conditioning_channels,
+        )
         self.flow = ResidualCouplingFlow(
             config.latent_channels, config.hidden_channels, config.conditioning_channels, config.flow_layers,
         )
@@ -82,9 +84,9 @@ class MultilingualVITS(nn.Module):
         expanded_mean = torch.matmul(attention, text_mean.transpose(1, 2)).transpose(1, 2)
         expanded_log_scale = torch.matmul(attention, text_log_scale.transpose(1, 2)).transpose(1, 2)
 
-        predicted_log_duration = self.duration_predictor(text_hidden, text_mask, g)
-        target_log_duration = torch.log(durations + 1e-6) * text_mask
-        duration_loss = ((predicted_log_duration - target_log_duration).square() * text_mask).sum() / text_mask.sum()
+        duration_loss = self.duration_predictor.loss(
+            text_hidden, text_mask, g, durations,
+        )
         segment, starts = slice_latent(latent, spec_lengths, self.config.segment_frames)
         audio = self.decoder(segment, g)
         return VitsTrainingOutput(
@@ -96,10 +98,13 @@ class MultilingualVITS(nn.Module):
     @torch.no_grad()
     def infer(self, tokens: torch.Tensor, text_lengths: torch.Tensor, language_ids: torch.Tensor,
               speaker_ids: torch.Tensor, noise_scale: float = 0.667,
-              length_scale: float = 1.0, max_frames: int = 4000):
+              length_scale: float = 1.0, duration_noise_scale: float = 0.35,
+              max_frames: int = 4000):
         g = self.conditioning(language_ids, speaker_ids)
         text_hidden, mean, log_scale, text_mask = self.text_encoder(tokens, text_lengths, g)
-        log_duration = self.duration_predictor(text_hidden, text_mask, g)
+        log_duration = self.duration_predictor.sample(
+            text_hidden, text_mask, g, duration_noise_scale,
+        )
         durations = torch.ceil(torch.exp(log_duration) * text_mask * length_scale).long().clamp_min(0)
         frame_lengths = durations.sum((1, 2)).clamp_min(1).clamp_max(max_frames)
         frames = int(frame_lengths.max().item())
@@ -132,15 +137,17 @@ class MultilingualVITS(nn.Module):
                      scales: torch.Tensor, max_frames: int = 4000):
         """Tensor-only inference path suitable for ONNX export.
 
-        scales follows Piper order: noise_scale, length_scale, duration_scale.
-        Our deterministic duration predictor uses the third value as a smooth
-        duration-logit scale; 1.0 preserves the trained prediction.
+        scales follows Piper order: noise_scale, length_scale,
+        duration_noise_scale. The third value controls stochastic timing:
+        0.0 is deterministic and larger values add duration variation.
         """
         g = self.conditioning(language_ids, speaker_ids)
         text_hidden, mean, log_scale, text_mask = self.text_encoder(tokens, text_lengths, g)
-        log_duration = self.duration_predictor(text_hidden, text_mask, g)
+        log_duration = self.duration_predictor.sample(
+            text_hidden, text_mask, g, scales[2],
+        )
         durations = torch.ceil(
-            torch.exp(log_duration * scales[2]) * text_mask * scales[1]
+            torch.exp(log_duration) * text_mask * scales[1]
         ).to(torch.long).clamp_min(0)
         frame_lengths = durations.sum((1, 2)).clamp_min(1).clamp_max(max_frames)
         frames = frame_lengths.max()

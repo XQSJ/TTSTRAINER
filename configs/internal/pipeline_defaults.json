@@ -82,7 +82,7 @@
     "require_every_profile": true,
     "batch_size": 4,
     "every_epochs": 1,
-    "metric": "prior_mel",
+    "metric": "total",
     "preview_every_epochs": 10,
     "export_checkpoint": "best",
     "seed": 1337

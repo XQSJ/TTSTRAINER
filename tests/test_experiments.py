@@ -44,6 +44,27 @@ class ExperimentTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires a checkpoint"):
                 resolve_experiment(config)
 
+    def test_warm_start_records_checkpoint_and_excluded_modules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "model.json"
+            config.write_text(json.dumps({
+                "experiment": {
+                    "name": "sdp-v2",
+                    "initialization": {
+                        "mode": "warm_start",
+                        "checkpoint": "runs/old/checkpoints/best",
+                        "exclude": ["duration_predictor"],
+                    },
+                },
+            }))
+            _, layout = resolve_experiment(config)
+            self.assertEqual(layout.initialization_mode, "warm_start")
+            self.assertEqual(
+                layout.initialization_checkpoint,
+                Path("runs/old/checkpoints/best"),
+            )
+            self.assertEqual(layout.initialization_exclude, ("duration_predictor",))
+
     def test_rejects_path_like_model_name(self):
         with self.assertRaises(ValueError):
             validate_model_name("../overwrite")

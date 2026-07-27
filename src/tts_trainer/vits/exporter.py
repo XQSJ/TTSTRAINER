@@ -80,7 +80,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     target = output_dir / "model.onnx"
     tokens = torch.tensor([[2, 4, 5, 3]], dtype=torch.long)
     lengths = torch.tensor([4], dtype=torch.long)
-    scales = torch.tensor([0.0, 1.0, 1.0], dtype=torch.float32)
+    scales = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
     sid = torch.tensor([0], dtype=torch.long)
     logger.info("ONNX export step=2/5 action=build_graph opset=%d output=%s", opset, target)
     with warnings.catch_warnings():
@@ -104,12 +104,18 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         {}, tuple(metadata["language_map"])
     ).to_dict()
     deployment = {
-        "format": 1,
+        "format": 2,
         "model_type": "multilingual-vits-piper-shaped",
         "sample_rate": sample_rate,
         "hop_length": config.hop_length,
         "inputs": ["input", "input_lengths", "scales", "sid"],
-        "scales_default": [0.667, 1.0, 1.0],
+        "scales_default": [0.667, 1.0, 0.35],
+        "scales": ["noise_scale", "length_scale", "duration_noise_scale"],
+        "duration_predictor": {
+            "type": "stochastic-log-normal",
+            "deterministic_value": 0.0,
+            "recommended_range": [0.0, 0.6],
+        },
         "sid_formula": "speaker_id * num_languages + language_id",
         "frontend": frontend,
         "frontend_note": "application supplies matching phoneme ids; stock sherpa multilingual switching requires an adapter",
@@ -141,7 +147,7 @@ def validate_onnx_runtime(model_path: str | Path) -> tuple[int, ...]:
     output = session.run(None, {
         "input": np.asarray([[2, 3]], dtype=np.int64),
         "input_lengths": np.asarray([2], dtype=np.int64),
-        "scales": np.asarray([0.0, 1.0, 1.0], dtype=np.float32),
+        "scales": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
         "sid": np.asarray([0], dtype=np.int64),
     })[0]
     if output.ndim != 3 or output.shape[1] != 1 or output.shape[2] <= 0:

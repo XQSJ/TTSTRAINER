@@ -1,11 +1,18 @@
 # tts-trainer
 
+> **韵律升级（2026-07-27）：** checkpoint format 4 已将确定性 Duration
+> Predictor 替换为移动端友好的随机时长分布预测器（SDP）。第三个 ONNX `scales`
+> 参数现在是 `duration_noise_scale`，默认 `0.35`，设为 `0` 可获得确定性节奏。
+> format 3 模型不能直接 `resume`，但可以复制
+> `training_configs/sdp-warm-start.example.json`，通过 `warm_start` 保留已学好的音色、
+> Text Encoder、Flow 和 Decoder，只重新训练时长模块。
+>
 > **重要修复（2026-07-24）：** format 1/2 训练代码的文本推理链路存在缺陷：文本
 > 先验梯度曾被切断，随后仍保留了错误的 embedding 初始化、无位置信息的文本编码器，
 > 以及与 KL 目标不匹配的 affine flow。典型表现是训练 loss 下降、音色相似，但内容是
 > 噪音或杂乱音节。请先 `git pull origin main`。旧 checkpoint 无法可靠修复，必须换一
 > 个新的 `experiment.name`，以 `initialization.mode=scratch` 重新训练。公共文本和
-> Qwen WAV 会自动复用，不需要重新生成数据。新版 checkpoint format 为 3。
+> Qwen WAV 会自动复用，不需要重新生成数据。
 
 ## 最快开始：改一份配置，运行几条命令
 
@@ -165,12 +172,14 @@ runs/my_model/validation-audio/epoch-XXXX/
 ├── target.wav                    # 原始验证音频
 ├── posterior-reconstruction.wav # 真实音频驱动的声码器重建
 ├── aligned-text-prior.wav        # 使用真实对齐的文本先验重建
-├── text-only-inference.wav       # 与手机端相同的纯文本推理
+├── text-only-inference.wav       # ONNX 默认随机度的纯文本推理
+├── text-only-deterministic.wav   # duration_noise_scale=0 的固定节奏对照
 └── diagnostics.json              # prior mel 与预测/真实时长比例
 ```
 
-`best` 默认按 `prior_mel` 而不是 posterior 重建 mel 选择，避免把“音色已学会、文本仍
-杂乱”的 checkpoint 导出为最终模型。试听时应优先听 `text-only-inference.wav`。
+format 4 的 `best` 默认按 `total = 45 × prior_mel + duration + KL` 选择，同时约束
+文本先验、随机时长分布和 latent 对齐，避免把“音色已学会、文本或节奏仍异常”的
+checkpoint 导出为最终模型。试听时应优先听 `text-only-inference.wav`。
 
 `quality` 预设默认每 50 step 写一条持久日志、每 5 epoch 验证并覆盖保存一次
 `last`、每 10,000 step 保存一个累计阶段 checkpoint；第 1 个 epoch 和最后一个 epoch
@@ -223,6 +232,7 @@ VITS 训练、checkpoint 保存和 ONNX 导出。
 | 自动生成文本后训练 | `training_configs/auto-text.example.json` |
 | 上传一段录音克隆音色 | `training_configs/clone.example.json` |
 | 从旧 checkpoint 继续训练 | `training_configs/resume.example.json` |
+| 将 format 3 模型升级为随机时长模型 | `training_configs/sdp-warm-start.example.json` |
 | 给旧模型增加新音色 | `training_configs/add-speaker.example.json` |
 
 通常不要直接改示例文件，复制一份更容易管理：
@@ -481,6 +491,7 @@ tts_trainer/
 │   ├── auto-text.example.json  # 自动生成文本后训练
 │   ├── clone.example.json      # 上传参考音色
 │   ├── resume.example.json     # 恢复完整训练状态
+│   ├── sdp-warm-start.example.json # 从旧模型热启动 SDP
 │   └── add-speaker.example.json # 扩展新音色
 ├── configs/
 │   ├── internal/             # Qwen 生成细节和自动流水线默认值
@@ -792,8 +803,9 @@ checkpoint。程序会比较 `frontend.lock.json` 和 checkpoint 契约并拒绝
 | `name` | 模型名称，也是输出目录名 |
 | `languages` | 该模型实际训练和导出的语言列表，顺序决定 language ID |
 | `device` | `auto`、`cuda`、`cuda:0`、`mps` 或 `cpu` |
-| `initialization.mode` | `scratch`、`resume` 或 `expand_speakers` |
+| `initialization.mode` | `scratch`、`resume`、`warm_start` 或 `expand_speakers` |
 | `initialization.checkpoint` | 续训/扩展时的旧 checkpoint 目录 |
+| `initialization.exclude` | 仅 `warm_start` 使用；不加载并重新训练的模块前缀 |
 
 模型私有路径由 `name` 推导：
 
@@ -1472,6 +1484,42 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer train-many \
 `resume` 恢复 Generator、Discriminator、两个 Optimizer、epoch 和 step。
 `training.epochs` 是总目标 epoch，必须大于 checkpoint 中已完成的 epoch。
 
+### 将 format 3 模型升级为随机时长模型
+
+如果旧模型已经能稳定生成正确音色和内容，只是节奏偏僵硬，不需要重新生成 Qwen
+数据。复制迁移示例：
+
+```bash
+cp training_configs/sdp-warm-start.example.json training_configs/my_model_sdp.json
+```
+
+然后将 `name`、`languages`、`metadata` 和 `checkpoint` 改成自己的路径：
+
+```json
+{
+  "experiment": {
+    "name": "my_model_sdp",
+    "languages": ["zh"],
+    "metadata": "datasets/my_model/metadata.phonemes.csv",
+    "initialization": {
+      "mode": "warm_start",
+      "checkpoint": "runs/my_model/checkpoints/best",
+      "exclude": ["duration_predictor"]
+    }
+  }
+}
+```
+
+再执行正常流水线命令。`warm_start` 会加载旧 checkpoint 中尺寸兼容的 Text Encoder、
+Speaker/Language Embedding、Posterior Encoder、Flow、Decoder 和 Discriminator；
+旧 Duration Predictor 和 Optimizer 不会恢复，epoch 和 step 从头计数。format 3 会
+自动强制排除 `duration_predictor`，配置中显式写出是为了让迁移意图更清楚。
+format 1/2 checkpoint 的声学主干本身存在缺陷，不能用来热启动。
+
+format 4 日志中的 `duration` 是 log-duration 分布的负对数似然，与 format 3 的
+时长 MSE 数值不可直接比较。热启动最初若 `duration` 较高属于正常现象，应结合
+`text-only-inference.wav`、`text-only-deterministic.wav` 和 `duration_ratio` 判断。
+
 ### 基于旧模型增加新音色
 
 参考 [add-speaker.example.json](training_configs/add-speaker.example.json)：
@@ -1596,6 +1644,20 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer verify-frontend \
 input, input_lengths, scales, sid -> output
 ```
 
+`scales` 的三个值依次是：
+
+```text
+[noise_scale, length_scale, duration_noise_scale]
+```
+
+- `noise_scale`：声学 latent 随机度，默认 `0.667`。
+- `length_scale`：整体语速倍率，默认 `1.0`；更大通常更慢。
+- `duration_noise_scale`：音素时长随机度，默认 `0.35`；`0` 为确定性节奏，
+  推荐先在 `0.15～0.6` 内试听。它不是旧 format 3 的 duration logit 倍率。
+
+相同文本需要逐次输出完全一致时，将两个 noise scale 都设为 `0`。部署资源
+`model.onnx.json` 会记录参数名称、默认值和推荐范围。
+
 项目将 language 和 speaker 分开训练，但在部署时组合成：
 
 ```text
@@ -1612,8 +1674,12 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer synthesize-onnx \
   --text "Hello world" \
   --language en \
   --speaker voice_01 \
+  --duration-noise-scale 0.35 \
   --output artifacts/test/en_voice01.wav
 ```
+
+试听随机节奏时建议从 `0.2、0.35、0.5` 三档比较。排查发音或做严格回归测试时使用
+`--noise-scale 0 --duration-noise-scale 0`，这样同一输入会得到确定性结果。
 
 ## 数据质检与可选模型
 
@@ -1671,11 +1737,13 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer models path base-1.7b
    尚未把完整日语音高重音标签作为独立条件送入模型。
 3. stock sherpa-onnx Piper/VITS 前端一次配置一个 eSpeak voice；一个 ONNX 在请求间
    切换多种语言需要 App/native 前端路由或 sherpa 适配。
-4. 已有确定性验证集、best checkpoint、信号质检、可选 ASR 和 speaker similarity；
+4. 已有固定验证集、best checkpoint、信号质检、可选 ASR 和 speaker similarity；
    尚没有能替代人工试听的自动 MOS。声纹阈值必须按自己的数据校准。
 5. 蒸馏、结构化剪枝、选择性 INT8 和真机 benchmark 尚未自动化。它们是模型达到
    质量基线后的发布优化，不是第一次成功训练的前置条件。
-6. 当前 VITS 实现是移动端工程基线，正式音质必须用真实数据和母语者试听验证。
+6. format 4 使用轻量、ONNX 友好的条件 log-normal SDP，而不是原始 VITS 中更重的
+   flow-based SDP；它优先平衡端侧包体、导出兼容性和节奏多样性。正式音质仍必须用
+   真实数据和母语者试听验证。
 
 不要因为训练 loss 下降就直接发布模型。至少需要每种启用语言的母语者试听，并检查
 数字、日期、人名、长句、疑问句和 App 实际业务文本。
