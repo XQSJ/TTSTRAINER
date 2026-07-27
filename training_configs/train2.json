@@ -8,13 +8,15 @@
   },
   "dataset": {
     "sentences_per_language": 2000,
+    "speakers": {
+      "voice_02": "voice_02"
+    },
     "text": {
       "provider": "builtin"
     },
     "voice": {
       "id": "voice_02",
       "mode": "design",
-      "speaker": "voice_02",
       "prompt": "A confident adult voice with crisp articulation and natural expressive pacing.",
       "reference_text": "This reference creates a consistent multilingual voice.",
       "reference_language": "en"

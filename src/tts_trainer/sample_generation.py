@@ -394,6 +394,196 @@ def _checkpoint_dataset_metadata(layout) -> Path | None:
     return phoneme_metadata if phoneme_metadata.is_file() else None
 
 
+def _read_voice_manifest(path: Path) -> list[dict]:
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"voice dataset manifest is missing: {path}; generate this voice first"
+        )
+    with path.open(newline="", encoding="utf-8-sig") as stream:
+        reader = csv.DictReader(stream)
+        required = {"audio", "text", "language"}
+        missing = required - set(reader.fieldnames or ())
+        if missing:
+            raise ValueError(
+                f"voice manifest missing columns: {', '.join(sorted(missing))}"
+            )
+        return [{
+            "audio": (path.parent / row["audio"].strip()).resolve(),
+            "text": row["text"].strip(),
+            "language": row["language"].strip().lower(),
+        } for row in reader]
+
+
+def _migrate_voice_manifest(voice_root: Path, datasets_root: Path,
+                            voice_id: str) -> Path | None:
+    """Build the new speaker-free index from older model-local metadata."""
+    rows = []
+    seen = set()
+    for record_path in datasets_root.glob("*/dataset.json"):
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if record.get("voice_id") != voice_id:
+            continue
+        metadata = Path(str(record.get("metadata") or ""))
+        if not metadata.is_file():
+            continue
+        for item in read_manifest(metadata):
+            try:
+                item.audio.resolve().relative_to(voice_root.resolve())
+            except ValueError:
+                continue
+            key = (str(item.audio.resolve()), item.text, item.language)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({
+                "audio": item.audio.resolve(),
+                "text": item.text,
+                "language": item.language,
+            })
+    if not rows:
+        return None
+    manifest = voice_root / "manifest.csv"
+    temporary = manifest.with_suffix(".csv.tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["audio", "text", "language"])
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                "audio": os.path.relpath(row["audio"], voice_root.resolve()),
+                "text": row["text"],
+                "language": row["language"],
+            })
+    temporary.replace(manifest)
+    logger.info(
+        "VOICE MANIFEST MIGRATED | voice_id=%s | samples=%d | path=%s",
+        voice_id, len(rows), manifest,
+        extra={"tts_style": "success"},
+    )
+    return manifest
+
+
+def _sync_voice_manifest(voice_dataset: Path, jobs: list[GenerationJob]) -> Path:
+    """Persist a speaker-free append-only index beside the shared voice WAVs."""
+    manifest = voice_dataset / "manifest.csv"
+    rows = _read_voice_manifest(manifest) if manifest.is_file() else []
+    seen = {
+        (str(row["audio"]), row["text"], row["language"])
+        for row in rows
+    }
+    for job in jobs:
+        key = (str(job.output.resolve()), job.item.text, job.item.language)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "audio": job.output.resolve(),
+            "text": job.item.text,
+            "language": job.item.language,
+        })
+    temporary = manifest.with_suffix(".csv.tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["audio", "text", "language"])
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                "audio": os.path.relpath(
+                    Path(row["audio"]).resolve(), voice_dataset.resolve(),
+                ),
+                "text": row["text"],
+                "language": row["language"],
+            })
+    temporary.replace(manifest)
+    return manifest
+
+
+def _speaker_assignments(generation: dict) -> dict[str, str]:
+    """Return model speaker label -> public voice ID."""
+    value = generation.get("speaker_assignments") or {}
+    if not isinstance(value, dict):
+        raise ValueError("dataset.speakers must be an object mapping speaker names to voice IDs")
+    result = {}
+    for speaker, voice_id in value.items():
+        speaker = str(speaker).strip()
+        voice_id = str(voice_id).strip()
+        if not speaker:
+            raise ValueError("dataset.speakers contains an empty speaker name")
+        if not VOICE_ID.fullmatch(voice_id):
+            raise ValueError(f"dataset.speakers has invalid voice ID: {voice_id!r}")
+        if voice_id in result.values():
+            raise ValueError(
+                f"voice ID {voice_id!r} is assigned more than once in dataset.speakers"
+            )
+        result[speaker] = voice_id
+    return result
+
+
+def _assigned_voice_rows(
+    assignments: dict[str, str], layout, generation: dict,
+    text_generation: dict,
+) -> list[dict]:
+    """Select shared voice WAVs and assign model-local speaker labels."""
+    root = Path(generation.get("voice_dataset_root") or layout.dataset_dir.parent / "voices")
+    candidates = int(generation.get("candidates_per_text", 1))
+    target = (
+        int(text_generation.get("sentences_per_language", 100)) * candidates
+        if "sentences_per_language" in text_generation else None
+    )
+    selected = []
+    counts = Counter()
+    for speaker, voice_id in assignments.items():
+        manifest = root / voice_id / "manifest.csv"
+        if not manifest.is_file():
+            _migrate_voice_manifest(root / voice_id, layout.dataset_dir.parent, voice_id)
+        for row in _read_voice_manifest(manifest):
+            language = row["language"]
+            if language not in layout.languages:
+                continue
+            profile = (speaker, language)
+            if target is not None and counts[profile] >= target:
+                continue
+            counts[profile] += 1
+            selected.append({**row, "speaker": speaker})
+        missing = [
+            language for language in layout.languages
+            if counts[(speaker, language)] < (target or 1)
+        ]
+        if missing:
+            raise ValueError(
+                f"voice ID {voice_id!r} does not have enough cached data for speaker "
+                f"{speaker!r}: {', '.join(missing)}; generate or extend that voice first"
+            )
+    logger.info(
+        "MODEL SPEAKER ASSIGNMENTS | assignments=%s | samples=%d",
+        assignments, len(selected),
+        extra={"tts_style": "success"},
+    )
+    return selected
+
+
+def _write_model_metadata(output: Path, rows: list[dict]) -> Path:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(output.suffix + ".tmp")
+    with temporary.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream, fieldnames=["audio", "text", "language", "speaker"],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                "audio": os.path.relpath(
+                    Path(row["audio"]).resolve(), output.parent.resolve(),
+                ),
+                "text": row["text"],
+                "language": row["language"],
+                "speaker": row["speaker"],
+            })
+    temporary.replace(output)
+    return output
+
+
 def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path | None = None,
                      model_loader: Callable = load_qwen_teacher) -> Path:
     """Generate a named VITS dataset using the official Qwen teacher runtime.
@@ -418,6 +608,33 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     text_generation = raw.get("text_generation", {})
     voice = generation.get("voice") or {}
     voice_id_hint = str(voice.get("id") or "").strip() or None
+    output_metadata = Path(
+        generation.get("raw_metadata") or layout.dataset_dir / "metadata.csv"
+    )
+    assignments = _speaker_assignments(generation)
+    if not voice:
+        if not assignments:
+            raise ValueError(
+                "dataset must define voice for generation or speakers for model assembly"
+            )
+        rows = _assigned_voice_rows(
+            assignments, layout, generation, text_generation,
+        )
+        _write_model_metadata(output_metadata, rows)
+        (layout.dataset_dir / "dataset.json").write_text(json.dumps({
+            "format": 3,
+            "model": layout.name,
+            "metadata": str(output_metadata.resolve()),
+            "speaker_assignments": assignments,
+            "samples": len(rows),
+            "audio_storage": "shared-voice-reference",
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(
+            "METADATA BUILD DONE | samples=%d | speakers=%d | output=%s",
+            len(rows), len(assignments), output_metadata,
+            extra={"tts_style": "success"},
+        )
+        return output_metadata
     generated_default = None
     if text_generation.get("enabled", False):
         if text_manifest_path is None and not generation.get("text_manifest"):
@@ -434,7 +651,6 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         text_manifest_path or generation.get("text_manifest")
         or generated_default or layout.dataset_dir / "texts.csv"
     )
-    output_metadata = Path(generation.get("raw_metadata") or layout.dataset_dir / "metadata.csv")
     all_texts = read_generation_texts(text_manifest, registry)
     texts = [item for item in all_texts if item.language in layout.languages]
     if text_generation.get("enabled", False):
@@ -466,9 +682,6 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     mode = voice.get("mode")
     if mode not in {"design", "clone"}:
         raise ValueError("dataset.voice.mode must be design or clone")
-    speaker = voice.get("speaker", "voice_01").strip()
-    if not speaker:
-        raise ValueError("dataset.voice.speaker must not be empty")
 
     candidates = int(generation.get("candidates_per_text", 1))
     if candidates < 1:
@@ -476,9 +689,17 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     voice_id, voice_dataset, _ = _voice_dataset(
         raw, layout, generation, voice,
     )
+    assigned_label = next(
+        (label for label, assigned_voice in assignments.items()
+         if assigned_voice == voice_id),
+        None,
+    )
+    # Legacy voice.speaker remains accepted, but public configs assign speaker
+    # labels at model assembly time through dataset.speakers.
+    speaker = str(voice.get("speaker") or assigned_label or voice_id).strip()
     logger.info(
-        "VOICE DATASET | voice_id=%s | path=%s | speaker_label=%s",
-        voice_id, voice_dataset, speaker,
+        "VOICE DATASET | voice_id=%s | path=%s",
+        voice_id, voice_dataset,
         extra={"tts_style": "success"},
     )
     wav_root = voice_dataset / "wavs"
@@ -705,6 +926,12 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             "results": trimmed,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    voice_manifest = _sync_voice_manifest(voice_dataset, jobs)
+    logger.info(
+        "VOICE MANIFEST | voice_id=%s | path=%s | speaker_free=true",
+        voice_id, voice_manifest,
+        extra={"tts_style": "success"},
+    )
     included_manifests = [
         (Path(value), False) for value in generation.get("include_metadata", [])
     ]
@@ -763,16 +990,29 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             "METADATA FILTER | skipped_disabled_languages=%s",
             dict(sorted(skipped_languages.items())),
         )
-    for job in jobs:
-        key = (str(job.output.resolve()), job.item.text, job.item.language, speaker)
+    current_rows = (
+        _assigned_voice_rows(assignments, layout, generation, text_generation)
+        if assignments else [{
+            "audio": job.output.resolve(),
+            "text": job.item.text,
+            "language": job.item.language,
+            "speaker": speaker,
+        } for job in jobs]
+    )
+    for item in current_rows:
+        key = (
+            str(item["audio"]), item["text"], item["language"], item["speaker"],
+        )
         if key in seen:
             continue
         seen.add(key)
         rows.append({
-            "audio": os.path.relpath(job.output.resolve(), output_metadata.parent.resolve()),
-            "text": job.item.text,
-            "language": job.item.language,
-            "speaker": speaker,
+            "audio": os.path.relpath(
+                Path(item["audio"]).resolve(), output_metadata.parent.resolve(),
+            ),
+            "text": item["text"],
+            "language": item["language"],
+            "speaker": item["speaker"],
         })
     output_metadata.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_metadata.with_suffix(output_metadata.suffix + ".tmp")
@@ -789,6 +1029,7 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         "voice_id": voice_id,
         "voice_dataset": str(voice_dataset.resolve()),
         "speaker_label": speaker,
+        "speaker_assignments": assignments,
         "samples": len(rows),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(

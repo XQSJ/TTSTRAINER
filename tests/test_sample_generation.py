@@ -136,6 +136,10 @@ class SampleGenerationTests(unittest.TestCase):
             self.assertIsNone(calls[0][2]["source_path"])
             voice_root = metadata.parent.parent / "voices/shared_voice_a"
             self.assertTrue((voice_root / "voice.json").is_file())
+            with (voice_root / "manifest.csv").open(
+                newline="", encoding="utf-8",
+            ) as stream:
+                self.assertNotIn("speaker", next(csv.DictReader(stream)).keys())
             self.assertTrue((voice_root / "references/designed.wav").is_file())
             dataset = json.loads((metadata.parent / "dataset.json").read_text())
             self.assertEqual(dataset["voice_id"], "shared_voice_a")
@@ -255,6 +259,50 @@ class SampleGenerationTests(unittest.TestCase):
             second_audio = tuple(item.audio for item in validate_manifest(second_metadata, 8000).items)
             self.assertEqual(first_audio, second_audio)
             self.assertNotEqual(first_metadata.parent, second_metadata.parent)
+
+    def test_model_assigns_speakers_without_copying_shared_voice_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            generate_samples(config, model_loader=loader)
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["experiment"]["name"] = "voice-b-data"
+            raw["generation"]["voice"]["id"] = "shared_voice_b"
+            raw["generation"]["voice"].pop("speaker")
+            voice_b_config = root / "voice-b.json"
+            voice_b_config.write_text(json.dumps(raw), encoding="utf-8")
+            generate_samples(voice_b_config, model_loader=loader)
+
+            raw["experiment"]["name"] = "two-speaker-model"
+            raw["generation"].pop("voice")
+            raw["generation"].pop("text_manifest")
+            raw["generation"]["speaker_assignments"] = {
+                "gentle": "shared_voice_a",
+                "bright": "shared_voice_b",
+            }
+            model_config = root / "two-speaker.json"
+            model_config.write_text(json.dumps(raw), encoding="utf-8")
+
+            metadata = generate_samples(
+                model_config,
+                model_loader=lambda *_args, **_kwargs: self.fail(
+                    "both shared voice datasets should be cached"
+                ),
+            )
+            report = validate_manifest(
+                metadata, 8000, require_single_speaker=False,
+            )
+            self.assertEqual(
+                {item.speaker for item in report.items},
+                {"gentle", "bright"},
+            )
+            self.assertTrue(all("/datasets/voices/" in str(item.audio)
+                                for item in report.items))
 
     def test_reducing_languages_reuses_audio_and_rewrites_metadata_subset(self):
         with tempfile.TemporaryDirectory() as directory:

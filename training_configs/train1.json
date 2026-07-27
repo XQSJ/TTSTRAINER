@@ -9,13 +9,15 @@
   "dataset": {
     "_comment": "系统按 voice.id 检查已有文本和音频，只补缺少的语言和数量 / The system reuses this voice ID and only fills missing languages or samples",
     "sentences_per_language": 2000,
+    "speakers": {
+      "voice_01": "voice_01"
+    },
     "text": {
       "provider": "builtin"
     },
     "voice": {
       "id": "voice_01",
       "mode": "design",
-      "speaker": "voice_01",
       "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, and conversational pacing.",
       "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
       "reference_language": "zh"

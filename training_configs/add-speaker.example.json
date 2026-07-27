@@ -13,13 +13,15 @@
   "dataset": {
     "_comment": "旧音色会从 checkpoint 自动合并；这里仅定义要新增的音色 / Existing voices are imported from the checkpoint automatically; define only the new voice here",
     "sentences_per_language": 2000,
+    "speakers": {
+      "voice_02": "voice_02"
+    },
     "text": {
       "provider": "builtin"
     },
     "voice": {
       "id": "voice_02",
       "mode": "design",
-      "speaker": "voice_02",
       "prompt": "A clear adult voice distinct from voice_01, with natural pacing and neutral emotion.",
       "reference_text": "你好，这是一段用于创建第二个统一音色的参考录音。",
       "reference_language": "zh"

@@ -76,6 +76,7 @@ class ProjectConfigTests(unittest.TestCase):
                     "sentences_per_language": 321,
                     "text": {"provider": "builtin"},
                     "voice": {"id": "voice_a", "mode": "design"},
+                    "speakers": {"reader": "voice_a"},
                     "include": ["old.csv"],
                 },
             }), encoding="utf-8")
@@ -83,6 +84,10 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertTrue(config["text_generation"]["enabled"])
             self.assertEqual(config["text_generation"]["sentences_per_language"], 321)
             self.assertEqual(config["generation"]["voice"]["id"], "voice_a")
+            self.assertEqual(
+                config["generation"]["speaker_assignments"],
+                {"reader": "voice_a"},
+            )
             self.assertEqual(config["generation"]["include_metadata"], ["old.csv"])
 
     def test_public_workflow_examples_resolve(self):
@@ -90,6 +95,7 @@ class ProjectConfigTests(unittest.TestCase):
         resume = load_project_config("training_configs/resume.example.json")
         warm_start = load_project_config("training_configs/sdp-warm-start.example.json")
         expand = load_project_config("training_configs/add-speaker.example.json")
+        multi = load_project_config("training_configs/multi-speaker.example.json")
         self.assertEqual(clone["generation"]["voice"]["mode"], "clone")
         self.assertEqual(resume["experiment"]["initialization"]["mode"], "resume")
         self.assertEqual(
@@ -101,6 +107,11 @@ class ProjectConfigTests(unittest.TestCase):
         )
         self.assertEqual(expand["experiment"]["initialization"]["mode"], "expand_speakers")
         self.assertEqual(expand["generation"]["include_metadata"], [])
+        self.assertFalse(multi["text_generation"]["enabled"])
+        self.assertEqual(multi["generation"]["speaker_assignments"], {
+            "xiaoling_a": "voice_xiaoling_a",
+            "xiaoling_b": "voice_xiaoling_b",
+        })
         self.assertEqual(load_vits_config("training_configs/train1.json").hop_length, 256)
 
     def test_public_configs_keep_valid_bilingual_json_comments(self):

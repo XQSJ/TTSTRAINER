@@ -71,7 +71,11 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
     statuses = check_language_support(
         raw, layout,
         run_smoke=bool(stages.get("phonemize", True)),
-        require_teacher=bool(stages.get("generate_samples", True) and generation.get("enabled", True)),
+        require_teacher=bool(
+            stages.get("generate_samples", True)
+            and generation.get("enabled", True)
+            and generation.get("voice")
+        ),
     )
     for status in statuses:
         if status.ready:

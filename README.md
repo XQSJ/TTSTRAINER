@@ -63,13 +63,15 @@ cp training_configs/train1.json training_configs/my_model.json
   },
   "dataset": {
     "sentences_per_language": 2000,
+    "speakers": {
+      "xiaoling": "voice_xiaoling"
+    },
     "text": {
       "provider": "builtin"
     },
     "voice": {
       "id": "voice_xiaoling",
       "mode": "design",
-      "speaker": "voice_xiaoling",
       "prompt": "A warm, natural young adult female voice with conversational pacing.",
       "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
       "reference_language": "zh"
@@ -92,7 +94,7 @@ cp training_configs/train1.json training_configs/my_model.json
 | `dataset.sentences_per_language` | 本次每种语言需要多少条 |
 | `dataset.text` | 文本来源 |
 | `dataset.voice.id` | 公共音色数据集唯一 ID |
-| `dataset.voice.speaker` | 最终模型内部的 speaker 名称 |
+| `dataset.speakers` | 模型内 speaker 名称到公共 `voice.id` 的映射 |
 | `training.batch_size` | 显存不足时优先调小 |
 | `training.epochs` | 总训练轮数 |
 
@@ -125,6 +127,7 @@ datasets/voices/voice_xiaoling/
 ├── voice.json
 ├── texts.csv
 ├── texts.report.json
+├── manifest.csv              # 无 speaker 的公共音频清单
 ├── references/
 │   └── designed.wav
 └── wavs/
@@ -211,7 +214,6 @@ Hello, welcome to the speech system.,en
 "voice": {
   "id": "voice_01",
   "mode": "design",
-  "speaker": "voice_01",
   "prompt": "A warm adult voice with natural conversational pacing.",
   "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
   "reference_language": "zh"
@@ -229,7 +231,6 @@ Qwen VoiceDesign 只在该 `voice.id` 尚无参考音色时运行一次。后续
 "voice": {
   "id": "my_voice",
   "mode": "clone",
-  "speaker": "my_voice",
   "reference_audio": "datasets/references/my_voice.wav",
   "reference_text": "与参考录音逐字一致的文本",
   "x_vector_only_mode": false
@@ -237,6 +238,41 @@ Qwen VoiceDesign 只在该 `voice.id` 尚无参考音色时运行一次。后续
 ```
 
 推荐使用 5～15 秒、单人、无音乐、低混响的干净录音。
+
+### 音色数据与模型 speaker 分离
+
+只生成音色时，`dataset.voice` 不需要也不应该配置 `speaker`：
+
+```json
+"dataset": {
+  "sentences_per_language": 2000,
+  "text": {"provider": "builtin"},
+  "voice": {
+    "id": "voice_xiaoling_a",
+    "mode": "design",
+    "prompt": "A warm natural female voice.",
+    "reference_text": "你好，这是一段参考录音。",
+    "reference_language": "zh"
+  }
+}
+```
+
+公共目录中的 `manifest.csv` 只有 `audio/text/language`，没有 speaker。真正训练模型时，
+复制 [multi-speaker.example.json](training_configs/multi-speaker.example.json)，只做映射：
+
+```json
+"dataset": {
+  "sentences_per_language": 2000,
+  "speakers": {
+    "xiaoling_a": "voice_xiaoling_a",
+    "xiaoling_b": "voice_xiaoling_b"
+  }
+}
+```
+
+这份训练配置不再调用 Qwen，而是检查两个公共音色是否具备所选语言和数量，然后在
+`datasets/<model_name>/metadata.csv` 中分配 speaker。音频仍放在公共 `voice.id`
+目录，metadata 使用相对路径引用，避免重复占用磁盘。
 
 ## 设备选择
 
@@ -331,12 +367,14 @@ checkpoint 对应的数据目录保留其他音色，不需要手写 metadata �
   "checkpoint": "runs/model_1/checkpoints/last"
 },
 "dataset": {
+  "speakers": {
+    "voice_02": "voice_02"
+  },
   "sentences_per_language": 2000,
   "text": {"provider": "builtin"},
   "voice": {
     "id": "voice_02",
-    "mode": "design",
-    "speaker": "voice_02"
+    "mode": "design"
   }
 }
 ```
@@ -347,6 +385,20 @@ checkpoint 对应的数据目录保留其他音色，不需要手写 metadata �
 
 如果必须从零一次性合并外部数据，专家仍可用 `dataset.include` 提供已有清单；普通
 用户更建议先训练第一个音色，再用 `expand_speakers` 逐个增加，配置更简单且可恢复。
+
+公共音色本身没有 speaker。`dataset.speakers` 只在组装当前模型的 metadata 时分配
+模型内标签，例如：
+
+```json
+"speakers": {
+  "gentle": "voice_xiaoling_a",
+  "bright": "voice_xiaoling_b"
+}
+```
+
+模型目录中的 `metadata.csv` 会引用两个公共音色目录里的 WAV，并分别写入
+`speaker=gentle` 和 `speaker=bright`；不会复制音频文件。相同 `voice.id` 在另一个
+模型中可以分配成不同的 speaker 名称。
 
 ## 同时训练多个模型
 

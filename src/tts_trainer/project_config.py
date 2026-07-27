@@ -34,7 +34,10 @@ def _normalize_dataset_config(raw: dict) -> dict:
     text_override = dict(text)
     if "sentences_per_language" in dataset:
         text_override["sentences_per_language"] = dataset["sentences_per_language"]
-    text_override.setdefault("enabled", True)
+    text_override.setdefault(
+        "enabled",
+        bool(dataset.get("voice")) or not bool(dataset.get("speakers")),
+    )
     result["text_generation"] = _deep_merge(
         result.get("text_generation", {}), text_override,
     )
@@ -42,6 +45,8 @@ def _normalize_dataset_config(raw: dict) -> dict:
     generation_override = {}
     if "voice" in dataset:
         generation_override["voice"] = dataset["voice"]
+    if "speakers" in dataset:
+        generation_override["speaker_assignments"] = dataset["speakers"]
     if "include" in dataset:
         generation_override["include_metadata"] = dataset["include"]
     if "enabled" in dataset:
