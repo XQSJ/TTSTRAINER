@@ -26,7 +26,7 @@ from .logging_utils import (configure_logging_from_config, format_duration,
                             log_section)
 from .manifest import read_manifest
 from .qwen_teacher import load_qwen_teacher
-from .text_generation import text_corpus_path
+from .text_generation import generate_texts, text_corpus_path
 
 
 logger = logging.getLogger(__name__)
@@ -420,9 +420,16 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     voice_id_hint = str(voice.get("id") or "").strip() or None
     generated_default = None
     if text_generation.get("enabled", False):
-        generated_default = text_corpus_path(
-            text_generation, layout, voice_id=voice_id_hint,
-        )
+        if text_manifest_path is None and not generation.get("text_manifest"):
+            logger.info(
+                "TEXT AUTO PREPARE | source=config | action=generate_or_reuse",
+                extra={"tts_style": "success"},
+            )
+            generated_default = generate_texts(config_path)
+        else:
+            generated_default = text_corpus_path(
+                text_generation, layout, voice_id=voice_id_hint,
+            )
     text_manifest = Path(
         text_manifest_path or generation.get("text_manifest")
         or generated_default or layout.dataset_dir / "texts.csv"

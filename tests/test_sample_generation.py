@@ -369,6 +369,31 @@ class SampleGenerationTests(unittest.TestCase):
             metadata = generate_samples(config, model_loader=loader)
             self.assertEqual(len(validate_manifest(metadata, 8000).items), 1)
 
+    def test_generate_samples_automatically_prepares_configured_texts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["experiment"]["languages"] = ["en"]
+            raw["generation"].pop("text_manifest")
+            raw["text_generation"] = {
+                "enabled": True,
+                "provider": "builtin",
+                "sentences_per_language": 2,
+            }
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            metadata = generate_samples(config, model_loader=loader)
+            report = validate_manifest(metadata, 8000)
+            self.assertEqual(len(report.items), 2)
+            self.assertTrue(
+                (root / "datasets/voices/shared_voice_a/texts.csv").is_file()
+            )
+
     def test_qwen_device_inherits_experiment_device(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -519,7 +519,7 @@ configs/models.json
 PYTHONPATH=src .venv/bin/python -m tts_trainer generate-texts \
   --config training_configs/my_model.json
 
-# 只生成/补齐 Qwen 音频并写 metadata
+# 自动生成/补齐文本，再生成/补齐 Qwen 音频并写 metadata
 PYTHONPATH=src .venv/bin/python -m tts_trainer generate-samples \
   --config training_configs/my_model.json
 
