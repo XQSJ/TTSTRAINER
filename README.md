@@ -822,14 +822,15 @@ artifacts/<name>/
 
 ```text
 datasets/text_corpora/  # 自动生成/清洗后的共享文本，相同配置直接复用
-datasets/voices/        # 按 voice.id/revision 保存的共享音色音频
+datasets/voices/        # 按 generation.voice.id 保存的共享音色音频
 models/qwen/            # Qwen Teacher 权重
 models/frontends/       # 日语、韩语等前端词典
 models/quality/         # 可选 ASR/声纹质检权重
 ```
 
-音色参考和生成 WAV 属于公共 `voice.id/revision`；模型目录只保存引用这些 WAV 的
-metadata。checkpoint 和 ONNX 仍按模型 `name` 完全隔离。
+音色参考和生成 WAV 只属于公共 `generation.voice.id`，不跟模型名、内部哈希、
+语言数量或样本数量绑定；模型目录只保存本次训练选择的 metadata。checkpoint 和
+ONNX 仍按模型 `name` 完全隔离。
 
 ### 语言选项
 
@@ -1136,24 +1137,35 @@ Hello, welcome to the multilingual speech system.,en
 支持 `zh en ja ko de fr ru pt es it`。使用一个参考音色生成全部语言，生成器会写入：
 
 ```text
-datasets/voices/<voice_id>/<voice_revision>/
-├── voice.json               # 音色来源、Qwen 模型、生成参数和版本指纹
+datasets/voices/<voice_id>/
+├── voice.json               # 锁定这个公开 ID 对应的音色身份
 ├── references/              # 设计或上传的参考音色副本
 └── wavs/<language>/         # 按文本哈希命名的 PCM16 单声道 WAV
 
 datasets/<model_name>/
-├── dataset.json             # 本模型引用的 voice_id/revision
+├── dataset.json             # 本模型引用的 voice_id
 └── metadata.csv             # 引用公共 WAV，不复制音频
 ```
 
-`voice_id` 由 `generation.voice.id` 指定。`voice_revision` 根据音色描述/参考音频校验值、
-Qwen 模型、生成参数、采样率和后处理参数自动计算。同一个音色配置和同一句文本可被多个
-模型直接复用；改变音色配置会自动进入新 revision，避免把旧 WAV 错配给新音色。
+`voice_id` 只由 `generation.voice.id` 指定。例如 `voice_xiaoling` 永远使用
+`datasets/voices/voice_xiaoling/`。该字段必填，程序不会用 `speaker` 或模型名代替，
+也不会再为它创建内部 revision 子目录。
 
-减少训练语言或每语言样本数不会改变 `voice_revision`。新 metadata 只保留当前配置选中的
-语言和文本；匹配 WAV 显示为 `cached`，不会重新生成。未选中的旧 WAV 继续保存在共享
-音色目录，后续恢复语言、增加样本或训练其他模型时仍可复用。只有文本、音色配置、Qwen
-生成参数、采样率发生变化，或显式设置 `generation.overwrite=true` 时才重新生成对应音频。
+复用规则很直接：
+
+- 以前生成过 7 种语言、每种 2,000 条，现在只训练中文 500 条：不生成音频，只从已有
+  WAV 中选出本次需要的 500 条写入模型 metadata。
+- 以前只有中文 500 条，现在改为中文 2,000 条：保留原来 500 条，只补缺少的文本。
+- 以前有中文，现在增加英文：仍写入同一个 `voice_id` 文件夹，只新建/补充 `wavs/en/`。
+- 另一个模型使用相同 `voice_id` 和相同文本：直接引用已有 WAV，不复制、不调用 Qwen。
+
+`voice.json` 会锁定 prompt 或上传录音校验值、Qwen 模型、生成参数、采样率和后处理参数，
+防止同一个 ID 混入两种声音。要改变这些音色身份设置，必须使用新的
+`generation.voice.id`。语言列表、文本数量、模型名和 `speaker` 标签不属于音色身份，
+可以随时增加或减少。
+
+老版本的 `<voice_id>/<revision>/` 数据首次使用时会迁移到 `<voice_id>/`。程序会留下
+仅供旧 metadata 使用的兼容路径；所有新数据都从公开 `voice_id` 根目录读写。
 
 ### 方式一：用 Prompt 设计音色
 
@@ -1363,7 +1375,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 ```text
 train1.json → datasets/model_1/metadata → runs/model_1/ → artifacts/model_1/
 train2.json → datasets/model_2/metadata → runs/model_2/ → artifacts/model_2/
-相同 voice.id/revision → 共同引用 datasets/voices/.../wavs/
+相同 voice.id → 共同引用 datasets/voices/<voice_id>/wavs/
 ```
 
 可以先初始化目录，不会开始训练：

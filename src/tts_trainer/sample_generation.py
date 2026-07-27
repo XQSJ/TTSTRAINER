@@ -53,15 +53,8 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _voice_dataset(raw: dict, layout, generation: dict,
-                   voice: dict) -> tuple[str, str, Path, dict]:
-    """Resolve a model-independent, revision-safe voice dataset directory."""
-    voice_id = str(voice.get("id") or voice.get("speaker") or "voice_01").strip()
-    if not VOICE_ID.fullmatch(voice_id):
-        raise ValueError(
-            "generation.voice.id must contain only letters, numbers, '.', '_' and '-', "
-            "and cannot start with punctuation"
-        )
+def _voice_identity(raw: dict, generation: dict, voice: dict) -> dict:
+    """Return the immutable settings owned by one public voice ID."""
     mode = str(voice.get("mode") or "")
     reference_identity = None
     if mode == "clone" and voice.get("reference_audio"):
@@ -72,7 +65,7 @@ def _voice_dataset(raw: dict, layout, generation: dict,
             "sha256": _file_sha256(reference_path),
             "suffix": reference_path.suffix.lower(),
         }
-    identity = {
+    return {
         "format": 1,
         "mode": mode,
         "prompt": str(voice.get("prompt") or "").strip() or None,
@@ -90,24 +83,158 @@ def _voice_dataset(raw: dict, layout, generation: dict,
             "postprocess": generation.get("audio_postprocess", {}),
         },
     }
+
+
+def _identity_digest(identity: dict) -> str:
     encoded = json.dumps(
         identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")
-    revision = hashlib.sha256(encoded).hexdigest()[:12]
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _move_tree(source: Path, destination: Path) -> None:
+    """Move a legacy tree without replacing a different cached file."""
+    if not source.is_dir():
+        return
+    if not destination.exists():
+        source.replace(destination)
+        return
+    for path in sorted(source.rglob("*")):
+        if path.is_dir():
+            continue
+        target = destination / path.relative_to(source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file():
+            if _file_sha256(path) != _file_sha256(target):
+                raise RuntimeError(
+                    f"voice cache migration conflict: {path} and {target} differ"
+                )
+            path.unlink()
+        else:
+            path.replace(target)
+    for path in sorted(
+        (item for item in source.rglob("*") if item.is_dir()),
+        key=lambda item: len(item.parts), reverse=True,
+    ):
+        path.rmdir()
+    source.rmdir()
+
+
+def _canonicalize_reference_names(references: Path) -> None:
+    """Remove the model-internal speaker label from shared reference paths."""
+    if not references.is_dir():
+        return
+    designed = references / "designed.wav"
+    legacy_designs = sorted(references.glob("*.designed.wav"))
+    if not designed.is_file() and len(legacy_designs) == 1:
+        legacy_designs[0].replace(designed)
+    uploaded = sorted(references.glob("*.uploaded.*"))
+    if len(uploaded) == 1:
+        suffix = "".join(uploaded[0].suffixes[1:]) or uploaded[0].suffix or ".wav"
+        canonical = references / f"uploaded{suffix}"
+        if not canonical.is_file():
+            uploaded[0].replace(canonical)
+
+
+def _write_legacy_voice_alias(legacy: Path, destination: Path, previous: dict) -> None:
+    """Keep old metadata paths working after moving WAVs to the voice-ID root."""
+    legacy.mkdir(parents=True, exist_ok=True)
+    for name in ("references", "wavs"):
+        target = destination / name
+        if target.exists():
+            (legacy / name).symlink_to(Path("..") / name, target_is_directory=True)
+    compatibility = dict(previous)
+    compatibility["deprecated_storage"] = True
+    compatibility["migrated_to"] = str(destination.resolve())
+    (legacy / "voice.json").write_text(
+        json.dumps(compatibility, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _voice_dataset(raw: dict, layout, generation: dict,
+                   voice: dict) -> tuple[str, Path, dict]:
+    """Resolve the append-only shared dataset owned by generation.voice.id."""
+    voice_id = str(voice.get("id") or "").strip()
+    if not voice_id:
+        raise ValueError(
+            "generation.voice.id is required and is the only key used for shared "
+            "voice dataset storage"
+        )
+    if not VOICE_ID.fullmatch(voice_id):
+        raise ValueError(
+            "generation.voice.id must contain only letters, numbers, '.', '_' and '-', "
+            "and cannot start with punctuation"
+        )
+    identity = _voice_identity(raw, generation, voice)
+    digest = _identity_digest(identity)
     root = Path(generation.get("voice_dataset_root") or layout.dataset_dir.parent / "voices")
-    destination = root / voice_id / revision
+    destination = root / voice_id
     destination.mkdir(parents=True, exist_ok=True)
     record = destination / "voice.json"
-    if not record.is_file():
+
+    # Versions before the voice-ID storage contract used
+    # <voice_id>/<identity-prefix>/. Move the matching cache in place once so
+    # users keep every already-generated WAV without retaining an internal ID.
+    legacy = destination / digest[:12]
+    legacy_record = legacy / "voice.json"
+    migrated_legacy = False
+    if not record.is_file() and legacy_record.is_file():
+        previous = json.loads(legacy_record.read_text(encoding="utf-8"))
+        if previous.get("identity") != identity:
+            raise RuntimeError(
+                f"legacy voice cache identity mismatch for voice_id={voice_id!r}: {legacy}"
+            )
+        _move_tree(legacy / "references", destination / "references")
+        _move_tree(legacy / "wavs", destination / "wavs")
+        legacy_record.unlink()
+        legacy.rmdir()
+        _write_legacy_voice_alias(legacy, destination, previous)
+        migrated_legacy = True
+        logger.info(
+            "VOICE CACHE MIGRATED | voice_id=%s | old=%s | new=%s",
+            voice_id, legacy, destination,
+            extra={"tts_style": "success"},
+        )
+
+    if record.is_file():
+        existing = json.loads(record.read_text(encoding="utf-8"))
+        if existing.get("identity") != identity:
+            raise ValueError(
+                f"voice_id {voice_id!r} is already locked to different voice settings at "
+                f"{record}; keep the original prompt/reference/Qwen settings or choose a "
+                "new generation.voice.id"
+            )
+    else:
+        legacy_records = sorted(
+            path for path in destination.glob("*/voice.json")
+            if path.parent != legacy
+        )
+        if legacy_records and not migrated_legacy:
+            raise ValueError(
+                f"voice_id {voice_id!r} already has a legacy cache with different voice "
+                f"settings at {legacy_records[0]}; keep those settings or choose a new "
+                "generation.voice.id"
+            )
+        unmanaged = [] if migrated_legacy else [
+            path for path in (destination / "references", destination / "wavs")
+            if path.exists()
+        ]
+        if unmanaged:
+            raise RuntimeError(
+                f"voice_id {voice_id!r} contains audio without a voice.json identity lock: "
+                f"{destination}; move it aside or restore its voice.json before generating"
+            )
         temporary = record.with_suffix(".json.tmp")
         temporary.write_text(json.dumps({
-            "format": 1,
+            "format": 2,
             "voice_id": voice_id,
-            "revision": revision,
+            "identity_sha256": digest,
             "identity": identity,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(record)
-    return voice_id, revision, destination, identity
+    _canonicalize_reference_names(destination / "references")
+    return voice_id, destination, identity
 
 
 def _sample_filename(item: GenerationText, candidate: int,
@@ -302,12 +429,13 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     candidates = int(generation.get("candidates_per_text", 1))
     if candidates < 1:
         raise ValueError("generation.candidates_per_text must be at least 1")
-    voice_id, voice_revision, voice_dataset, _ = _voice_dataset(
+    voice_id, voice_dataset, _ = _voice_dataset(
         raw, layout, generation, voice,
     )
     logger.info(
-        "voice dataset ready voice_id=%s revision=%s path=%s speaker_label=%s",
-        voice_id, voice_revision, voice_dataset, speaker,
+        "VOICE DATASET | voice_id=%s | path=%s | speaker_label=%s",
+        voice_id, voice_dataset, speaker,
+        extra={"tts_style": "success"},
     )
     wav_root = voice_dataset / "wavs"
     legacy_wav_root = layout.dataset_dir / "wavs" / speaker
@@ -336,8 +464,8 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
     overwrite = bool(generation.get("overwrite", False))
     if overwrite:
         logger.warning(
-            "generation.overwrite=true will regenerate shared voice audio voice_id=%s revision=%s",
-            voice_id, voice_revision,
+            "generation.overwrite=true will regenerate selected shared audio voice_id=%s",
+            voice_id,
         )
     pending = jobs if overwrite else [job for job in jobs if not job.output.is_file()]
     cached_count = len(jobs) - len(pending)
@@ -369,16 +497,16 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             reference_spec = registry[reference_language]
             if reference_spec.teacher_provider != "qwen" or not reference_spec.teacher_language:
                 raise ValueError(f"reference language {reference_language} has no Qwen teacher mapping")
-            reference_audio = references / f"{speaker}.designed.wav"
+            reference_audio = references / "designed.wav"
             legacy_reference = layout.dataset_dir / "references" / f"{speaker}.designed.wav"
-            if not reference_audio.is_file() and legacy_reference.is_file() and not overwrite:
+            if not reference_audio.is_file() and legacy_reference.is_file():
                 reference_audio.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(legacy_reference, reference_audio)
                 logger.info(
                     "legacy designed reference migrated source=%s destination=%s",
                     legacy_reference, reference_audio,
                 )
-            if reference_audio.is_file() and not overwrite:
+            if reference_audio.is_file():
                 reference_input = reference_audio
             else:
                 design_model = model_loader(model_keys.get("voice_design", "voice-design-1.7b"), **common)
@@ -406,7 +534,9 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
             if not reference_text and not x_vector_only:
                 raise ValueError("clone mode requires the exact reference_text unless x_vector_only_mode is true")
             uploaded = Path(reference_value).expanduser()
-            reference_input = _copy_reference(uploaded, references / f"{speaker}.uploaded{uploaded.suffix or '.wav'}")
+            reference_input = _copy_reference(
+                uploaded, references / f"uploaded{uploaded.suffix or '.wav'}",
+            )
 
         clone_model = model_loader(model_keys.get("voice_clone", "base-1.7b"), **common)
         _log_runtime_language_support(
@@ -572,12 +702,11 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         writer.writerows(rows)
     temporary.replace(output_metadata)
     (layout.dataset_dir / "dataset.json").write_text(json.dumps({
-        "format": 1,
+        "format": 2,
         "model": layout.name,
         "metadata": str(output_metadata.resolve()),
         "text_manifest": str(text_manifest.resolve()),
         "voice_id": voice_id,
-        "voice_revision": voice_revision,
         "voice_dataset": str(voice_dataset.resolve()),
         "speaker_label": speaker,
         "samples": len(rows),

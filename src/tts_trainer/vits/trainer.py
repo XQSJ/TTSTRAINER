@@ -226,7 +226,10 @@ def _semantic_reference_root(dataset_dir: Path) -> Path:
     voice_dataset = record.get("voice_dataset")
     if not voice_dataset:
         return fallback
-    return Path(voice_dataset).expanduser().resolve() / "references"
+    shared = Path(voice_dataset).expanduser().resolve()
+    if not shared.exists() and (shared.parent / "voice.json").is_file():
+        shared = shared.parent
+    return shared / "references"
 
 
 def train_vits(config_path: str, metadata_path: str | None = None,

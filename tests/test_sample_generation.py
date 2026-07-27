@@ -10,8 +10,11 @@ import soundfile as sf
 
 from tts_trainer.manifest import Item, validate_manifest
 from tts_trainer.quality import inspect_audio_item
-from tts_trainer.sample_generation import (_postprocess_training_wav,
+from tts_trainer.sample_generation import (_identity_digest,
+                                           _postprocess_training_wav,
+                                           _voice_identity,
                                            generate_samples)
+from tts_trainer.experiments import resolve_experiment
 
 
 class FakeDesignModel:
@@ -131,12 +134,13 @@ class SampleGenerationTests(unittest.TestCase):
             self.assertEqual([call[0] for call in calls], ["load", "design", "load", "prompt", "clone"])
             self.assertEqual(calls[0][2]["runtime_mode"], "installed")
             self.assertIsNone(calls[0][2]["source_path"])
-            voice_revisions = list((metadata.parent.parent / "voices/shared_voice_a").iterdir())
-            self.assertEqual(len(voice_revisions), 1)
-            self.assertTrue((voice_revisions[0] / "references/voice_a.designed.wav").is_file())
+            voice_root = metadata.parent.parent / "voices/shared_voice_a"
+            self.assertTrue((voice_root / "voice.json").is_file())
+            self.assertTrue((voice_root / "references/designed.wav").is_file())
             dataset = json.loads((metadata.parent / "dataset.json").read_text())
             self.assertEqual(dataset["voice_id"], "shared_voice_a")
-            self.assertEqual(Path(dataset["voice_dataset"]), voice_revisions[0].resolve())
+            self.assertNotIn("voice_revision", dataset)
+            self.assertEqual(Path(dataset["voice_dataset"]), voice_root.resolve())
 
             report.items[0].audio.unlink()
             resumed_calls = []
@@ -161,8 +165,8 @@ class SampleGenerationTests(unittest.TestCase):
             metadata = generate_samples(config, model_loader=loader)
             self.assertEqual([call[0] for call in calls], ["load", "prompt", "clone"])
             self.assertIsInstance(calls[1][1]["ref_audio"], str)
-            voice_revisions = list((metadata.parent.parent / "voices/shared_voice_a").iterdir())
-            self.assertTrue((voice_revisions[0] / "references/voice_a.uploaded.wav").is_file())
+            voice_root = metadata.parent.parent / "voices/shared_voice_a"
+            self.assertTrue((voice_root / "references/uploaded.wav").is_file())
             with wave.open(str(validate_manifest(metadata, 8000).items[0].audio), "rb") as wav:
                 self.assertEqual(wav.getframerate(), 8000)
                 self.assertEqual(wav.getsampwidth(), 2)
@@ -249,6 +253,109 @@ class SampleGenerationTests(unittest.TestCase):
             self.assertEqual(len(reduced_report.items), 1)
             self.assertEqual(reduced_report.items[0].language, "en")
             self.assertTrue(all(path.is_file() for path in original_audio))
+
+    def test_increasing_languages_and_count_appends_only_missing_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, first_calls = self._base(root, "design")
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["experiment"]["languages"] = ["en"]
+            first_texts = root / "first.csv"
+            with first_texts.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=["text", "language"])
+                writer.writeheader()
+                writer.writerow({"text": "Hello world", "language": "en"})
+            raw["generation"]["text_manifest"] = str(first_texts)
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            def first_loader(key, **_kwargs):
+                return FakeDesignModel(first_calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(first_calls)
+
+            first_metadata = generate_samples(config, model_loader=first_loader)
+            original = validate_manifest(first_metadata, 8000).items[0].audio
+            original_hash = original.read_bytes()
+
+            expanded_texts = root / "expanded.csv"
+            with expanded_texts.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=["text", "language"])
+                writer.writeheader()
+                writer.writerow({"text": "Hello world", "language": "en"})
+                writer.writerow({"text": "A second sentence", "language": "en"})
+                writer.writerow({"text": "Bonjour", "language": "fr"})
+            raw["experiment"]["languages"] = ["en", "fr"]
+            raw["generation"]["text_manifest"] = str(expanded_texts)
+            config.write_text(json.dumps(raw), encoding="utf-8")
+            expanded_calls = []
+
+            def expanded_loader(key, **_kwargs):
+                self.assertEqual(key, "base-1.7b")
+                return FakeCloneModel(expanded_calls)
+
+            expanded_metadata = generate_samples(config, model_loader=expanded_loader)
+            expanded = validate_manifest(expanded_metadata, 8000)
+            self.assertEqual(len(expanded.items), 3)
+            self.assertEqual([call[0] for call in expanded_calls], ["prompt", "clone"])
+            self.assertEqual(len(expanded_calls[1][1]["text"]), 2)
+            self.assertEqual(original.read_bytes(), original_hash)
+            self.assertEqual(
+                Path(json.loads((expanded_metadata.parent / "dataset.json").read_text())[
+                    "voice_dataset"
+                ]),
+                (root / "datasets/voices/shared_voice_a").resolve(),
+            )
+
+    def test_same_voice_id_rejects_changed_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            generate_samples(config, model_loader=loader)
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["generation"]["voice"]["prompt"] = "A completely different voice."
+            config.write_text(json.dumps(raw), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "already locked"):
+                generate_samples(
+                    config,
+                    model_loader=lambda *_args, **_kwargs: self.fail("must not load Qwen"),
+                )
+
+    def test_legacy_revision_cache_moves_to_voice_root_with_compatibility_alias(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, _ = self._base(root, "clone")
+            raw, layout = resolve_experiment(config)
+            generation = raw["generation"]
+            identity = _voice_identity(raw, generation, generation["voice"])
+            revision = _identity_digest(identity)[:12]
+            legacy = root / "datasets/voices/shared_voice_a" / revision
+            (legacy / "references").mkdir(parents=True)
+            (legacy / "wavs/en").mkdir(parents=True)
+            (legacy / "voice.json").write_text(json.dumps({
+                "format": 1,
+                "voice_id": "shared_voice_a",
+                "identity": identity,
+            }), encoding="utf-8")
+            sf.write(
+                legacy / "wavs/en/existing.wav",
+                np.linspace(-0.1, 0.1, 80, dtype=np.float32),
+                8000,
+                subtype="PCM_16",
+            )
+
+            from tts_trainer.sample_generation import _voice_dataset
+            voice_id, voice_root, returned_identity = _voice_dataset(
+                raw, layout, generation, generation["voice"],
+            )
+            self.assertEqual(voice_id, "shared_voice_a")
+            self.assertEqual(returned_identity, identity)
+            self.assertTrue((voice_root / "voice.json").is_file())
+            self.assertTrue((voice_root / "wavs/en/existing.wav").is_file())
+            self.assertTrue((legacy / "wavs/en/existing.wav").is_file())
 
     def test_legacy_model_wavs_are_migrated_to_shared_voice_dataset(self):
         with tempfile.TemporaryDirectory() as directory:
