@@ -3,23 +3,34 @@
 用 Qwen3-TTS 生成训练数据，训练多语言、多音色 VITS，并导出移动端可用的
 ONNX 资源。
 
-项目的默认工作方式是：
+## 先理解两个名字
+
+| 名称 | 属于哪里 | 作用 |
+|---|---|---|
+| `voice.id` | 公共音色数据 | 决定音色目录、Prompt/参考录音、文本和 WAV 缓存 |
+| `speaker` | 某个 VITS 模型 | 决定该音色在当前模型里的 speaker embedding 和推理名称 |
+
+公共音色本身没有 speaker。同一个 `voice.id` 可以在不同模型中分配不同 speaker：
 
 ```text
-配置目标语言、数量和 voice.id
-        ↓
-检查该 voice.id 已有文本和 WAV
-        ↓
-只补缺少的语言或样本
-        ↓
-生成模型专属 metadata
-        ↓
-音素化 → 质检 → VITS 训练 → ONNX 导出
+datasets/voices/voice_xiaoling_a/       # 公共音色与 WAV
+                  │
+                  ├─ 模型一：speaker=gentle
+                  └─ 模型二：speaker=assistant
 ```
 
-## 最快开始
+项目不会把公共 WAV 复制到每个模型。它只在
+`datasets/<model_name>/metadata.csv` 中写入引用路径和模型内 speaker。
 
-### 1. 安装
+按目标选择：
+
+| 目标 | 阅读 |
+|---|---|
+| 第一次跑通，直接训练一个音色 | 路径一 |
+| 只准备可复用的音色与 WAV | 路径二 |
+| 把两个或更多已有音色训练进一个模型 | 路径三 |
+
+## 安装
 
 ```bash
 git clone https://github.com/XQSJ/TTSTRAINER.git
@@ -45,13 +56,13 @@ source .venv/bin/activate
 
 `flash-attn` 不是必需依赖。没有安装时会自动使用 PyTorch SDPA。
 
-### 2. 复制并修改一份配置
+## 路径一：一个配置直接训练单音色模型
+
+这是最简单的用法。配置同时声明公共音色和它在当前模型里的 speaker：
 
 ```bash
 cp training_configs/train1.json training_configs/my_model.json
 ```
-
-普通用户只需要理解下面这份结构：
 
 ```json
 {
@@ -84,22 +95,6 @@ cp training_configs/train1.json training_configs/my_model.json
 }
 ```
 
-常用字段：
-
-| 字段 | 作用 |
-|---|---|
-| `experiment.name` | 模型名称，决定 `datasets/runs/artifacts` 输出目录 |
-| `experiment.languages` | 本次训练使用的语言及 language ID 顺序 |
-| `experiment.device` | 训练和 Qwen 数据生成默认使用的设备 |
-| `dataset.sentences_per_language` | 本次每种语言需要多少条 |
-| `dataset.text` | 文本来源 |
-| `dataset.voice.id` | 公共音色数据集唯一 ID |
-| `dataset.speakers` | 模型内 speaker 名称到公共 `voice.id` 的映射 |
-| `training.batch_size` | 显存不足时优先调小 |
-| `training.epochs` | 总训练轮数 |
-
-### 3. 检查语言并启动
-
 ```bash
 PYTHONPATH=src .venv/bin/python -m tts_trainer language-check \
   --config training_configs/my_model.json
@@ -108,7 +103,8 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
   --config training_configs/my_model.json
 ```
 
-先验证整个流程：
+`run-pipeline` 会自动完成文本、Qwen 音频、模型 metadata、音素化、质检、训练和 ONNX
+导出。首次验证可以限制为 10 step：
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
@@ -117,6 +113,126 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 ```
 
 再次运行同一命令会复用已经完成的文本、音频和模型资源。
+
+示例中的 `builtin` 文本只适合跑通流程；正式模型请换成 OpenAI-compatible 服务或经过
+审核的 CSV，见“文本来源”。
+
+## 路径二：先只生成公共音色
+
+纯生成配置不写 `speaker`，因为此时还没有组装 VITS 模型：
+
+```json
+{
+  "_comment": "只生成公共音色 / Generate one shared voice only",
+  "preset": "quality",
+  "experiment": {
+    "name": "prepare_xiaoling_a",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "cuda:1"
+  },
+  "dataset": {
+    "sentences_per_language": 2000,
+    "text": {
+      "provider": "openai_compatible",
+      "endpoint": "https://example.com/v1",
+      "model": "your-model",
+      "api_key_env": "TEXT_LLM_API_KEY"
+    },
+    "voice": {
+      "id": "voice_xiaoling_a",
+      "mode": "design",
+      "prompt": "A warm natural young adult female voice.",
+      "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
+      "reference_language": "zh"
+    }
+  }
+}
+```
+
+一条命令会自动生成或复用文本，然后生成或复用音频：
+
+```bash
+export TEXT_LLM_API_KEY='你的实际密钥'
+
+PYTHONPATH=src .venv/bin/python -m tts_trainer generate-samples \
+  --config training_configs/prepare_xiaoling_a.json
+```
+
+结果位于：
+
+```text
+datasets/voices/voice_xiaoling_a/
+├── voice.json
+├── texts.csv
+├── manifest.csv              # audio/text/language，无 speaker
+├── references/
+└── wavs/
+```
+
+生成第二个音色时使用新的 `voice.id` 和 Prompt。不同音色不能共用同一个 `voice.id`。
+
+## 路径三：用多个公共音色训练一个模型
+
+先确保各个 `voice.id` 已通过路径二生成。然后复制：
+
+```bash
+cp training_configs/multi-speaker.example.json \
+  training_configs/my_multi_voice_model.json
+```
+
+核心配置只有映射关系：
+
+```json
+{
+  "preset": "quality",
+  "experiment": {
+    "name": "my_multi_voice_model",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "cuda:1"
+  },
+  "dataset": {
+    "sentences_per_language": 2000,
+    "speakers": {
+      "gentle": "voice_xiaoling_a",
+      "bright": "voice_xiaoling_b"
+    }
+  },
+  "training": {
+    "batch_size": 4,
+    "epochs": 300
+  }
+}
+```
+
+映射方向始终是：
+
+```text
+"模型内 speaker 名称": "公共 voice.id"
+```
+
+启动：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
+  --config training_configs/my_multi_voice_model.json
+```
+
+这个配置不会调用文本 LLM 或 Qwen。程序会检查两个公共音色是否满足所选语言和数量，
+然后生成当前模型的 metadata 并开始训练。音频仍在公共目录，不会复制。
+
+## 最常调整的配置
+
+| 字段 | 作用 |
+|---|---|
+| `experiment.name` | 模型任务名称，决定 `datasets/runs/artifacts` 目录 |
+| `experiment.languages` | 本次使用的语言；顺序决定 language ID |
+| `experiment.device` | VITS 和 Qwen 默认设备，例如 `cuda:0` |
+| `dataset.sentences_per_language` | 每个音色、每种语言选用的样本数 |
+| `dataset.text` | 文本来源，仅生成新音色时需要 |
+| `dataset.voice` | 要生成或补齐的一个公共音色 |
+| `dataset.speakers` | 当前模型的 `speaker → voice.id` 映射 |
+| `training.batch_size` | 显存不足时优先调小 |
+| `training.epochs` | 总训练轮数 |
 
 ## 数据复用规则
 
@@ -151,7 +267,8 @@ datasets/voices/voice_xiaoling/
 当前模型的 `metadata.csv` 只引用本次配置需要的子集。
 
 老版本的 `<voice_id>/<revision>/` 会在首次使用时迁移到公开 `voice.id` 根目录，并保留
-旧 metadata 可继续访问的兼容路径。
+旧 metadata 可继续访问的兼容路径。旧音色目录如果没有无 speaker 的 `manifest.csv`，
+首次用于新模型时会从已有 metadata 自动建立，不会重新生成 WAV。
 
 ## 文本来源
 
@@ -239,41 +356,6 @@ Qwen VoiceDesign 只在该 `voice.id` 尚无参考音色时运行一次。后续
 
 推荐使用 5～15 秒、单人、无音乐、低混响的干净录音。
 
-### 音色数据与模型 speaker 分离
-
-只生成音色时，`dataset.voice` 不需要也不应该配置 `speaker`：
-
-```json
-"dataset": {
-  "sentences_per_language": 2000,
-  "text": {"provider": "builtin"},
-  "voice": {
-    "id": "voice_xiaoling_a",
-    "mode": "design",
-    "prompt": "A warm natural female voice.",
-    "reference_text": "你好，这是一段参考录音。",
-    "reference_language": "zh"
-  }
-}
-```
-
-公共目录中的 `manifest.csv` 只有 `audio/text/language`，没有 speaker。真正训练模型时，
-复制 [multi-speaker.example.json](training_configs/multi-speaker.example.json)，只做映射：
-
-```json
-"dataset": {
-  "sentences_per_language": 2000,
-  "speakers": {
-    "xiaoling_a": "voice_xiaoling_a",
-    "xiaoling_b": "voice_xiaoling_b"
-  }
-}
-```
-
-这份训练配置不再调用 Qwen，而是检查两个公共音色是否具备所选语言和数量，然后在
-`datasets/<model_name>/metadata.csv` 中分配 speaker。音频仍放在公共 `voice.id`
-目录，metadata 使用相对路径引用，避免重复占用磁盘。
-
 ## 设备选择
 
 只配置外层设备即可：
@@ -351,9 +433,10 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer frontend-info \
 }
 ```
 
-数据阶段不必关闭。保持原来的 `dataset.voice`、语言和数量即可，程序会命中缓存并重建
-当前模型 metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程序会自动从
-checkpoint 对应的数据目录保留其他音色，不需要手写 metadata 路径。
+数据阶段不必关闭。单音色模型保持原来的 `dataset.voice` 和 `dataset.speakers`；
+由多个公共音色组装的模型则保持原来的 `dataset.speakers` 映射。程序会重建当前模型
+metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程序也会保留其他音色，
+不需要手写 metadata 路径。
 
 `resume` 要求语言及顺序、speaker 集合和模型结构与 checkpoint 一致。
 
@@ -385,20 +468,6 @@ checkpoint 对应的数据目录保留其他音色，不需要手写 metadata �
 
 如果必须从零一次性合并外部数据，专家仍可用 `dataset.include` 提供已有清单；普通
 用户更建议先训练第一个音色，再用 `expand_speakers` 逐个增加，配置更简单且可恢复。
-
-公共音色本身没有 speaker。`dataset.speakers` 只在组装当前模型的 metadata 时分配
-模型内标签，例如：
-
-```json
-"speakers": {
-  "gentle": "voice_xiaoling_a",
-  "bright": "voice_xiaoling_b"
-}
-```
-
-模型目录中的 `metadata.csv` 会引用两个公共音色目录里的 WAV，并分别写入
-`speaker=gentle` 和 `speaker=bright`；不会复制音频文件。相同 `voice.id` 在另一个
-模型中可以分配成不同的 speaker 名称。
 
 ## 同时训练多个模型
 
@@ -461,7 +530,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer synthesize-onnx \
   --model-dir artifacts/my_model \
   --text "你好，欢迎使用。" \
   --language zh \
-  --speaker voice_xiaoling \
+  --speaker xiaoling \
   --output output.wav
 ```
 
