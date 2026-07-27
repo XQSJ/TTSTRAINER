@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import threading
 import time
 from collections import Counter
 from copy import deepcopy
@@ -47,6 +48,35 @@ class GenerationJob:
     output: Path
 
 
+class _BatchHeartbeat:
+    """Report a slow synchronous Qwen call without pretending it has stalled."""
+
+    def __init__(self, *, batch_number: int, language: str, interval: float):
+        self.batch_number = batch_number
+        self.language = language
+        self.interval = max(float(interval), 1.0)
+        self.started = time.monotonic()
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        while not self.stopped.wait(self.interval):
+            logger.warning(
+                "AUDIO BATCH STILL RUNNING | batch=%d | language=%s | "
+                "elapsed=%s | Qwen has not returned yet",
+                self.batch_number, self.language,
+                format_duration(time.monotonic() - self.started),
+            )
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.stopped.set()
+        self.thread.join(timeout=1)
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -58,6 +88,9 @@ def _file_sha256(path: Path) -> str:
 def _voice_identity(raw: dict, generation: dict, voice: dict) -> dict:
     """Return the immutable settings owned by one public voice ID."""
     mode = str(voice.get("mode") or "")
+    reference_strategy = str(
+        voice.get("reference_strategy", "shared")
+    ).strip().lower()
     reference_identity = None
     if mode == "clone" and voice.get("reference_audio"):
         reference_path = Path(voice["reference_audio"]).expanduser()
@@ -67,14 +100,17 @@ def _voice_identity(raw: dict, generation: dict, voice: dict) -> dict:
             "sha256": _file_sha256(reference_path),
             "suffix": reference_path.suffix.lower(),
         }
-    return {
+    identity = {
         "format": 1,
         "mode": mode,
         "prompt": str(voice.get("prompt") or "").strip() or None,
-        "reference_text": str(voice.get("reference_text") or "").strip() or None,
+        "reference_text": (
+            str(voice.get("reference_text") or "").strip() or None
+            if reference_strategy == "shared" else None
+        ),
         "reference_language": (
             str(voice.get("reference_language", "en")).strip().lower()
-            if mode == "design" else None
+            if mode == "design" and reference_strategy == "shared" else None
         ),
         "reference_audio": reference_identity,
         "x_vector_only_mode": bool(voice.get("x_vector_only_mode", False)),
@@ -85,6 +121,11 @@ def _voice_identity(raw: dict, generation: dict, voice: dict) -> dict:
             "postprocess": generation.get("audio_postprocess", {}),
         },
     }
+    if mode == "design" and reference_strategy != "shared":
+        identity["reference_strategy"] = reference_strategy
+    if voice.get("reference_texts"):
+        identity["reference_texts"] = voice["reference_texts"]
+    return identity
 
 
 def _identity_digest(identity: dict) -> str:
@@ -761,7 +802,10 @@ def _generate_samples_single(
                 continue
             job_outputs.add(output)
             legacy = legacy_wav_root / f"{item.language}_{index:06d}_c{candidate:02d}.wav"
-            if not output.is_file() and legacy.is_file() and not generation.get("overwrite", False):
+            overwrite = bool(
+                voice.get("regenerate_audio", generation.get("overwrite", False))
+            )
+            if not output.is_file() and legacy.is_file() and not overwrite:
                 output.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(legacy, output)
                 migrated += 1
@@ -771,11 +815,14 @@ def _generate_samples_single(
             "legacy model audio migrated voice_id=%s files=%d source=%s destination=%s",
             voice_id, migrated, legacy_wav_root, wav_root,
         )
-    overwrite = bool(generation.get("overwrite", False))
+    overwrite = bool(
+        voice.get("regenerate_audio", generation.get("overwrite", False))
+    )
     if overwrite:
         logger.warning(
-            "generation.overwrite=true will regenerate selected shared audio voice_id=%s",
-            voice_id,
+            "AUDIO REGENERATION ENABLED | voice_id=%s | selected_files=%d | "
+            "set regenerate_audio=false after this run to resume cache reuse",
+            voice_id, len(jobs),
         )
     pending = jobs if overwrite else [job for job in jobs if not job.output.is_file()]
     cached_count = len(jobs) - len(pending)
@@ -796,47 +843,160 @@ def _generate_samples_single(
         references = voice_dataset / "references"
         reference_text = voice.get("reference_text", "").strip()
         x_vector_only = bool(voice.get("x_vector_only_mode", False))
+        reference_inputs = {}
+        prompt_texts = {}
 
         if mode == "design":
             prompt = voice.get("prompt", "").strip()
+            reference_strategy = str(
+                voice.get("reference_strategy", "shared")
+            ).strip().lower()
+            if reference_strategy not in {"shared", "per_language"}:
+                raise ValueError(
+                    "design reference_strategy must be shared or per_language"
+                )
             reference_language = voice.get("reference_language", "en").lower()
-            if not prompt or not reference_text:
-                raise ValueError("design mode requires dataset.voice.prompt and reference_text")
-            if reference_language not in registry:
-                raise ValueError(f"unsupported design reference language: {reference_language}")
-            reference_spec = registry[reference_language]
-            if reference_spec.teacher_provider != "qwen" or not reference_spec.teacher_language:
-                raise ValueError(f"reference language {reference_language} has no Qwen teacher mapping")
-            reference_audio = references / "designed.wav"
-            legacy_reference = layout.dataset_dir / "references" / f"{speaker}.designed.wav"
-            if not reference_audio.is_file() and legacy_reference.is_file():
-                reference_audio.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(legacy_reference, reference_audio)
-                logger.info(
-                    "legacy designed reference migrated source=%s destination=%s",
-                    legacy_reference, reference_audio,
+            if not prompt:
+                raise ValueError("design mode requires dataset.voice.prompt")
+            if reference_strategy == "shared":
+                if not reference_text:
+                    raise ValueError(
+                        "shared design mode requires dataset.voice.reference_text"
+                    )
+                if reference_language not in registry:
+                    raise ValueError(
+                        f"unsupported design reference language: {reference_language}"
+                    )
+                reference_spec = registry[reference_language]
+                if reference_spec.teacher_provider != "qwen" \
+                        or not reference_spec.teacher_language:
+                    raise ValueError(
+                        f"reference language {reference_language} has no Qwen teacher mapping"
+                    )
+                reference_audio = references / "designed.wav"
+                legacy_reference = (
+                    layout.dataset_dir / "references" / f"{speaker}.designed.wav"
                 )
-            if reference_audio.is_file():
-                reference_input = reference_audio
+                if not reference_audio.is_file() and legacy_reference.is_file():
+                    reference_audio.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(legacy_reference, reference_audio)
+                    logger.info(
+                        "legacy designed reference migrated source=%s destination=%s",
+                        legacy_reference, reference_audio,
+                    )
+                if reference_audio.is_file():
+                    reference_inputs["*"] = reference_audio
+                else:
+                    design_model = model_loader(
+                        model_keys.get("voice_design", "voice-design-1.7b"),
+                        **common,
+                    )
+                    _log_runtime_language_support(
+                        design_model, {reference_spec.teacher_language},
+                        model_keys.get("voice_design", "voice-design-1.7b"),
+                    )
+                    logger.info(
+                        "creating shared designed reference voice_id=%s language=%s "
+                        "teacher_language=%s",
+                        voice_id, reference_language,
+                        reference_spec.teacher_language,
+                    )
+                    ref_wavs, ref_rate = design_model.generate_voice_design(
+                        text=reference_text,
+                        language=reference_spec.teacher_language,
+                        instruct=prompt,
+                        **generation.get("generation_kwargs", {}),
+                    )
+                    reference_audio.parent.mkdir(parents=True, exist_ok=True)
+                    sf.write(
+                        reference_audio, np.asarray(ref_wavs[0]).squeeze(),
+                        ref_rate, subtype="PCM_16", format="WAV",
+                    )
+                    reference_inputs["*"] = (ref_wavs[0], ref_rate)
+                    del design_model
+                    _release_device_memory(device)
+                prompt_texts["*"] = reference_text
             else:
-                design_model = model_loader(model_keys.get("voice_design", "voice-design-1.7b"), **common)
-                _log_runtime_language_support(
-                    design_model, {reference_spec.teacher_language},
-                    model_keys.get("voice_design", "voice-design-1.7b"),
-                )
-                logger.info("creating designed reference voice speaker=%s language=%s", speaker, reference_language)
-                ref_wavs, ref_rate = design_model.generate_voice_design(
-                    text=reference_text,
-                    language=reference_spec.teacher_language,
-                    instruct=prompt,
-                    **generation.get("generation_kwargs", {}),
-                )
-                reference_audio.parent.mkdir(parents=True, exist_ok=True)
-                sf.write(reference_audio, np.asarray(ref_wavs[0]).squeeze(), ref_rate,
-                         subtype="PCM_16", format="WAV")
-                reference_input = (ref_wavs[0], ref_rate)
-                del design_model
-                _release_device_memory(device)
+                configured_reference_texts = voice.get("reference_texts") or {}
+                if not isinstance(configured_reference_texts, dict):
+                    raise ValueError(
+                        "dataset.voice.reference_texts must be an object keyed by language"
+                    )
+                target_languages = [
+                    language for language in layout.languages
+                    if any(job.item.language == language for job in pending)
+                ]
+                design_model = None
+                for language in target_languages:
+                    reference_spec = registry[language]
+                    requested_reference_text = str(
+                        configured_reference_texts.get(language) or next(
+                            job.item.text for job in jobs
+                            if job.item.language == language
+                        )
+                    ).strip()
+                    reference_audio = references / f"designed-{language}.wav"
+                    reference_transcript = (
+                        references / f"designed-{language}.txt"
+                    )
+                    if reference_audio.is_file():
+                        if not reference_transcript.is_file():
+                            raise RuntimeError(
+                                "language-specific reference audio is missing its "
+                                f"transcript: {reference_transcript}; remove "
+                                f"{reference_audio} and rerun"
+                            )
+                        language_text = reference_transcript.read_text(
+                            encoding="utf-8",
+                        ).strip()
+                        reference_inputs[language] = reference_audio
+                    else:
+                        language_text = requested_reference_text
+                        if design_model is None:
+                            design_model = model_loader(
+                                model_keys.get(
+                                    "voice_design", "voice-design-1.7b",
+                                ),
+                                **common,
+                            )
+                            _log_runtime_language_support(
+                                design_model,
+                                {
+                                    teacher_languages[value]
+                                    for value in target_languages
+                                },
+                                model_keys.get(
+                                    "voice_design", "voice-design-1.7b",
+                                ),
+                            )
+                        logger.info(
+                            "creating language-specific designed reference "
+                            "voice_id=%s language=%s teacher_language=%s",
+                            voice_id, language,
+                            reference_spec.teacher_language,
+                        )
+                        ref_wavs, ref_rate = design_model.generate_voice_design(
+                            text=language_text,
+                            language=reference_spec.teacher_language,
+                            instruct=prompt,
+                            **generation.get("generation_kwargs", {}),
+                        )
+                        reference_audio.parent.mkdir(
+                            parents=True, exist_ok=True,
+                        )
+                        sf.write(
+                            reference_audio,
+                            np.asarray(ref_wavs[0]).squeeze(),
+                            ref_rate, subtype="PCM_16", format="WAV",
+                        )
+                        reference_transcript.write_text(
+                            language_text, encoding="utf-8",
+                        )
+                        reference_inputs[language] = (ref_wavs[0], ref_rate)
+                    prompt_texts[language] = language_text
+                if design_model is not None:
+                    del design_model
+                    _release_device_memory(device)
         else:
             reference_value = voice.get("reference_audio")
             if not reference_value:
@@ -844,21 +1004,28 @@ def _generate_samples_single(
             if not reference_text and not x_vector_only:
                 raise ValueError("clone mode requires the exact reference_text unless x_vector_only_mode is true")
             uploaded = Path(reference_value).expanduser()
-            reference_input = _copy_reference(
+            reference_inputs["*"] = _copy_reference(
                 uploaded, references / f"uploaded{uploaded.suffix or '.wav'}",
             )
+            prompt_texts["*"] = reference_text
 
         clone_model = model_loader(model_keys.get("voice_clone", "base-1.7b"), **common)
         _log_runtime_language_support(
             clone_model, set(teacher_languages.values()),
             model_keys.get("voice_clone", "base-1.7b"),
         )
-        logger.info("creating reusable clone prompt speaker=%s mode=%s", speaker, mode)
-        clone_prompt = clone_model.create_voice_clone_prompt(
-            ref_audio=_qwen_reference_input(reference_input),
-            ref_text=reference_text or None,
-            x_vector_only_mode=x_vector_only,
-        )
+        clone_prompts = {}
+        for language_key, reference_input in reference_inputs.items():
+            logger.info(
+                "creating reusable clone prompt voice_id=%s mode=%s language=%s",
+                voice_id, mode,
+                "shared" if language_key == "*" else language_key,
+            )
+            clone_prompts[language_key] = clone_model.create_voice_clone_prompt(
+                ref_audio=_qwen_reference_input(reference_input),
+                ref_text=prompt_texts[language_key] or None,
+                x_vector_only_mode=x_vector_only,
+            )
         batch_size = int(generation.get("batch_size", 4))
         if batch_size < 1:
             raise ValueError("generation.batch_size must be at least 1")
@@ -867,29 +1034,50 @@ def _generate_samples_single(
         progress_interval = max(
             1, int(raw.get("logging", {}).get("sample_progress_every_batches", 1)),
         )
+        slow_batch_seconds = float(
+            raw.get("logging", {}).get("sample_slow_batch_seconds", 60),
+        )
         generation_started = time.monotonic()
-        total_batches = (len(pending) + batch_size - 1) // batch_size
-        for start in range(0, len(pending), batch_size):
-            batch = pending[start:start + batch_size]
-            batch_number = start // batch_size + 1
+        pending_by_language = {
+            language: [
+                job for job in pending if job.item.language == language
+            ]
+            for language in layout.languages
+        }
+        batches = [
+            (language, language_jobs[start:start + batch_size])
+            for language, language_jobs in pending_by_language.items()
+            for start in range(0, len(language_jobs), batch_size)
+        ]
+        total_batches = len(batches)
+        completed_new = 0
+        for batch_number, (language, batch) in enumerate(batches, 1):
             batch_started = time.monotonic()
-            batch_languages = ",".join(sorted({job.item.language for job in batch}))
-            logger.debug(
-                "audio batch started batch=%d/%d range=%d-%d languages=%s",
-                batch_number, total_batches, start + 1, start + len(batch),
-                batch_languages,
+            teacher_language = teacher_languages[language]
+            logger.info(
+                "AUDIO BATCH START | batch=%d/%d | language=%s | "
+                "teacher_language=%s | items=%d",
+                batch_number, total_batches, language, teacher_language,
+                len(batch),
             )
-            wavs, sample_rate = clone_model.generate_voice_clone(
-                text=[job.item.text for job in batch],
-                language=[teacher_languages[job.item.language] for job in batch],
-                voice_clone_prompt=clone_prompt,
-                **generation_kwargs,
-            )
+            with _BatchHeartbeat(
+                batch_number=batch_number,
+                language=language,
+                interval=slow_batch_seconds,
+            ):
+                wavs, sample_rate = clone_model.generate_voice_clone(
+                    text=[job.item.text for job in batch],
+                    language=[teacher_language] * len(batch),
+                    voice_clone_prompt=clone_prompts.get(
+                        language, clone_prompts.get("*"),
+                    ),
+                    **generation_kwargs,
+                )
             if len(wavs) != len(batch):
                 raise RuntimeError(f"Qwen returned {len(wavs)} waveforms for a batch of {len(batch)}")
             for job, waveform in zip(batch, wavs):
                 _write_training_wav(job.output, waveform, sample_rate, target_rate)
-            completed_new = start + len(batch)
+            completed_new += len(batch)
             if batch_number % progress_interval == 0 or completed_new == len(pending):
                 elapsed = time.monotonic() - generation_started
                 rate = completed_new / max(elapsed, 1e-9)
@@ -900,7 +1088,7 @@ def _generate_samples_single(
                     "AUDIO %6.2f%% | completed=%d/%d | new=%d/%d | cached=%d | "
                     "batch=%d/%d (%s) | batch_time=%s | speed=%.1f/min | ETA=%s",
                     percent, overall_completed, len(jobs), completed_new, len(pending),
-                    cached_count, batch_number, total_batches, batch_languages,
+                    cached_count, batch_number, total_batches, language,
                     format_duration(time.monotonic() - batch_started), rate * 60,
                     format_duration(remaining / rate),
                     extra={"tts_style": "progress"},

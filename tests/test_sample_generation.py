@@ -131,7 +131,10 @@ class SampleGenerationTests(unittest.TestCase):
             metadata = generate_samples(config, model_loader=loader)
             report = validate_manifest(metadata, 8000)
             self.assertEqual(len(report.items), 2)
-            self.assertEqual([call[0] for call in calls], ["load", "design", "load", "prompt", "clone"])
+            self.assertEqual(
+                [call[0] for call in calls],
+                ["load", "design", "load", "prompt", "clone", "clone"],
+            )
             self.assertEqual(calls[0][2]["runtime_mode"], "installed")
             self.assertIsNone(calls[0][2]["source_path"])
             voice_root = metadata.parent.parent / "voices/shared_voice_a"
@@ -167,7 +170,10 @@ class SampleGenerationTests(unittest.TestCase):
                 return FakeCloneModel(calls)
 
             metadata = generate_samples(config, model_loader=loader)
-            self.assertEqual([call[0] for call in calls], ["load", "prompt", "clone"])
+            self.assertEqual(
+                [call[0] for call in calls],
+                ["load", "prompt", "clone", "clone"],
+            )
             self.assertIsInstance(calls[1][1]["ref_audio"], str)
             voice_root = metadata.parent.parent / "voices/shared_voice_a"
             self.assertTrue((voice_root / "references/uploaded.wav").is_file())
@@ -378,8 +384,14 @@ class SampleGenerationTests(unittest.TestCase):
             expanded_metadata = generate_samples(config, model_loader=expanded_loader)
             expanded = validate_manifest(expanded_metadata, 8000)
             self.assertEqual(len(expanded.items), 3)
-            self.assertEqual([call[0] for call in expanded_calls], ["prompt", "clone"])
-            self.assertEqual(len(expanded_calls[1][1]["text"]), 2)
+            self.assertEqual(
+                [call[0] for call in expanded_calls],
+                ["prompt", "clone", "clone"],
+            )
+            self.assertEqual(
+                [call[1]["language"] for call in expanded_calls[1:]],
+                [["English"], ["French"]],
+            )
             self.assertEqual(original.read_bytes(), original_hash)
             self.assertEqual(
                 Path(json.loads((expanded_metadata.parent / "dataset.json").read_text())[
@@ -508,6 +520,59 @@ class SampleGenerationTests(unittest.TestCase):
             self.assertEqual(summary.name, "prepared-voices.json")
             self.assertEqual(
                 set(prepared["voices"]), {"warm_voice", "bright_voice"},
+            )
+
+    def test_per_language_design_references_and_language_batches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["generation"]["voice"]["reference_strategy"] = "per_language"
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            generate_samples(config, model_loader=loader)
+            design_languages = [
+                call[1]["language"] for call in calls if call[0] == "design"
+            ]
+            clone_languages = [
+                call[1]["language"] for call in calls if call[0] == "clone"
+            ]
+            self.assertEqual(design_languages, ["English", "French"])
+            self.assertEqual(clone_languages, [["English"], ["French"]])
+            references = root / "datasets/voices/shared_voice_a/references"
+            self.assertTrue((references / "designed-en.wav").is_file())
+            self.assertTrue((references / "designed-fr.wav").is_file())
+            self.assertEqual(
+                (references / "designed-fr.txt").read_text(encoding="utf-8"),
+                "Bonjour",
+            )
+
+    def test_voice_regenerate_audio_overrides_cache_per_voice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            generate_samples(config, model_loader=loader)
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["generation"]["voice"]["regenerate_audio"] = True
+            config.write_text(json.dumps(raw), encoding="utf-8")
+            regenerated_calls = []
+
+            def regenerated_loader(key, **_kwargs):
+                return FakeCloneModel(regenerated_calls)
+
+            generate_samples(config, model_loader=regenerated_loader)
+            self.assertEqual(
+                [call[0] for call in regenerated_calls],
+                ["prompt", "clone", "clone"],
             )
 
     def test_qwen_device_inherits_experiment_device(self):

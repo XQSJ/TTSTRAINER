@@ -18,6 +18,8 @@
     "voices": {
       "voice_02": {
         "mode": "design",
+        "reference_strategy": "per_language",
+        "regenerate_audio": false,
         "prompt": "A confident adult voice with crisp articulation and natural expressive pacing.",
         "reference_text": "This reference creates a consistent multilingual voice.",
         "reference_language": "en"

@@ -99,7 +99,12 @@ class ProjectConfigTests(unittest.TestCase):
                 "dataset": {
                     "sentences_per_language": 12,
                     "voices": {
-                        "warm": {"mode": "design", "prompt": "Warm"},
+                        "warm": {
+                            "mode": "design",
+                            "prompt": "Warm",
+                            "reference_strategy": "per_language",
+                            "regenerate_audio": True,
+                        },
                         "clone": {"mode": "clone", "reference_audio": "voice.wav"},
                     },
                 },
@@ -108,6 +113,9 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(config["task"], "prepare")
             self.assertEqual(set(config["generation"]["voices"]), {"warm", "clone"})
             self.assertEqual(config["generation"]["voices"]["warm"]["id"], "warm")
+            self.assertTrue(
+                config["generation"]["voices"]["warm"]["regenerate_audio"]
+            )
             self.assertNotIn("speaker_assignments", config["generation"])
 
     def test_task_validation_prevents_ambiguous_workflows(self):
@@ -136,6 +144,21 @@ class ProjectConfigTests(unittest.TestCase):
             invalid.write_text('{"task":"guess"}')
             with self.assertRaisesRegex(ValueError, "task must be prepare or train"):
                 load_project_config(invalid)
+
+            invalid_voice = root / "invalid-voice.json"
+            invalid_voice.write_text(json.dumps({
+                "task": "prepare",
+                "dataset": {
+                    "voices": {
+                        "a": {
+                            "mode": "design",
+                            "regenerate_audio": "yes",
+                        },
+                    },
+                },
+            }))
+            with self.assertRaisesRegex(ValueError, "must be true or false"):
+                load_project_config(invalid_voice)
 
     def test_public_workflow_examples_resolve(self):
         clone = load_project_config("training_configs/clone.example.json")

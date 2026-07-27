@@ -15,6 +15,19 @@ ONNX 资源。
 `run-pipeline` 的明确执行模式。直接子命令（如 `generate-samples`、`train-vits`）本身
 已有明确动作，不依赖推断。旧配置未写 `task` 时默认按 `train` 处理。
 
+`resume`、`warm_start`、`expand_speakers` 不是第三种 task，它们只描述
+`task: "train"` 应如何初始化模型：
+
+```json
+"task": "train",
+"experiment": {
+  "initialization": {
+    "mode": "resume",
+    "checkpoint": "runs/old_model/checkpoints/last"
+  }
+}
+```
+
 公共音色本身没有 speaker。同一个 `voice_id` 可以在不同模型中分配不同 speaker：
 
 ```text
@@ -89,6 +102,8 @@ cp training_configs/train1.json training_configs/my_model.json
     "voices": {
       "voice_xiaoling": {
         "mode": "design",
+        "reference_strategy": "per_language",
+        "regenerate_audio": false,
         "prompt": "A warm, natural young adult female voice with conversational pacing.",
         "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
         "reference_language": "zh"
@@ -151,12 +166,15 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
     "voices": {
       "voice_xiaoling_a": {
         "mode": "design",
+        "reference_strategy": "per_language",
+        "regenerate_audio": false,
         "prompt": "A warm natural young adult female voice.",
         "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
         "reference_language": "zh"
       },
       "voice_xiaoling_b": {
         "mode": "clone",
+        "regenerate_audio": false,
         "reference_audio": "voices/xiaoling_b.wav",
         "reference_text": "与参考录音逐字一致的文本",
         "reference_language": "zh"
@@ -253,6 +271,8 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
   "voices": {
     "voice_new": {
       "mode": "design",
+      "reference_strategy": "per_language",
+      "regenerate_audio": false,
       "prompt": "A bright and friendly adult voice.",
       "reference_text": "你好，这是新音色的参考录音。",
       "reference_language": "zh"
@@ -279,6 +299,8 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 | `dataset.text` | 文本来源，仅生成新音色时需要 |
 | `dataset.voices` | 要生成或补齐的公共音色集合，键是 `voice_id` |
 | `dataset.speakers` | 当前模型的 `speaker → voice_id` 映射 |
+| `dataset.voices.<id>.regenerate_audio` | 是否强制重写该音色本次选中的训练 WAV |
+| `dataset.voices.<id>.reference_strategy` | `shared` 或 `per_language` 设计参考策略 |
 | `training.batch_size` | 显存不足时优先调小 |
 | `training.epochs` | 总训练轮数 |
 
@@ -379,6 +401,8 @@ Hello, welcome to the speech system.,en
 "voices": {
   "voice_01": {
     "mode": "design",
+    "reference_strategy": "per_language",
+    "regenerate_audio": false,
     "prompt": "A warm adult voice with natural conversational pacing.",
     "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
     "reference_language": "zh"
@@ -386,8 +410,28 @@ Hello, welcome to the speech system.,en
 }
 ```
 
-Qwen VoiceDesign 只在该 `voice_id` 尚无参考音色时运行一次。后续补语言或补数量会复用
-同一参考音色。
+多语言模型推荐 `reference_strategy: "per_language"`。程序会用正确的 Qwen 语言名为
+每种语言生成一条设计参考，再分别创建 clone prompt：
+
+```text
+fr → French → references/designed-fr.wav
+es → Spanish → references/designed-es.wav
+```
+
+这能降低“中文参考音频让法语、西语带中文口音”的风险。`shared` 则让全部语言共用一条
+参考音频，跨语言音色通常更统一，但参考语言口音更容易迁移到其他语言。
+
+`per_language` 默认使用该语言训练文本的第一句作为参考，也可以人工指定：
+
+```json
+"reference_texts": {
+  "fr": "Bonjour, ceci est une référence vocale en français.",
+  "es": "Hola, esta es una referencia de voz en español."
+}
+```
+
+同一个 `voice_id` 的参考策略属于音色身份。已有 `shared` 音色要切换为
+`per_language`，请使用新的 `voice_id`，避免把两套参考混进同一个公共数据集。
 
 ### 上传参考录音
 
@@ -397,6 +441,7 @@ Qwen VoiceDesign 只在该 `voice_id` 尚无参考音色时运行一次。后续
 "voices": {
   "my_voice": {
     "mode": "clone",
+    "regenerate_audio": false,
     "reference_audio": "datasets/references/my_voice.wav",
     "reference_text": "与参考录音逐字一致的文本",
     "x_vector_only_mode": false
@@ -405,6 +450,48 @@ Qwen VoiceDesign 只在该 `voice_id` 尚无参考音色时运行一次。后续
 ```
 
 推荐使用 5～15 秒、单人、无音乐、低混响的干净录音。
+
+### 强制重新生成某个音色的音频
+
+`prepare` 和 `train` 使用同一规则。在需要重做的音色中设置：
+
+```json
+"voices": {
+  "voice_a": {
+    "mode": "design",
+    "reference_strategy": "per_language",
+    "regenerate_audio": true,
+    "prompt": "A warm natural adult voice."
+  },
+  "voice_b": {
+    "mode": "design",
+    "reference_strategy": "per_language",
+    "regenerate_audio": false,
+    "prompt": "A bright friendly adult voice."
+  }
+}
+```
+
+- `false`：默认行为，已有 WAV 直接复用，只补缺失语言或数量。
+- `true`：重新生成该音色当前语言和数量范围内的全部 WAV；其他音色不受影响。
+- 成功完成一次强制重生成后，应改回 `false`，否则下次运行还会再次生成。
+- `regenerate_audio` 只重做训练 WAV，不更换已锁定的参考音色、Prompt 或参考录音。
+
+训练配置中如果某个已有音色只出现在 `speakers`，它只会被复用。要强制重做它，还需在
+`voices` 中写回该音色原来的完整生成设置，并设置 `regenerate_audio: true`。
+
+### 生成批次很久没有新日志
+
+每个批次开始前都会显示：
+
+```text
+AUDIO BATCH START | language=fr | teacher_language=French | items=4
+```
+
+这样可以直接确认传给 Qwen 的目标语言。Qwen 单次生成是同步调用，复杂句子可能明显慢于
+其他批次；超过 60 秒会持续显示 `AUDIO BATCH STILL RUNNING` 心跳，项目也通过
+`max_new_tokens` 限制生成上限。需要停止时按 `Ctrl+C`；终端中的 `^[[A` 是方向键
+“上”，不是中断信号。
 
 ## 设备选择
 
@@ -508,7 +595,9 @@ metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程
   "text": {"provider": "builtin"},
   "voices": {
     "voice_02": {
-      "mode": "design"
+      "mode": "design",
+      "reference_strategy": "per_language",
+      "regenerate_audio": false
     }
   }
 }

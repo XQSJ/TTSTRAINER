@@ -68,6 +68,17 @@ def _normalize_dataset_config(raw: dict) -> dict:
                 raise ValueError(
                     f"dataset.voices.{voice_id} must be a JSON object"
                 )
+            if "regenerate_audio" in settings \
+                    and not isinstance(settings["regenerate_audio"], bool):
+                raise ValueError(
+                    f"dataset.voices.{voice_id}.regenerate_audio must be true or false"
+                )
+            strategy = settings.get("reference_strategy")
+            if strategy is not None and strategy not in {"shared", "per_language"}:
+                raise ValueError(
+                    f"dataset.voices.{voice_id}.reference_strategy must be "
+                    "shared or per_language"
+                )
             configured_id = str(settings.get("id") or voice_id).strip()
             if configured_id != voice_id:
                 raise ValueError(

@@ -19,6 +19,8 @@
     "voices": {
       "voice_01": {
         "mode": "design",
+        "reference_strategy": "per_language",
+        "regenerate_audio": false,
         "prompt": "A warm, natural adult voice with clear pronunciation, medium pitch, and conversational pacing.",
         "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
         "reference_language": "zh"

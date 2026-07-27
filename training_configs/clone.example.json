@@ -18,6 +18,7 @@
     "voices": {
       "my_voice": {
         "mode": "clone",
+        "regenerate_audio": false,
         "reference_audio": "datasets/references/my_voice.wav",
         "reference_text": "这里必须填写与参考录音逐字一致的文本。",
         "x_vector_only_mode": false
