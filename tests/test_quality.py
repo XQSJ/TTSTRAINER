@@ -26,6 +26,32 @@ class QualityTests(unittest.TestCase):
             report = run_audio_quality_gate([item], {}, root / "report.json")
             self.assertEqual((report["passed"], report["failed"]), (1, 0))
 
+    def test_speech_rate_does_not_depend_on_frontend_token_density(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            time = np.arange(8000, dtype=np.float32) / 8000
+            path = root / "sample.wav"
+            sf.write(
+                path, 0.2 * np.sin(2 * math.pi * 220 * time),
+                8000, subtype="PCM_16",
+            )
+            sparse = Item(path, "你好世界", "zh", "voice_01", ("n", "i", "h", "ao"))
+            dense = Item(
+                path, "你好世界", "zh", "voice_01",
+                tuple("n i tone3 h a u tone3 stress padding"),
+            )
+            sparse_result = inspect_audio_item(sparse, {})
+            dense_result = inspect_audio_item(dense, {})
+            self.assertEqual(
+                sparse_result["metrics"]["units_per_second"],
+                dense_result["metrics"]["units_per_second"],
+            )
+            self.assertEqual(dense_result["metrics"]["unit_count"], 4)
+            self.assertEqual(
+                dense_result["metrics"]["unit_source"],
+                "text-alphanumeric-v1",
+            )
+
     def test_silence_is_rejected_and_report_is_written(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

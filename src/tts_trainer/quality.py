@@ -30,6 +30,17 @@ def _edge_silence_seconds(samples: np.ndarray, threshold: float,
     return active[0] / sample_rate, (len(samples) - 1 - active[-1]) / sample_rate
 
 
+def _text_unit_count(text: str) -> int:
+    """Count stable speech-rate units independently of the selected G2P.
+
+    Phoneme tuples are frontend-specific: eSpeak/Piper emits Unicode
+    codepoints including stress and spacing tokens, while dedicated G2Ps emit
+    larger phone units. Using their lengths makes the same recording pass or
+    fail merely because the frontend changed.
+    """
+    return max(1, sum(character.isalnum() for character in text))
+
+
 def inspect_audio_item(item: Item, config: dict) -> dict:
     samples, sample_rate = sf.read(str(item.audio), dtype="float32", always_2d=False)
     samples = np.asarray(samples, dtype=np.float32).squeeze()
@@ -45,7 +56,7 @@ def inspect_audio_item(item: Item, config: dict) -> dict:
     leading_silence, trailing_silence = _edge_silence_seconds(
         samples, silence_threshold, sample_rate,
     )
-    unit_count = len(item.phonemes) if item.phonemes else len(item.text)
+    unit_count = _text_unit_count(item.text)
     units_per_second = unit_count / max(duration, 1e-9)
     metrics = {
         "duration_seconds": duration,
@@ -55,6 +66,8 @@ def inspect_audio_item(item: Item, config: dict) -> dict:
         "clipping_ratio": clipping_ratio,
         "leading_silence_seconds": leading_silence,
         "trailing_silence_seconds": trailing_silence,
+        "unit_count": unit_count,
+        "unit_source": "text-alphanumeric-v1",
         "units_per_second": units_per_second,
     }
     failures = []
