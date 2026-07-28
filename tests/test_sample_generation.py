@@ -551,6 +551,60 @@ class SampleGenerationTests(unittest.TestCase):
                 "Bonjour",
             )
 
+    def test_cascade_design_localizes_master_reference_before_dataset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["generation"]["voice"]["reference_strategy"] = "cascade"
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            generate_samples(config, model_loader=loader)
+            references = root / "datasets/voices/shared_voice_a/references"
+            self.assertTrue((references / "designed.wav").is_file())
+            self.assertTrue((references / "localized-en.wav").is_file())
+            self.assertTrue((references / "localized-fr.wav").is_file())
+            self.assertEqual(
+                (references / "localized-en.txt").read_text(encoding="utf-8"),
+                "Exact reference text.",
+            )
+            self.assertEqual(
+                (references / "localized-fr.txt").read_text(encoding="utf-8"),
+                "Bonjour",
+            )
+            clone_calls = [
+                call[1] for call in calls if call[0] == "clone"
+            ]
+            self.assertEqual(
+                [call["language"] for call in clone_calls],
+                [["French"], ["English"], ["French"]],
+            )
+            self.assertEqual(clone_calls[0]["text"], ["Bonjour"])
+            prompt_calls = [
+                call[1] for call in calls if call[0] == "prompt"
+            ]
+            self.assertEqual(len(prompt_calls), 3)
+
+            next((root / "datasets/voices/shared_voice_a/wavs/fr").glob("*.wav")).unlink()
+            resumed_calls = []
+
+            def resumed_loader(key, **_kwargs):
+                self.assertEqual(key, "base-1.7b")
+                return FakeCloneModel(resumed_calls)
+
+            generate_samples(config, model_loader=resumed_loader)
+            self.assertEqual(
+                [call[0] for call in resumed_calls],
+                ["prompt", "clone"],
+            )
+            self.assertEqual(
+                resumed_calls[-1][1]["language"], ["French"],
+            )
+
     def test_voice_regenerate_audio_overrides_cache_per_voice(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

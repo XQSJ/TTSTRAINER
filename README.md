@@ -102,7 +102,7 @@ cp training_configs/train1.json training_configs/my_model.json
     "voices": {
       "voice_xiaoling": {
         "mode": "design",
-        "reference_strategy": "per_language",
+        "reference_strategy": "cascade",
         "regenerate_audio": false,
         "prompt": "A warm, natural young adult female voice with conversational pacing.",
         "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
@@ -166,7 +166,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
     "voices": {
       "voice_xiaoling_a": {
         "mode": "design",
-        "reference_strategy": "per_language",
+        "reference_strategy": "cascade",
         "regenerate_audio": false,
         "prompt": "A warm natural young adult female voice.",
         "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
@@ -271,7 +271,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
   "voices": {
     "voice_new": {
       "mode": "design",
-      "reference_strategy": "per_language",
+      "reference_strategy": "cascade",
       "regenerate_audio": false,
       "prompt": "A bright and friendly adult voice.",
       "reference_text": "你好，这是新音色的参考录音。",
@@ -300,7 +300,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 | `dataset.voices` | 要生成或补齐的公共音色集合，键是 `voice_id` |
 | `dataset.speakers` | 当前模型的 `speaker → voice_id` 映射 |
 | `dataset.voices.<id>.regenerate_audio` | 是否强制重写该音色本次选中的训练 WAV |
-| `dataset.voices.<id>.reference_strategy` | `shared` 或 `per_language` 设计参考策略 |
+| `dataset.voices.<id>.reference_strategy` | `cascade`（推荐）、`shared` 或 `per_language` |
 | `training.batch_size` | 显存不足时优先调小 |
 | `training.epochs` | 总训练轮数 |
 
@@ -401,7 +401,7 @@ Hello, welcome to the speech system.,en
 "voices": {
   "voice_01": {
     "mode": "design",
-    "reference_strategy": "per_language",
+    "reference_strategy": "cascade",
     "regenerate_audio": false,
     "prompt": "A warm adult voice with natural conversational pacing.",
     "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
@@ -410,18 +410,29 @@ Hello, welcome to the speech system.,en
 }
 ```
 
-多语言模型推荐 `reference_strategy: "per_language"`。程序会用正确的 Qwen 语言名为
-每种语言生成一条设计参考，再分别创建 clone prompt：
+多语言模型推荐 `reference_strategy: "cascade"`。它不是独立设计七次音色，而是：
 
 ```text
-fr → French → references/designed-fr.wav
-es → Spanish → references/designed-es.wav
+Prompt + reference_text
+  → VoiceDesign 生成唯一主参考 references/designed.wav
+  → 用主参考克隆各语言参考 references/localized-<lang>.wav
+  → 各语言参考分别生成对应语言训练 WAV
 ```
 
-这能降低“中文参考音频让法语、西语带中文口音”的风险。`shared` 则让全部语言共用一条
-参考音频，跨语言音色通常更统一，但参考语言口音更容易迁移到其他语言。
+这样每个本地化参考都继承同一条主参考的音色，又能使用正确的 Qwen 语言条件，通常比
+`per_language` 独立设计多次更能保持音色一致，也比 `shared` 直接跨语言生成更不容易
+迁移主参考语言的口音。
 
-`per_language` 默认使用该语言训练文本的第一句作为参考，也可以人工指定：
+三种策略的取舍：
+
+| 策略 | 做法 | 适用情况 |
+|---|---|---|
+| `cascade` | 一条主参考克隆出各语言参考，再生成训练数据 | 多语言默认推荐，平衡音色一致与本地发音 |
+| `shared` | 所有语言直接共用一条参考 | 音色最统一，但其他语言可能带主语言口音 |
+| `per_language` | VoiceDesign 为每种语言独立设计参考 | 语言条件独立，但不同参考可能出现明显音色漂移 |
+
+`cascade` 和 `per_language` 默认使用该语言训练文本的第一句作为本地参考文本，也可以
+人工指定：
 
 ```json
 "reference_texts": {
@@ -430,8 +441,22 @@ es → Spanish → references/designed-es.wav
 }
 ```
 
-同一个 `voice_id` 的参考策略属于音色身份。已有 `shared` 音色要切换为
-`per_language`，请使用新的 `voice_id`，避免把两套参考混进同一个公共数据集。
+`cascade` 的 `reference_text` 和 `reference_language` 定义唯一主参考；例如主参考为
+英文时，英文会直接复用主参考，其他语言由它克隆得到。生成的参考保存在：
+
+```text
+datasets/voices/<voice_id>/references/
+├── designed.wav
+├── localized-zh.wav
+├── localized-zh.txt
+├── localized-en.wav
+├── localized-en.txt
+└── ...
+```
+
+本地化参考会被缓存，后续增加样本数量时不会重新生成。同一个 `voice_id` 的 Prompt、
+主参考和参考策略都属于不可变音色身份；已有音色切换策略时请使用新的 `voice_id`，
+避免把不同参考链路混进同一个公共数据集。
 
 ### 上传参考录音
 
@@ -459,13 +484,13 @@ es → Spanish → references/designed-es.wav
 "voices": {
   "voice_a": {
     "mode": "design",
-    "reference_strategy": "per_language",
+    "reference_strategy": "cascade",
     "regenerate_audio": true,
     "prompt": "A warm natural adult voice."
   },
   "voice_b": {
     "mode": "design",
-    "reference_strategy": "per_language",
+    "reference_strategy": "cascade",
     "regenerate_audio": false,
     "prompt": "A bright friendly adult voice."
   }
@@ -596,7 +621,7 @@ metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程
   "voices": {
     "voice_02": {
       "mode": "design",
-      "reference_strategy": "per_language",
+      "reference_strategy": "cascade",
       "regenerate_audio": false
     }
   }

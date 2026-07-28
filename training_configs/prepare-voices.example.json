@@ -19,7 +19,7 @@
       "voice_xiaoling_a": {
         "_comment": "通过文字描述设计音色 / Design a voice from a natural-language description",
         "mode": "design",
-        "reference_strategy": "per_language",
+        "reference_strategy": "cascade",
         "regenerate_audio": false,
         "prompt": "A warm natural young adult female voice with conversational pacing.",
         "reference_text": "你好，这是一段用于创建统一音色的参考录音。",

@@ -106,11 +106,12 @@ def _voice_identity(raw: dict, generation: dict, voice: dict) -> dict:
         "prompt": str(voice.get("prompt") or "").strip() or None,
         "reference_text": (
             str(voice.get("reference_text") or "").strip() or None
-            if reference_strategy == "shared" else None
+            if reference_strategy in {"shared", "cascade"} else None
         ),
         "reference_language": (
             str(voice.get("reference_language", "en")).strip().lower()
-            if mode == "design" and reference_strategy == "shared" else None
+            if mode == "design"
+            and reference_strategy in {"shared", "cascade"} else None
         ),
         "reference_audio": reference_identity,
         "x_vector_only_mode": bool(voice.get("x_vector_only_mode", False)),
@@ -851,17 +852,23 @@ def _generate_samples_single(
             reference_strategy = str(
                 voice.get("reference_strategy", "shared")
             ).strip().lower()
-            if reference_strategy not in {"shared", "per_language"}:
+            if reference_strategy not in {
+                "shared", "per_language", "cascade",
+            }:
                 raise ValueError(
-                    "design reference_strategy must be shared or per_language"
+                    "design reference_strategy must be shared, per_language, "
+                    "or cascade"
                 )
             reference_language = voice.get("reference_language", "en").lower()
+            cascade_master_input = None
+            cascade_master_text = None
             if not prompt:
                 raise ValueError("design mode requires dataset.voice.prompt")
-            if reference_strategy == "shared":
+            if reference_strategy in {"shared", "cascade"}:
                 if not reference_text:
                     raise ValueError(
-                        "shared design mode requires dataset.voice.reference_text"
+                        f"{reference_strategy} design mode requires "
+                        "dataset.voice.reference_text"
                     )
                 if reference_language not in registry:
                     raise ValueError(
@@ -884,9 +891,7 @@ def _generate_samples_single(
                         "legacy designed reference migrated source=%s destination=%s",
                         legacy_reference, reference_audio,
                     )
-                if reference_audio.is_file():
-                    reference_inputs["*"] = reference_audio
-                else:
+                if not reference_audio.is_file():
                     design_model = model_loader(
                         model_keys.get("voice_design", "voice-design-1.7b"),
                         **common,
@@ -912,11 +917,15 @@ def _generate_samples_single(
                         reference_audio, np.asarray(ref_wavs[0]).squeeze(),
                         ref_rate, subtype="PCM_16", format="WAV",
                     )
-                    reference_inputs["*"] = (ref_wavs[0], ref_rate)
                     del design_model
                     _release_device_memory(device)
-                prompt_texts["*"] = reference_text
-            else:
+                if reference_strategy == "shared":
+                    reference_inputs["*"] = reference_audio
+                    prompt_texts["*"] = reference_text
+                else:
+                    cascade_master_input = reference_audio
+                    cascade_master_text = reference_text
+            if reference_strategy == "per_language":
                 configured_reference_texts = voice.get("reference_texts") or {}
                 if not isinstance(configured_reference_texts, dict):
                     raise ValueError(
@@ -1014,6 +1023,116 @@ def _generate_samples_single(
             clone_model, set(teacher_languages.values()),
             model_keys.get("voice_clone", "base-1.7b"),
         )
+        if mode == "design" and reference_strategy == "cascade":
+            configured_reference_texts = voice.get("reference_texts") or {}
+            if not isinstance(configured_reference_texts, dict):
+                raise ValueError(
+                    "dataset.voice.reference_texts must be an object keyed by language"
+                )
+            target_languages = [
+                language for language in layout.languages
+                if any(job.item.language == language for job in pending)
+            ]
+            master_prompt = None
+            logger.info(
+                "CASCADE REFERENCES | voice_id=%s | master_language=%s | "
+                "target_languages=%s",
+                voice_id, reference_language, ",".join(target_languages),
+            )
+            for language in target_languages:
+                requested_reference_text = str(
+                    configured_reference_texts.get(language) or (
+                        cascade_master_text
+                        if language == reference_language
+                        else next(
+                            job.item.text for job in jobs
+                            if job.item.language == language
+                        )
+                    )
+                ).strip()
+                localized_audio = references / f"localized-{language}.wav"
+                localized_transcript = references / f"localized-{language}.txt"
+                if localized_audio.is_file():
+                    if not localized_transcript.is_file():
+                        raise RuntimeError(
+                            "cascade reference audio is missing its transcript: "
+                            f"{localized_transcript}; remove {localized_audio} "
+                            "and rerun"
+                        )
+                    localized_text = localized_transcript.read_text(
+                        encoding="utf-8",
+                    ).strip()
+                    logger.info(
+                        "CASCADE REFERENCE CACHE HIT | voice_id=%s | language=%s "
+                        "| audio=%s",
+                        voice_id, language, localized_audio,
+                    )
+                elif (
+                    language == reference_language
+                    and requested_reference_text == cascade_master_text
+                ):
+                    localized_audio.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(cascade_master_input, localized_audio)
+                    localized_transcript.write_text(
+                        cascade_master_text, encoding="utf-8",
+                    )
+                    localized_text = cascade_master_text
+                    logger.info(
+                        "CASCADE REFERENCE MASTER REUSED | voice_id=%s | "
+                        "language=%s | audio=%s",
+                        voice_id, language, localized_audio,
+                    )
+                else:
+                    if master_prompt is None:
+                        logger.info(
+                            "CASCADE MASTER PROMPT | voice_id=%s | "
+                            "language=%s | status=creating",
+                            voice_id, reference_language,
+                        )
+                        master_prompt = clone_model.create_voice_clone_prompt(
+                            ref_audio=_qwen_reference_input(
+                                cascade_master_input,
+                            ),
+                            ref_text=cascade_master_text,
+                            x_vector_only_mode=x_vector_only,
+                        )
+                    teacher_language = teacher_languages[language]
+                    logger.info(
+                        "CASCADE REFERENCE GENERATION | voice_id=%s | "
+                        "language=%s | teacher_language=%s",
+                        voice_id, language, teacher_language,
+                    )
+                    localized_wavs, localized_rate = (
+                        clone_model.generate_voice_clone(
+                            text=[requested_reference_text],
+                            language=[teacher_language],
+                            voice_clone_prompt=master_prompt,
+                            **generation.get("generation_kwargs", {}),
+                        )
+                    )
+                    if len(localized_wavs) != 1:
+                        raise RuntimeError(
+                            "Qwen returned an unexpected number of cascade "
+                            f"reference waveforms: {len(localized_wavs)}"
+                        )
+                    localized_audio.parent.mkdir(parents=True, exist_ok=True)
+                    sf.write(
+                        localized_audio,
+                        np.asarray(localized_wavs[0]).squeeze(),
+                        localized_rate, subtype="PCM_16", format="WAV",
+                    )
+                    localized_transcript.write_text(
+                        requested_reference_text, encoding="utf-8",
+                    )
+                    localized_text = requested_reference_text
+                reference_inputs[language] = localized_audio
+                prompt_texts[language] = localized_text
+            logger.info(
+                "CASCADE REFERENCES READY | voice_id=%s | references=%d | "
+                "directory=%s",
+                voice_id, len(reference_inputs), references,
+                extra={"tts_style": "success"},
+            )
         clone_prompts = {}
         for language_key, reference_input in reference_inputs.items():
             logger.info(

@@ -23,7 +23,7 @@
     "voices": {
       "voice_02": {
         "mode": "design",
-        "reference_strategy": "per_language",
+        "reference_strategy": "cascade",
         "regenerate_audio": false,
         "prompt": "A clear adult voice distinct from voice_01, with natural pacing and neutral emotion.",
         "reference_text": "你好，这是一段用于创建第二个统一音色的参考录音。",

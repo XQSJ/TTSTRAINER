@@ -74,10 +74,12 @@ def _normalize_dataset_config(raw: dict) -> dict:
                     f"dataset.voices.{voice_id}.regenerate_audio must be true or false"
                 )
             strategy = settings.get("reference_strategy")
-            if strategy is not None and strategy not in {"shared", "per_language"}:
+            if strategy is not None and strategy not in {
+                "shared", "per_language", "cascade",
+            }:
                 raise ValueError(
                     f"dataset.voices.{voice_id}.reference_strategy must be "
-                    "shared or per_language"
+                    "shared, per_language, or cascade"
                 )
             configured_id = str(settings.get("id") or voice_id).strip()
             if configured_id != voice_id:
