@@ -48,6 +48,12 @@ class GenerationJob:
     output: Path
 
 
+@dataclass(frozen=True)
+class RegenerationPlan:
+    audio_languages: frozenset[str]
+    reference_languages: frozenset[str]
+
+
 class _BatchHeartbeat:
     """Report a slow synchronous Qwen call without pretending it has stalled."""
 
@@ -83,6 +89,100 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _regeneration_plan(
+    voice: dict, generation: dict, languages: tuple[str, ...],
+) -> RegenerationPlan:
+    """Resolve selective cache invalidation while preserving legacy behavior."""
+    settings = voice.get("regenerate")
+    legacy_audio = bool(
+        voice.get("regenerate_audio", generation.get("overwrite", False))
+    )
+    if settings is None:
+        selected = frozenset(languages) if legacy_audio else frozenset()
+        return RegenerationPlan(selected, frozenset())
+    if legacy_audio:
+        raise ValueError(
+            "dataset.voice.regenerate cannot be combined with "
+            "regenerate_audio=true or generation.overwrite=true"
+        )
+    if not isinstance(settings, dict):
+        raise ValueError("dataset.voice.regenerate must be a JSON object")
+    unknown = sorted(set(settings) - {"audio", "references", "languages"})
+    if unknown:
+        raise ValueError(
+            "dataset.voice.regenerate has unknown fields: "
+            + ", ".join(unknown)
+        )
+    audio = settings.get("audio", False)
+    references = settings.get("references", False)
+    if not isinstance(audio, bool) or not isinstance(references, bool):
+        raise ValueError(
+            "dataset.voice.regenerate.audio and references must be true or false"
+        )
+    configured_languages = settings.get("languages", "all")
+    if configured_languages == "all":
+        selected = frozenset(languages)
+    elif isinstance(configured_languages, list) and configured_languages:
+        selected = frozenset(
+            str(language).strip().lower()
+            for language in configured_languages
+        )
+        unsupported = sorted(selected - set(languages))
+        if unsupported:
+            raise ValueError(
+                "dataset.voice.regenerate.languages must be enabled in "
+                "experiment.languages: " + ", ".join(unsupported)
+            )
+    else:
+        raise ValueError(
+            'dataset.voice.regenerate.languages must be "all" or a non-empty array'
+        )
+    if references and not audio:
+        raise ValueError(
+            "reference regeneration also requires regenerate.audio=true so old "
+            "training WAVs are not mixed with a new language reference"
+        )
+    return RegenerationPlan(
+        selected if audio else frozenset(),
+        selected if references else frozenset(),
+    )
+
+
+def _invalidate_language_references(
+    references: Path, voice: dict, languages: frozenset[str],
+) -> None:
+    """Remove only derived language references; never replace the voice anchor."""
+    if not languages:
+        return
+    if str(voice.get("mode") or "") != "design":
+        raise ValueError(
+            "reference regeneration is only available for mode=design; use a "
+            "new voice_id when changing an uploaded clone reference"
+        )
+    strategy = str(
+        voice.get("reference_strategy", "shared")
+    ).strip().lower()
+    if strategy == "shared":
+        raise ValueError(
+            "shared strategy has only the immutable master reference; use a new "
+            "voice_id to replace it, or regenerate audio while preserving it"
+        )
+    prefix = "localized" if strategy == "cascade" else "designed"
+    removed = []
+    for language in sorted(languages):
+        for suffix in (".wav", ".txt"):
+            target = references / f"{prefix}-{language}{suffix}"
+            if target.is_file():
+                target.unlink()
+                removed.append(target.name)
+    logger.warning(
+        "REFERENCE REGENERATION | strategy=%s | languages=%s | removed=%s | "
+        "master_reference=preserved",
+        strategy, ",".join(sorted(languages)),
+        ",".join(removed) if removed else "none",
+    )
 
 
 def _voice_identity(raw: dict, generation: dict, voice: dict) -> dict:
@@ -776,6 +876,14 @@ def _generate_samples_single(
     voice_id, voice_dataset, _ = _voice_dataset(
         raw, layout, generation, voice,
     )
+    regeneration = _regeneration_plan(
+        voice, generation, layout.languages,
+    )
+    _invalidate_language_references(
+        voice_dataset / "references",
+        voice,
+        regeneration.reference_languages,
+    )
     assigned_label = next(
         (label for label, assigned_voice in assignments.items()
          if assigned_voice == voice_id),
@@ -803,10 +911,14 @@ def _generate_samples_single(
                 continue
             job_outputs.add(output)
             legacy = legacy_wav_root / f"{item.language}_{index:06d}_c{candidate:02d}.wav"
-            overwrite = bool(
-                voice.get("regenerate_audio", generation.get("overwrite", False))
+            regenerate_audio = (
+                item.language in regeneration.audio_languages
             )
-            if not output.is_file() and legacy.is_file() and not overwrite:
+            if (
+                not output.is_file()
+                and legacy.is_file()
+                and not regenerate_audio
+            ):
                 output.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(legacy, output)
                 migrated += 1
@@ -816,16 +928,25 @@ def _generate_samples_single(
             "legacy model audio migrated voice_id=%s files=%d source=%s destination=%s",
             voice_id, migrated, legacy_wav_root, wav_root,
         )
-    overwrite = bool(
-        voice.get("regenerate_audio", generation.get("overwrite", False))
-    )
-    if overwrite:
-        logger.warning(
-            "AUDIO REGENERATION ENABLED | voice_id=%s | selected_files=%d | "
-            "set regenerate_audio=false after this run to resume cache reuse",
-            voice_id, len(jobs),
+    if regeneration.audio_languages:
+        selected_files = sum(
+            job.item.language in regeneration.audio_languages
+            for job in jobs
         )
-    pending = jobs if overwrite else [job for job in jobs if not job.output.is_file()]
+        logger.warning(
+            "AUDIO REGENERATION ENABLED | voice_id=%s | languages=%s | "
+            "selected_files=%d | references=%s",
+            voice_id, ",".join(sorted(regeneration.audio_languages)),
+            selected_files,
+            "regenerate" if regeneration.reference_languages else "preserve",
+        )
+    pending = [
+        job for job in jobs
+        if (
+            job.item.language in regeneration.audio_languages
+            or not job.output.is_file()
+        )
+    ]
     cached_count = len(jobs) - len(pending)
     logger.info(
         "AUDIO PLAN | total=%d | pending=%d | cached=%d | output=%s",

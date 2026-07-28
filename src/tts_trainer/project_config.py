@@ -73,6 +73,51 @@ def _normalize_dataset_config(raw: dict) -> dict:
                 raise ValueError(
                     f"dataset.voices.{voice_id}.regenerate_audio must be true or false"
                 )
+            regenerate = settings.get("regenerate")
+            if regenerate is not None:
+                if not isinstance(regenerate, dict):
+                    raise ValueError(
+                        f"dataset.voices.{voice_id}.regenerate must be a JSON object"
+                    )
+                unknown = sorted(
+                    set(regenerate) - {"audio", "references", "languages"}
+                )
+                if unknown:
+                    raise ValueError(
+                        f"dataset.voices.{voice_id}.regenerate has unknown fields: "
+                        + ", ".join(unknown)
+                    )
+                for field in ("audio", "references"):
+                    if field in regenerate \
+                            and not isinstance(regenerate[field], bool):
+                        raise ValueError(
+                            f"dataset.voices.{voice_id}.regenerate.{field} "
+                            "must be true or false"
+                        )
+                selected_languages = regenerate.get("languages", "all")
+                if selected_languages != "all" and not (
+                    isinstance(selected_languages, list)
+                    and selected_languages
+                    and all(
+                        isinstance(language, str) and language.strip()
+                        for language in selected_languages
+                    )
+                ):
+                    raise ValueError(
+                        f"dataset.voices.{voice_id}.regenerate.languages must "
+                        'be "all" or a non-empty array'
+                    )
+                if regenerate.get("references", False) \
+                        and not regenerate.get("audio", False):
+                    raise ValueError(
+                        f"dataset.voices.{voice_id}.regenerate.references=true "
+                        "requires audio=true"
+                    )
+                if settings.get("regenerate_audio", False):
+                    raise ValueError(
+                        f"dataset.voices.{voice_id} cannot combine regenerate "
+                        "with regenerate_audio=true"
+                    )
             strategy = settings.get("reference_strategy")
             if strategy is not None and strategy not in {
                 "shared", "per_language", "cascade",

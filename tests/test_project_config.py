@@ -103,7 +103,11 @@ class ProjectConfigTests(unittest.TestCase):
                             "mode": "design",
                             "prompt": "Warm",
                             "reference_strategy": "cascade",
-                            "regenerate_audio": True,
+                            "regenerate": {
+                                "audio": True,
+                                "references": True,
+                                "languages": ["en"],
+                            },
                         },
                         "clone": {"mode": "clone", "reference_audio": "voice.wav"},
                     },
@@ -113,8 +117,13 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(config["task"], "prepare")
             self.assertEqual(set(config["generation"]["voices"]), {"warm", "clone"})
             self.assertEqual(config["generation"]["voices"]["warm"]["id"], "warm")
-            self.assertTrue(
-                config["generation"]["voices"]["warm"]["regenerate_audio"]
+            self.assertEqual(
+                config["generation"]["voices"]["warm"]["regenerate"],
+                {
+                    "audio": True,
+                    "references": True,
+                    "languages": ["en"],
+                },
             )
             self.assertEqual(
                 config["generation"]["voices"]["warm"]["reference_strategy"],

@@ -103,7 +103,6 @@ cp training_configs/train1.json training_configs/my_model.json
       "voice_xiaoling": {
         "mode": "design",
         "reference_strategy": "cascade",
-        "regenerate_audio": false,
         "prompt": "A warm, natural young adult female voice with conversational pacing.",
         "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
         "reference_language": "zh"
@@ -167,14 +166,12 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
       "voice_xiaoling_a": {
         "mode": "design",
         "reference_strategy": "cascade",
-        "regenerate_audio": false,
         "prompt": "A warm natural young adult female voice.",
         "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
         "reference_language": "zh"
       },
       "voice_xiaoling_b": {
         "mode": "clone",
-        "regenerate_audio": false,
         "reference_audio": "voices/xiaoling_b.wav",
         "reference_text": "与参考录音逐字一致的文本",
         "reference_language": "zh"
@@ -277,7 +274,6 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
     "voice_new": {
       "mode": "design",
       "reference_strategy": "cascade",
-      "regenerate_audio": false,
       "prompt": "A bright and friendly adult voice.",
       "reference_text": "你好，这是新音色的参考录音。",
       "reference_language": "zh"
@@ -304,7 +300,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 | `dataset.text` | 文本来源，仅生成新音色时需要 |
 | `dataset.voices` | 要生成或补齐的公共音色集合，键是 `voice_id` |
 | `dataset.speakers` | 当前模型的 `speaker → voice_id` 映射 |
-| `dataset.voices.<id>.regenerate_audio` | 是否强制重写该音色本次选中的训练 WAV |
+| `dataset.voices.<id>.regenerate` | 可选：按语言重生成参考和/或训练 WAV |
 | `dataset.voices.<id>.reference_strategy` | `cascade`（推荐）、`shared` 或 `per_language` |
 | `training.batch_size` | 显存不足时优先调小 |
 | `training.epochs` | 总训练轮数 |
@@ -407,7 +403,6 @@ Hello, welcome to the speech system.,en
   "voice_01": {
     "mode": "design",
     "reference_strategy": "cascade",
-    "regenerate_audio": false,
     "prompt": "A warm adult voice with natural conversational pacing.",
     "reference_text": "你好，这是一段用于创建统一音色的参考录音。",
     "reference_language": "zh"
@@ -471,7 +466,6 @@ datasets/voices/<voice_id>/references/
 "voices": {
   "my_voice": {
     "mode": "clone",
-    "regenerate_audio": false,
     "reference_audio": "datasets/references/my_voice.wav",
     "reference_text": "与参考录音逐字一致的文本",
     "x_vector_only_mode": false
@@ -481,34 +475,63 @@ datasets/voices/<voice_id>/references/
 
 推荐使用 5～15 秒、单人、无音乐、低混响的干净录音。
 
-### 强制重新生成某个音色的音频
+### 按语言重新生成参考或训练 WAV
 
-`prepare` 和 `train` 使用同一规则。在需要重做的音色中设置：
+默认不写 `regenerate`，程序会复用全部缓存并只补缺失内容。`prepare` 和 `train` 使用
+同一套重生成规则。
+
+保留所有参考，仅重生成全部语言的训练 WAV：
 
 ```json
-"voices": {
-  "voice_a": {
-    "mode": "design",
-    "reference_strategy": "cascade",
-    "regenerate_audio": true,
-    "prompt": "A warm natural adult voice."
-  },
-  "voice_b": {
-    "mode": "design",
-    "reference_strategy": "cascade",
-    "regenerate_audio": false,
-    "prompt": "A bright friendly adult voice."
-  }
+"regenerate": {
+  "audio": true,
+  "references": false,
+  "languages": "all"
 }
 ```
 
-- `false`：默认行为，已有 WAV 直接复用，只补缺失语言或数量。
-- `true`：重新生成该音色当前语言和数量范围内的全部 WAV；其他音色不受影响。
-- 成功完成一次强制重生成后，应改回 `false`，否则下次运行还会再次生成。
-- `regenerate_audio` 只重做训练 WAV，不更换已锁定的参考音色、Prompt 或参考录音。
+只重生成法语的本地化参考和法语训练 WAV：
 
-训练配置中如果某个已有音色只出现在 `speakers`，它只会被复用。要强制重做它，还需在
-`voices` 中写回该音色原来的完整生成设置，并设置 `regenerate_audio: true`。
+```json
+"regenerate": {
+  "audio": true,
+  "references": true,
+  "languages": ["fr"]
+}
+```
+
+同时重生成中文、日语：
+
+```json
+"regenerate": {
+  "audio": true,
+  "references": true,
+  "languages": ["zh", "ja"]
+}
+```
+
+字段含义：
+
+| 字段 | 作用 |
+|---|---|
+| `audio` | 重生成选中语言的训练 WAV |
+| `references` | 重生成选中语言的派生参考；必须同时设置 `audio: true` |
+| `languages` | `"all"` 或 `experiment.languages` 中的语言数组 |
+
+安全规则：
+
+- `cascade` 重生成的是 `localized-<lang>.wav`，唯一主参考 `designed.wav` 始终保留，
+  因而不会让同一个 `voice_id` 突然变成另一种音色。
+- `per_language` 重生成对应的 `designed-<lang>.wav`。
+- `shared` 只有一条主参考，不能单独重生成参考；可以保留参考并重生成 WAV。要更换主
+  参考必须创建新的 `voice_id`。
+- 上传录音的 `clone` 音色同样不能在原 `voice_id` 下更换参考；请创建新 ID。
+- 完成后删除 `regenerate`，否则下一次运行仍会再次重生成。
+- 旧配置 `regenerate_audio: true` 仍兼容，等价于保留参考并重生成全部语言 WAV，但
+  不要和新 `regenerate` 同时配置。
+
+训练配置中如果某个已有音色只出现在 `speakers`，它只会被复用。要重做它，还需在
+`voices` 中写回该音色原来的完整生成设置，并增加 `regenerate`。
 
 ### 生成批次很久没有新日志
 
@@ -626,8 +649,7 @@ metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程
   "voices": {
     "voice_02": {
       "mode": "design",
-      "reference_strategy": "cascade",
-      "regenerate_audio": false
+      "reference_strategy": "cascade"
     }
   }
 }

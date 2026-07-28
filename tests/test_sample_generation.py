@@ -628,6 +628,88 @@ class SampleGenerationTests(unittest.TestCase):
             self.assertFalse((root / "runs/sample-design/checkpoints").exists())
             self.assertFalse((root / "runs/sample-design/logs").exists())
 
+    def test_cascade_can_regenerate_one_language_reference_and_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["generation"]["voice"]["reference_strategy"] = "cascade"
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            generate_samples(config, model_loader=loader)
+            references = root / "datasets/voices/shared_voice_a/references"
+            master_before = (
+                references / "designed.wav"
+            ).read_bytes()
+
+            raw["generation"]["voice"]["regenerate"] = {
+                "audio": True,
+                "references": True,
+                "languages": ["fr"],
+            }
+            config.write_text(json.dumps(raw), encoding="utf-8")
+            regenerated_calls = []
+
+            def regenerated_loader(key, **_kwargs):
+                self.assertEqual(key, "base-1.7b")
+                return FakeCloneModel(regenerated_calls)
+
+            generate_samples(config, model_loader=regenerated_loader)
+            self.assertEqual(
+                [call[0] for call in regenerated_calls],
+                ["prompt", "clone", "prompt", "clone"],
+            )
+            self.assertEqual(
+                [
+                    call[1]["language"]
+                    for call in regenerated_calls if call[0] == "clone"
+                ],
+                [["French"], ["French"]],
+            )
+            self.assertEqual(
+                (references / "designed.wav").read_bytes(),
+                master_before,
+            )
+            self.assertTrue((references / "localized-en.wav").is_file())
+            self.assertTrue((references / "localized-fr.wav").is_file())
+
+    def test_regenerate_audio_all_preserves_cached_references(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            generate_samples(config, model_loader=loader)
+            reference = (
+                root / "datasets/voices/shared_voice_a/references/designed.wav"
+            )
+            reference_before = reference.read_bytes()
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["generation"]["voice"]["regenerate"] = {
+                "audio": True,
+                "references": False,
+                "languages": "all",
+            }
+            config.write_text(json.dumps(raw), encoding="utf-8")
+            regenerated_calls = []
+
+            def regenerated_loader(_key, **_kwargs):
+                return FakeCloneModel(regenerated_calls)
+
+            generate_samples(config, model_loader=regenerated_loader)
+            self.assertEqual(reference.read_bytes(), reference_before)
+            self.assertEqual(
+                [call[0] for call in regenerated_calls],
+                ["prompt", "clone", "clone"],
+            )
+
     def test_voice_regenerate_audio_overrides_cache_per_voice(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
