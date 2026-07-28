@@ -102,6 +102,10 @@
     "maximum_edge_silence_seconds": 1.5,
     "minimum_units_per_second": 0.5,
     "maximum_units_per_second": 40.0,
+    "alignment": {
+      "enabled": true,
+      "fail_on_error": false
+    },
     "semantic": {
       "enabled": false,
       "fail_on_error": true,

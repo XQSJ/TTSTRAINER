@@ -15,7 +15,8 @@ from tts_trainer.checkpoints import (load_training_checkpoint,
                                      require_warm_start_checkpoint_format,
                                      save_training_checkpoint)
 from tts_trainer.vits import MultilingualVITS, VitsConfig, VitsDiscriminator
-from tts_trainer.vits.data import slice_waveforms
+from tts_trainer.vits.data import (AudioConfig, inspect_alignment_item,
+                                   slice_waveforms)
 from tts_trainer.vits.losses import discriminator_loss, generator_adversarial_loss
 from tts_trainer.vits.modules import maximum_path, sinusoidal_position_encoding
 from tts_trainer.vits.trainer import _semantic_reference_root, train_vits
@@ -29,6 +30,7 @@ from tts_trainer.vits.runtime import OnnxTTS
 from tts_trainer.vits.validation import split_train_validation
 from tts_trainer.frontend import frontend_contract_from_config
 from tts_trainer.manifest import Item
+from tts_trainer.text import Vocabulary
 
 
 def tiny_config():
@@ -43,6 +45,31 @@ def tiny_config():
 
 
 class VitsTests(unittest.TestCase):
+    def test_alignment_gate_detects_piper_token_overflow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audio = root / "short.wav"
+            with wave.open(str(audio), "wb") as stream:
+                stream.setnchannels(1)
+                stream.setsampwidth(2)
+                stream.setframerate(8000)
+                stream.writeframes(struct.pack("<32h", *([0] * 32)))
+            item = Item(
+                audio, "abc", "en", "voice_01", ("a", "b", "c"),
+            )
+            result = inspect_alignment_item(
+                item, Vocabulary.build([item]),
+                AudioConfig(
+                    sample_rate=8000, n_fft=16, hop_length=4,
+                    win_length=16, n_mels=4,
+                ),
+                piper_compatible=True,
+            )
+            self.assertEqual(result["audio_frames"], 5)
+            self.assertEqual(result["text_tokens"], 8)
+            self.assertEqual(result["frame_deficit"], 3)
+            self.assertFalse(result["passed"])
+
     def test_mobile_export_writes_per_language_sherpa_models(self):
         import onnx
 
@@ -473,10 +500,23 @@ class VitsTests(unittest.TestCase):
             with wave.open(str(audio), "wb") as stream:
                 stream.setnchannels(1); stream.setsampwidth(2); stream.setframerate(8000)
                 stream.writeframes(struct.pack(f"<{len(samples)}h", *samples))
+            incompatible = root / "incompatible.wav"
+            with wave.open(str(incompatible), "wb") as stream:
+                stream.setnchannels(1); stream.setsampwidth(2); stream.setframerate(8000)
+                stream.writeframes(struct.pack("<32h", *([0] * 32)))
             metadata = root / "metadata.csv"
             with metadata.open("w", newline="", encoding="utf-8") as stream:
                 writer = csv.DictWriter(stream, fieldnames=["audio", "text", "language", "speaker"])
-                writer.writeheader(); writer.writerow({"audio": audio.name, "text": "hello", "language": "en", "speaker": "voice_01"})
+                writer.writeheader()
+                writer.writerow({
+                    "audio": audio.name, "text": "hello",
+                    "language": "en", "speaker": "voice_01",
+                })
+                writer.writerow({
+                    "audio": incompatible.name,
+                    "text": "this text cannot fit five frames",
+                    "language": "en", "speaker": "voice_01",
+                })
             config = {
                 "experiment": {"name": "tiny-en", "languages": ["en"]},
                 "model": tiny_config().to_dict(),
@@ -491,6 +531,14 @@ class VitsTests(unittest.TestCase):
             checkpoint = train_vits(str(config_path), str(metadata), str(root / "run"),
                                     device_name="cpu", max_steps=1)
             self.assertTrue((checkpoint / "training-state.pt").is_file())
+            alignment = json.loads(
+                (
+                    root / "run" / "quality" / "alignment-quality-report.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                (alignment["passed"], alignment["failed"]), (1, 1),
+            )
             saved = json.loads((checkpoint / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["language_map"], {"en": 0})
             self.assertEqual(saved["config"]["num_languages"], 1)

@@ -22,6 +22,32 @@ class AudioConfig:
     mel_power: float = 2.0
 
 
+def inspect_alignment_item(
+    item: Item, vocabulary: Vocabulary, audio_config: AudioConfig,
+    *, piper_compatible: bool = False,
+) -> dict:
+    """Check the hard MAS requirement before a sample reaches a batch."""
+    info = sf.info(str(item.audio))
+    sample_count = int(info.frames)
+    audio_frames = (
+        0 if sample_count < audio_config.n_fft
+        else 1 + (sample_count - audio_config.n_fft) // audio_config.hop_length
+    )
+    text_tokens = len(
+        vocabulary.encode_item(item, piper_compatible=piper_compatible)
+    )
+    return {
+        "audio": str(item.audio),
+        "text": item.text,
+        "language": item.language,
+        "speaker": item.speaker,
+        "audio_frames": audio_frames,
+        "text_tokens": text_tokens,
+        "frame_deficit": max(0, text_tokens - audio_frames),
+        "passed": audio_frames >= text_tokens,
+    }
+
+
 class VitsDataset(torch.utils.data.Dataset):
     def __init__(self, items: list[Item], vocabulary: Vocabulary,
                  speaker_map: dict[str, int], language_map: dict[str, int],

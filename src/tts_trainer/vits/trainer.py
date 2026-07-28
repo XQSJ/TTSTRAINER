@@ -29,7 +29,8 @@ from ..quality import run_audio_quality_gate
 from ..semantic_quality import run_semantic_quality_gate
 from ..text import Vocabulary
 from .config import load_vits_config
-from .data import AudioConfig, VitsDataset, collate_vits, slice_waveforms
+from .data import (AudioConfig, VitsDataset, collate_vits,
+                   inspect_alignment_item, slice_waveforms)
 from .discriminators import VitsDiscriminator
 from .losses import (discriminator_loss, feature_matching_loss,
                      generator_adversarial_loss, kl_loss)
@@ -284,17 +285,21 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 "old speakers are absent from the new metadata and may be forgotten: " + ", ".join(sorted(missing_old)),
                 stacklevel=2,
             )
-    vocabulary = _vocabulary_for_initialization(items, layout.initialization_mode, previous)
+    # Build a permissive preliminary vocabulary for the alignment gate. The
+    # final initialization rules are applied again after incompatible rows are
+    # removed, so a rejected row cannot introduce an otherwise unused token.
+    discovered = Vocabulary.build(items)
+    if previous is None:
+        vocabulary = discovered
+    else:
+        old_tokens = list(previous["tokens"])
+        vocabulary = Vocabulary([
+            *old_tokens,
+            *(token for token in discovered.tokens if token not in old_tokens),
+        ])
     piper_compatible = (
         frontend_contract.get("token_encoding")
         == "piper-bos-phoneme-pad-eos-v1"
-    )
-    frontend_conformance = (
-        build_frontend_conformance(
-            items, vocabulary, language_map,
-            piper_compatible=piper_compatible,
-        )
-        if all(item.phonemes for item in items) else None
     )
     quality_config = raw.get("quality", {})
     quality_summary = None
@@ -331,6 +336,90 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 "semantic quality gate status=completed passed=%d failed=%d",
                 semantic_report["passed"], semantic_report["failed"],
             )
+
+    alignment_config = quality_config.get("alignment", {})
+    if alignment_config.get("enabled", True):
+        logger.info("alignment quality gate status=started items=%d", len(items))
+        alignment_results = [
+            inspect_alignment_item(
+                item, vocabulary, audio_config,
+                piper_compatible=piper_compatible,
+            )
+            for item in items
+        ]
+        rejected = [
+            result for result in alignment_results if not result["passed"]
+        ]
+        alignment_report = {
+            "format": 1,
+            "provider": "mas-alignment-capacity-v1",
+            "items": len(alignment_results),
+            "passed": len(alignment_results) - len(rejected),
+            "failed": len(rejected),
+            "piper_compatible": piper_compatible,
+            "results": alignment_results,
+        }
+        alignment_target = (
+            layout.run_dir / "quality" / "alignment-quality-report.json"
+        )
+        alignment_target.parent.mkdir(parents=True, exist_ok=True)
+        alignment_target.write_text(
+            json.dumps(alignment_report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(
+            "alignment quality gate status=completed passed=%d failed=%d "
+            "report=%s",
+            alignment_report["passed"], alignment_report["failed"],
+            alignment_target,
+        )
+        if rejected and alignment_config.get("fail_on_error", False):
+            first = rejected[0]
+            raise ValueError(
+                "alignment quality gate rejected "
+                f"{len(rejected)}/{len(items)} items; first={first['audio']} "
+                f"audio_frames={first['audio_frames']} "
+                f"text_tokens={first['text_tokens']}; see {alignment_target}"
+            )
+        if rejected:
+            rejected_audio = {result["audio"] for result in rejected}
+            items = [
+                item for item in items if str(item.audio) not in rejected_audio
+            ]
+            logger.warning(
+                "ALIGNMENT FILTER | excluded=%d | remaining=%d | reason=MAS "
+                "requires audio_frames>=text_tokens",
+                len(rejected), len(items),
+            )
+            remaining_languages = {item.language for item in items}
+            remaining_speakers = {item.speaker for item in items}
+            if remaining_languages != set(language_map):
+                raise ValueError(
+                    "alignment filtering removed every sample for languages: "
+                    + ", ".join(sorted(set(language_map) - remaining_languages))
+                )
+            if remaining_speakers != current_speakers:
+                raise ValueError(
+                    "alignment filtering removed every sample for speakers: "
+                    + ", ".join(sorted(current_speakers - remaining_speakers))
+                )
+        if quality_summary is None:
+            quality_summary = {}
+        quality_summary["alignment"] = {
+            key: alignment_report[key]
+            for key in ("provider", "items", "passed", "failed")
+        }
+
+    vocabulary = _vocabulary_for_initialization(
+        items, layout.initialization_mode, previous,
+    )
+    frontend_conformance = (
+        build_frontend_conformance(
+            items, vocabulary, language_map,
+            piper_compatible=piper_compatible,
+        )
+        if all(item.phonemes for item in items) else None
+    )
 
     validation_config = raw.get("validation", {})
     validation_enabled = bool(validation_config.get("enabled", False))
