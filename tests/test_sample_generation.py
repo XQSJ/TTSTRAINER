@@ -620,6 +620,9 @@ class SampleGenerationTests(unittest.TestCase):
             output = generate_samples(config, model_loader=loader)
             self.assertEqual(output.name, "manifest.csv")
             self.assertTrue(output.is_file())
+            self.assertTrue(
+                (output.parent / "audio-postprocess-report.json").is_file()
+            )
             self.assertFalse((root / "datasets/sample-design").exists())
             self.assertFalse((root / "artifacts/sample-design").exists())
             self.assertFalse((root / "runs/sample-design/checkpoints").exists())

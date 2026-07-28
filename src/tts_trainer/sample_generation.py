@@ -1267,8 +1267,8 @@ def _generate_samples_single(
             "AUDIO POSTPROCESS SKIPPED | total=%d | reason=disabled",
             len(jobs),
         )
-    if trimmed:
-        report_path = layout.dataset_dir / "audio-postprocess-report.json"
+    if postprocess_enabled:
+        report_path = voice_dataset / "audio-postprocess-report.json"
         report_path.write_text(json.dumps({
             "format": 1,
             "provider": "edge-silence-trim-v1",
