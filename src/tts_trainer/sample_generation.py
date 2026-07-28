@@ -1284,6 +1284,14 @@ def _generate_samples_single(
         voice_id, voice_manifest,
         extra={"tts_style": "success"},
     )
+    if raw.get("task", "train") == "prepare":
+        logger.info(
+            "VOICE PREPARE DONE | voice_id=%s | samples=%d | manifest=%s | "
+            "model_metadata=skipped",
+            voice_id, len(jobs), voice_manifest,
+            extra={"tts_style": "success"},
+        )
+        return voice_manifest
     included_manifests = [
         (Path(value), False) for value in generation.get("include_metadata", [])
     ]

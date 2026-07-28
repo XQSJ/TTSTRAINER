@@ -110,11 +110,13 @@ def resolve_experiment(config_path: str | Path, *, metadata_override: str | None
 
 
 def prepare_experiment(layout: ExperimentLayout, resolved_config: dict, config_path: str | Path) -> None:
-    layout.dataset_dir.mkdir(parents=True, exist_ok=True)
+    task = str(resolved_config.get("task", "train")).strip().lower()
     layout.run_dir.mkdir(parents=True, exist_ok=True)
-    layout.checkpoints_dir.mkdir(parents=True, exist_ok=True)
-    layout.logs_dir.mkdir(parents=True, exist_ok=True)
-    layout.artifacts_dir.mkdir(parents=True, exist_ok=True)
+    if task == "train":
+        layout.dataset_dir.mkdir(parents=True, exist_ok=True)
+        layout.checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        layout.logs_dir.mkdir(parents=True, exist_ok=True)
+        layout.artifacts_dir.mkdir(parents=True, exist_ok=True)
     recorded_config = deepcopy(resolved_config)
     recorded_config.setdefault("experiment", {})["languages"] = list(layout.languages)
     if "model" in recorded_config:
@@ -124,6 +126,7 @@ def prepare_experiment(layout: ExperimentLayout, resolved_config: dict, config_p
     )
     manifest = {
         "name": layout.name,
+        "task": task,
         "languages": list(layout.languages),
         "language_registry": {code: spec.to_dict() for code, spec in layout.language_specs.items()},
         "source_config": str(Path(config_path).resolve()),

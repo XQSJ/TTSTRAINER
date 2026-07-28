@@ -605,6 +605,26 @@ class SampleGenerationTests(unittest.TestCase):
                 resumed_calls[-1][1]["language"], ["French"],
             )
 
+    def test_prepare_voice_does_not_write_model_dataset_or_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config, calls = self._base(root, "design")
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            raw["task"] = "prepare"
+            config.write_text(json.dumps(raw), encoding="utf-8")
+
+            def loader(key, **_kwargs):
+                return FakeDesignModel(calls) if key == "voice-design-1.7b" \
+                    else FakeCloneModel(calls)
+
+            output = generate_samples(config, model_loader=loader)
+            self.assertEqual(output.name, "manifest.csv")
+            self.assertTrue(output.is_file())
+            self.assertFalse((root / "datasets/sample-design").exists())
+            self.assertFalse((root / "artifacts/sample-design").exists())
+            self.assertFalse((root / "runs/sample-design/checkpoints").exists())
+            self.assertFalse((root / "runs/sample-design/logs").exists())
+
     def test_voice_regenerate_audio_overrides_cache_per_voice(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

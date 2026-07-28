@@ -52,6 +52,10 @@ class PipelineTests(unittest.TestCase):
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report["task"], "prepare")
             self.assertEqual(report["stages"]["train"], "skipped")
+            self.assertFalse((root / "datasets/prepare").exists())
+            self.assertFalse((root / "artifacts/prepare").exists())
+            self.assertFalse((root / "runs/prepare/checkpoints").exists())
+            self.assertFalse((root / "runs/prepare/logs").exists())
 
     def test_configured_stages_run_in_order_and_write_report(self):
         with tempfile.TemporaryDirectory() as directory:

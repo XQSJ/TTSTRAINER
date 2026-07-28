@@ -211,6 +211,11 @@ runs/prepare_public_voices/prepared-voices.json
 
 `voices` 对象的键就是公共 `voice_id`，不再重复填写 `id`。不同声音必须使用不同键。
 
+`task: "prepare"` 不会创建模型目录 `datasets/<experiment.name>/`、checkpoint、训练
+日志或 `artifacts/<experiment.name>/`。`runs/<experiment.name>/` 只保存本次数据准备的
+配置、流水线报告和多音色子任务记录，不包含 VITS 模型。真正可复用的数据始终只在
+`datasets/voices/<voice_id>/`。
+
 ## 用法三：用已有公共音色训练模型
 
 先确保各个 `voice_id` 已准备好，然后复制：
