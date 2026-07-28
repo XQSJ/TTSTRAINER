@@ -146,6 +146,25 @@ class FrontendTests(unittest.TestCase):
             runtime_contract.declaration_key(), router.declared.declaration_key(),
         )
 
+    def test_mobile_espeak_routes_all_languages_and_freezes_piper_encoding(self):
+        router = frontend_from_config(
+            {"provider": "espeak-ng", "piper_compatible": True,
+             "executable": "/bin/echo"},
+            languages=("zh", "en", "ja", "ko", "fr", "es", "pt"),
+        )
+        self.assertEqual(router.declared.provider, "espeak-ng")
+        self.assertEqual(
+            router.declared.token_encoding,
+            "piper-bos-phoneme-pad-eos-v1",
+        )
+        self.assertEqual(router.declared.languages["zh"]["voice"], "cmn")
+        self.assertEqual(router.declared.languages["ja"]["voice"], "ja")
+        self.assertEqual(router.declared.languages["ko"]["voice"], "ko")
+        self.assertTrue(all(
+            router.provider_for(language) == "espeak-ng"
+            for language in router.routes
+        ))
+
     def test_piper_plus_keeps_multicharacter_phone_units(self):
         phonemizer = SimpleNamespace(phonemize=lambda text: ["tɕʰ", "i", "tone4"])
         module = SimpleNamespace(get_phonemizer=lambda language: phonemizer)
@@ -218,6 +237,36 @@ class FrontendTests(unittest.TestCase):
         )
         self.assertEqual(
             verify_frontend_conformance(conformance, FakeFrontend(), vocabulary), [],
+        )
+
+    def test_piper_conformance_interleaves_pad_after_each_phoneme(self):
+        item = Item(Path("sample.wav"), "Hello", "en", "voice_01", ("h", "ə"))
+        vocabulary = Vocabulary.build([item])
+        conformance = build_frontend_conformance(
+            [item], vocabulary, {"en": 0}, piper_compatible=True,
+        )
+        self.assertEqual(
+            conformance["cases"][0]["token_ids"],
+            [
+                vocabulary.ids["^"],
+                vocabulary.ids["h"], vocabulary.ids["_"],
+                vocabulary.ids["ə"], vocabulary.ids["_"],
+                vocabulary.ids["$"],
+            ],
+        )
+        self.assertEqual(
+            verify_frontend_conformance(conformance, FakeFrontend(), vocabulary),
+            [{
+                "language": "en",
+                "text": "Hello",
+                "expected_phonemes": ["h", "ə"],
+                "actual_phonemes": ["h", "ə", " ", "w"],
+                "expected_token_ids": conformance["cases"][0]["token_ids"],
+                "actual_token_ids": vocabulary.encode(
+                    "Hello", "en", ("h", "ə", " ", "w"),
+                    piper_compatible=True,
+                ),
+            }],
         )
 
 

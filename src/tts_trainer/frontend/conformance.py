@@ -13,7 +13,8 @@ FRONTEND_CONFORMANCE_FORMAT = 1
 
 def build_frontend_conformance(items: list[Item], vocabulary: Vocabulary,
                                language_map: dict[str, int],
-                               *, cases_per_language: int = 3) -> dict:
+                               *, cases_per_language: int = 3,
+                               piper_compatible: bool = False) -> dict:
     """Freeze representative text -> phoneme -> token-ID cases for mobile QA."""
     if cases_per_language < 1:
         raise ValueError("cases_per_language must be at least 1")
@@ -27,7 +28,9 @@ def build_frontend_conformance(items: list[Item], vocabulary: Vocabulary,
             "language_id": language_map[item.language],
             "text": item.text,
             "phonemes": list(item.phonemes),
-            "token_ids": vocabulary.encode_item(item),
+            "token_ids": vocabulary.encode_item(
+                item, piper_compatible=piper_compatible,
+            ),
         })
         counts[item.language] += 1
     missing = sorted(set(language_map) - set(counts))
@@ -40,6 +43,7 @@ def build_frontend_conformance(items: list[Item], vocabulary: Vocabulary,
         "format": FRONTEND_CONFORMANCE_FORMAT,
         "cases_per_language": cases_per_language,
         "languages": list(language_map),
+        "piper_compatible": piper_compatible,
         "cases": cases,
     }
 
@@ -66,7 +70,10 @@ def verify_frontend_conformance(conformance: dict, frontend,
     mismatches = []
     for case in conformance["cases"]:
         actual_phonemes = frontend.phonemize(case["text"], case["language"])
-        actual_ids = vocabulary.encode(case["text"], case["language"], actual_phonemes)
+        actual_ids = vocabulary.encode(
+            case["text"], case["language"], actual_phonemes,
+            piper_compatible=bool(conformance.get("piper_compatible", False)),
+        )
         expected_phonemes = tuple(case["phonemes"])
         expected_ids = list(case["token_ids"])
         if actual_phonemes != expected_phonemes or actual_ids != expected_ids:

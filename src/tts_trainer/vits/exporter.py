@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
+import shutil
+import subprocess
 import warnings
 from pathlib import Path
 
@@ -16,6 +20,7 @@ from .model import MultilingualVITS
 
 
 logger = logging.getLogger(__name__)
+SHERPA_ONNX_ANDROID_VERSION = "1.13.4"
 
 
 class PiperInferenceWrapper(nn.Module):
@@ -61,6 +66,131 @@ def voice_profiles(speaker_map: dict[str, int], language_map: dict[str, int]) ->
     return profiles
 
 
+def _replace_onnx_metadata(model, values: dict[str, object]) -> None:
+    preserved = {
+        item.key: item.value for item in model.metadata_props
+        if item.key not in values
+    }
+    del model.metadata_props[:]
+    for key, value in {**preserved, **values}.items():
+        item = model.metadata_props.add()
+        item.key = str(key)
+        item.value = str(value)
+
+
+def _find_espeak_data_dir() -> Path:
+    configured = os.environ.get("ESPEAK_DATA_PATH")
+    candidates = [Path(configured).expanduser()] if configured else []
+    executable = shutil.which("espeak-ng") or shutil.which("espeak")
+    if executable:
+        result = subprocess.run(
+            [executable, "--version"], check=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        match = re.search(r"Data at:\s*(.+?)\s*$", result.stdout)
+        if match:
+            candidates.append(Path(match.group(1)))
+    candidates.extend((
+        Path("/usr/share/espeak-ng-data"),
+        Path("/usr/local/share/espeak-ng-data"),
+        Path("/opt/homebrew/share/espeak-ng-data"),
+    ))
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    raise FileNotFoundError(
+        "mobile text export requires espeak-ng-data; install eSpeak NG or set "
+        "ESPEAK_DATA_PATH to its data directory"
+    )
+
+
+def _export_sherpa_android_text_package(
+    onnx, model, output_dir: Path, frontend: dict, profiles: list[dict],
+    *, sample_rate: int, tokens: list[str],
+) -> dict:
+    """Write language-specific metadata wrappers for sherpa's eSpeak frontend."""
+    if frontend.get("provider") != "espeak-ng" or frontend.get(
+        "token_encoding",
+    ) != "piper-bos-phoneme-pad-eos-v1":
+        return {
+            "supported": False,
+            "reason": (
+                "model was not trained with the mobile eSpeak/Piper token "
+                "contract; retrain with preset=mobile"
+            ),
+        }
+
+    android_root = output_dir / "android_text"
+    android_root.mkdir(parents=True, exist_ok=True)
+    token_lines = []
+    for token_id, token in enumerate(tokens):
+        if token == "<unk>":
+            continue
+        if len(token) != 1:
+            raise ValueError(
+                "mobile eSpeak export requires Unicode-codepoint tokens; "
+                f"found {token!r}"
+            )
+        token_lines.append(
+            f"{token_id}\n" if token == " " else f"{token} {token_id}\n"
+        )
+    (android_root / "tokens.txt").write_text(
+        "".join(token_lines), encoding="utf-8",
+    )
+    profile_count = len(profiles)
+    languages = {}
+    first_model = True
+    for language, profile in frontend["languages"].items():
+        voice = profile["voice"]
+        _replace_onnx_metadata(model, {
+            "model_type": "vits",
+            "comment": "piper;ttstrainer-mobile",
+            "sample_rate": sample_rate,
+            "n_speakers": profile_count,
+            "language": language,
+            "voice": voice,
+            "has_espeak": 1,
+            "add_blank": 0,
+            "version": 1,
+        })
+        relative = Path("android_text") / f"model-{language}.onnx"
+        target = output_dir / relative
+        if first_model:
+            onnx.external_data_helper.convert_model_to_external_data(
+                model,
+                all_tensors_to_one_file=True,
+                location="model.weights",
+                size_threshold=0,
+                convert_attribute=False,
+            )
+            onnx.save_model(model, target)
+            first_model = False
+        else:
+            # The first save clears raw tensor data from this in-memory proto.
+            # Later metadata wrappers retain references to the same file.
+            onnx.save_model(model, target)
+        languages[language] = {
+            "voice": voice,
+            "model": str(relative).replace("\\", "/"),
+        }
+
+    data_source = _find_espeak_data_dir()
+    data_target = android_root / "espeak-ng-data"
+    shutil.copytree(data_source, data_target, dirs_exist_ok=True)
+    return {
+        "supported": True,
+        "runtime": "sherpa-onnx",
+        "runtime_version": SHERPA_ONNX_ANDROID_VERSION,
+        "tokens": "android_text/tokens.txt",
+        "data_dir": "android_text/espeak-ng-data",
+        "languages": languages,
+        "note": (
+            "Use the language-specific ONNX wrapper; all wrappers contain the "
+            "same trained weights and differ only in eSpeak voice metadata."
+        ),
+    }
+
+
 def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
                      *, sample_rate: int = 22050, opset: int = 17) -> Path:
     try:
@@ -103,6 +233,10 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     frontend = metadata.get("frontend") or frontend_contract_from_config(
         {}, tuple(metadata["language_map"])
     ).to_dict()
+    text_input = _export_sherpa_android_text_package(
+        onnx, model, output_dir, frontend, profiles, sample_rate=sample_rate,
+        tokens=metadata["tokens"],
+    )
     deployment = {
         "format": 2,
         "model_type": "multilingual-vits-piper-shaped",
@@ -119,6 +253,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         "sid_formula": "speaker_id * num_languages + language_id",
         "frontend": frontend,
         "frontend_note": "application supplies matching phoneme ids; stock sherpa multilingual switching requires an adapter",
+        "text_input": text_input,
         "num_languages": config.num_languages,
         "num_speakers": config.num_speakers,
         "voice_profiles": profiles,

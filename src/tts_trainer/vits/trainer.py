@@ -285,8 +285,15 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 stacklevel=2,
             )
     vocabulary = _vocabulary_for_initialization(items, layout.initialization_mode, previous)
+    piper_compatible = (
+        frontend_contract.get("token_encoding")
+        == "piper-bos-phoneme-pad-eos-v1"
+    )
     frontend_conformance = (
-        build_frontend_conformance(items, vocabulary, language_map)
+        build_frontend_conformance(
+            items, vocabulary, language_map,
+            piper_compatible=piper_compatible,
+        )
         if all(item.phonemes for item in items) else None
     )
     quality_config = raw.get("quality", {})
@@ -381,7 +388,10 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     random.seed(seed); torch.manual_seed(seed)
     device = select_device(layout.device)
     logger.info("selected device=%s", device)
-    dataset = VitsDataset(train_items, vocabulary, speaker_map, language_map, audio_config)
+    dataset = VitsDataset(
+        train_items, vocabulary, speaker_map, language_map, audio_config,
+        piper_compatible=piper_compatible,
+    )
     language_counts = Counter(item.language for item in train_items)
     speaker_counts = Counter(item.speaker for item in train_items)
     weights = [
@@ -396,7 +406,10 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     validation_loader = None
     if validation_items:
         validation_loader = torch.utils.data.DataLoader(
-            VitsDataset(validation_items, vocabulary, speaker_map, language_map, audio_config),
+            VitsDataset(
+                validation_items, vocabulary, speaker_map, language_map,
+                audio_config, piper_compatible=piper_compatible,
+            ),
             batch_size=int(validation_config.get("batch_size", raw["training"]["batch_size"])),
             shuffle=False, num_workers=raw["training"].get("num_workers", 0),
             collate_fn=collate_vits,

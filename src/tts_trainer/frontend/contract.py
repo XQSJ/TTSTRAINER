@@ -11,10 +11,25 @@ from ..languages import resolve_language_registry
 FRONTEND_CONTRACT_FORMAT = 1
 NORMALIZATION_CONTRACT = "unicode-nfkc-collapse-whitespace-v1"
 TOKEN_CONTRACT = "routed-phoneme-units-v1"
-DEFAULT_ESPEAK_VOICES = {
+DIRECT_TOKEN_ENCODING = "bos-phonemes-eos-v1"
+PIPER_TOKEN_ENCODING = "piper-bos-phoneme-pad-eos-v1"
+MOBILE_ESPEAK_VOICES = {
+    "zh": "cmn",
+    "en": "en-us",
+    "ja": "ja",
+    "ko": "ko",
+    "de": "de",
+    "fr": "fr-fr",
+    "ru": "ru",
+    "pt": "pt-br",
+    "es": "es",
+    "it": "it",
+}
+DEFAULT_ESPEAK_VOICES = dict(MOBILE_ESPEAK_VOICES)
+DEFAULT_ESPEAK_VOICES.update({
     code: spec.frontend_voice for code, spec in resolve_language_registry().items()
     if spec.frontend_provider == "espeak-ng"
-}
+})
 
 
 @dataclass(frozen=True)
@@ -25,6 +40,7 @@ class FrontendContract:
     format: int = FRONTEND_CONTRACT_FORMAT
     normalization: str = NORMALIZATION_CONTRACT
     tokens: str = TOKEN_CONTRACT
+    token_encoding: str = DIRECT_TOKEN_ENCODING
 
     def to_dict(self) -> dict:
         return {
@@ -32,6 +48,7 @@ class FrontendContract:
             "provider": self.provider,
             "normalization": self.normalization,
             "tokens": self.tokens,
+            "token_encoding": self.token_encoding,
             "engine_version": self.engine_version,
             "languages": self.languages,
         }
@@ -49,6 +66,7 @@ class FrontendContract:
             engine_version=raw.get("engine_version"),
             normalization=str(raw.get("normalization", NORMALIZATION_CONTRACT)),
             tokens=str(raw.get("tokens", TOKEN_CONTRACT)),
+            token_encoding=str(raw.get("token_encoding", DIRECT_TOKEN_ENCODING)),
         )
 
     def compatibility_key(self) -> tuple:
@@ -58,6 +76,7 @@ class FrontendContract:
             self.provider,
             self.normalization,
             self.tokens,
+            self.token_encoding,
             self.engine_version,
             json.dumps(self.languages, ensure_ascii=False, sort_keys=True),
         )
@@ -73,6 +92,7 @@ class FrontendContract:
             self.provider,
             self.normalization,
             self.tokens,
+            self.token_encoding,
             json.dumps(languages, ensure_ascii=False, sort_keys=True),
         )
 
@@ -102,17 +122,6 @@ def frontend_contract_from_config(config: dict | None, languages,
             f"unsupported frontend provider: {provider!r}; currently available: language-router"
         )
     registry = resolve_language_registry(language_registry)
-    if provider == "espeak-ng":
-        routed = sorted(
-            language for language in languages
-            if registry[language].frontend_provider != "espeak-ng"
-        )
-        if routed:
-            raise ValueError(
-                "frontend.provider=espeak-ng cannot serve routed languages: "
-                + ", ".join(routed)
-                + "; use frontend.provider=language-router"
-            )
     registry_voices = {
         code: spec.frontend_voice for code, spec in registry.items()
         if spec.frontend_provider == "espeak-ng"
@@ -120,8 +129,11 @@ def frontend_contract_from_config(config: dict | None, languages,
     voices = {**DEFAULT_ESPEAK_VOICES, **registry_voices, **config.get("voices", {})}
     missing = {
         language for language in languages
-        if language not in registry or (
-            registry[language].frontend_provider == "espeak-ng" and language not in voices
+        if language not in registry or (provider == "espeak-ng" and language not in voices)
+        or (
+            provider == "language-router"
+            and registry[language].frontend_provider == "espeak-ng"
+            and language not in voices
         )
     }
     if missing:
@@ -129,10 +141,13 @@ def frontend_contract_from_config(config: dict | None, languages,
     profiles = {}
     for language in languages:
         spec = registry[language]
-        profile = {"provider": spec.frontend_provider, **spec.frontend_profile}
-        if spec.frontend_provider == "espeak-ng":
+        if provider == "espeak-ng":
+            profile = {"provider": "espeak-ng", "voice": voices[language]}
+        else:
+            profile = {"provider": spec.frontend_provider, **spec.frontend_profile}
+        if profile["provider"] == "espeak-ng":
             profile["voice"] = voices[language]
-        elif spec.frontend_provider == "openjtalk":
+        elif profile["provider"] == "openjtalk":
             user_dictionary = config.get("openjtalk", {}).get("user_dictionary")
             if user_dictionary:
                 path = Path(user_dictionary).expanduser().resolve()
@@ -142,7 +157,12 @@ def frontend_contract_from_config(config: dict | None, languages,
                 profile["dictionary"] = f"user:{path.name}:sha256:{digest}"
         profiles[language] = profile
     return FrontendContract(
-        provider="language-router",
+        provider=provider,
         engine_version=engine_version,
         languages=profiles,
+        token_encoding=(
+            PIPER_TOKEN_ENCODING if provider == "espeak-ng"
+            and bool(config.get("piper_compatible", False))
+            else DIRECT_TOKEN_ENCODING
+        ),
     )

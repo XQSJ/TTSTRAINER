@@ -1,0 +1,20 @@
+{
+  "extends": "quality_pipeline_defaults.json",
+  "frontend": {
+    "provider": "espeak-ng",
+    "piper_compatible": true,
+    "strict_language_switches": true,
+    "voices": {
+      "zh": "cmn",
+      "en": "en-us",
+      "ja": "ja",
+      "ko": "ko",
+      "de": "de",
+      "fr": "fr-fr",
+      "ru": "ru",
+      "pt": "pt-br",
+      "es": "es",
+      "it": "it"
+    }
+  }
+}

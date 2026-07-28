@@ -34,12 +34,23 @@ class Vocabulary:
     def units_for_item(item: Item) -> tuple[str, ...]:
         return item.phonemes or tuple(normalize(item.text, item.language))
 
-    def encode(self, text: str, language: str, phonemes: tuple[str, ...] | None = None) -> list[int]:
+    def encode(self, text: str, language: str, phonemes: tuple[str, ...] | None = None,
+               *, piper_compatible: bool = False) -> list[int]:
         units = phonemes or tuple(normalize(text, language))
-        return [self.ids[BOS], *(self.ids.get(unit, self.ids[UNK]) for unit in units), self.ids[EOS]]
+        encoded = [self.ids.get(unit, self.ids[UNK]) for unit in units]
+        if piper_compatible:
+            encoded = [
+                value
+                for token_id in encoded
+                for value in (token_id, self.ids[PAD])
+            ]
+        return [self.ids[BOS], *encoded, self.ids[EOS]]
 
-    def encode_item(self, item: Item) -> list[int]:
-        return self.encode(item.text, item.language, item.phonemes)
+    def encode_item(self, item: Item, *, piper_compatible: bool = False) -> list[int]:
+        return self.encode(
+            item.text, item.language, item.phonemes,
+            piper_compatible=piper_compatible,
+        )
 
     def save(self, path: str | Path) -> None:
         target = Path(path)

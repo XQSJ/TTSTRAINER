@@ -25,12 +25,13 @@ class AudioConfig:
 class VitsDataset(torch.utils.data.Dataset):
     def __init__(self, items: list[Item], vocabulary: Vocabulary,
                  speaker_map: dict[str, int], language_map: dict[str, int],
-                 audio_config: AudioConfig):
+                 audio_config: AudioConfig, *, piper_compatible: bool = False):
         self.items = items
         self.vocabulary = vocabulary
         self.speaker_map = speaker_map
         self.language_map = language_map
         self.audio_config = audio_config
+        self.piper_compatible = piper_compatible
 
     def __len__(self):
         return len(self.items)
@@ -49,7 +50,12 @@ class VitsDataset(torch.utils.data.Dataset):
             window=torch.hann_window(self.audio_config.win_length), center=False, return_complex=True,
         ).abs()
         return {
-            "tokens": torch.tensor(self.vocabulary.encode_item(item), dtype=torch.long),
+            "tokens": torch.tensor(
+                self.vocabulary.encode_item(
+                    item, piper_compatible=self.piper_compatible,
+                ),
+                dtype=torch.long,
+            ),
             "spectrogram": spectrogram,
             "waveform": waveform,
             "language_id": self.language_map[item.language],

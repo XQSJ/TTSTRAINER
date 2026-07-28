@@ -53,7 +53,11 @@ class FrontendRouter:
             elif isinstance(frontend, PiperPlusFrontend):
                 profile["resource"] = frontend.resource_id()
             profiles[language] = profile
-        return FrontendContract(provider="language-router", languages=profiles)
+        return FrontendContract(
+            provider=self.declared.provider,
+            languages=profiles,
+            token_encoding=self.declared.token_encoding,
+        )
 
 
 def frontend_from_config(config: dict | None = None, *, languages=None,
@@ -72,8 +76,9 @@ def frontend_from_config(config: dict | None = None, *, languages=None,
     piper_plus = {}
     routes = {}
     for language in languages:
-        spec = registry[language]
-        if spec.frontend_provider == "espeak-ng":
+        profile = declared.languages[language]
+        provider = profile["provider"]
+        if provider == "espeak-ng":
             if espeak is None:
                 espeak = EspeakFrontend(
                     executable=config.get("executable"),
@@ -81,7 +86,7 @@ def frontend_from_config(config: dict | None = None, *, languages=None,
                     allow_language_switches=not bool(config.get("strict_language_switches", True)),
                 )
             routes[language] = espeak
-        elif spec.frontend_provider == "openjtalk":
+        elif provider == "openjtalk":
             if openjtalk is None:
                 openjtalk_config = config.get("openjtalk", {})
                 openjtalk = OpenJTalkFrontend(
@@ -92,7 +97,7 @@ def frontend_from_config(config: dict | None = None, *, languages=None,
                     ),
                 )
             routes[language] = openjtalk
-        elif spec.frontend_provider == "piper-plus-g2p":
+        elif provider == "piper-plus-g2p":
             piper_config = config.get("piper_plus", {})
             piper_plus[language] = PiperPlusFrontend(
                 language,
@@ -103,7 +108,7 @@ def frontend_from_config(config: dict | None = None, *, languages=None,
             )
             routes[language] = piper_plus[language]
         else:  # LanguageSpec validation should make this unreachable.
-            raise ValueError(f"unsupported frontend provider: {spec.frontend_provider}")
+            raise ValueError(f"unsupported frontend provider: {provider}")
     return FrontendRouter(routes, declared)
 
 
@@ -138,7 +143,10 @@ def frontend_from_contract(contract: FrontendContract, config: dict | None = Non
         if profile.get("provider", "espeak-ng") == "espeak-ng"
     }
     resolved_config = dict(config)
-    resolved_config["provider"] = "language-router"
+    resolved_config["provider"] = contract.provider
+    resolved_config["piper_compatible"] = (
+        contract.token_encoding == "piper-bos-phoneme-pad-eos-v1"
+    )
     resolved_config["voices"] = {**voices, **config.get("voices", {})}
     return frontend_from_config(
         resolved_config,

@@ -1,0 +1,20 @@
+{
+  "_comment": "Android 可直接输入普通文本的七语模型 / Seven-language Android model with direct text input",
+  "task": "train",
+  "preset": "mobile",
+  "experiment": {
+    "name": "mobile_tts",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "cuda:0"
+  },
+  "dataset": {
+    "sentences_per_language": 2000,
+    "speakers": {
+      "xiaoling": "voice_xiaoling"
+    }
+  },
+  "training": {
+    "batch_size": 4,
+    "epochs": 200
+  }
+}

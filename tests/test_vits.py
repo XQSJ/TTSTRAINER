@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 
@@ -22,7 +23,8 @@ from tts_trainer.vits.trainer import (_load_expanded_generator,
                                       _load_warm_start_generator,
                                       _resolve_frontend_contract)
 from tts_trainer.vits.exporter import (PiperInferenceWrapper, export_vits_onnx,
-                                       validate_onnx_runtime, voice_profiles)
+                                       validate_onnx_runtime, voice_profiles,
+                                       _export_sherpa_android_text_package)
 from tts_trainer.vits.runtime import OnnxTTS
 from tts_trainer.vits.validation import split_train_validation
 from tts_trainer.frontend import frontend_contract_from_config
@@ -41,6 +43,60 @@ def tiny_config():
 
 
 class VitsTests(unittest.TestCase):
+    def test_mobile_export_writes_per_language_sherpa_models(self):
+        import onnx
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "source-espeak"
+            data.mkdir()
+            (data / "phontab").write_bytes(b"test")
+            model = onnx.helper.make_model(
+                onnx.helper.make_graph([], "empty", [], []),
+            )
+            frontend = frontend_contract_from_config(
+                {
+                    "provider": "espeak-ng",
+                    "piper_compatible": True,
+                    "voices": {"en": "en-us", "fr": "fr-fr"},
+                },
+                ("en", "fr"),
+            ).to_dict()
+            profiles = voice_profiles(
+                {"voice": 0}, {"en": 0, "fr": 1},
+            )
+            with patch(
+                "tts_trainer.vits.exporter._find_espeak_data_dir",
+                return_value=data,
+            ):
+                result = _export_sherpa_android_text_package(
+                    onnx, model, root / "export", frontend, profiles,
+                    sample_rate=22050,
+                    tokens=["_", "^", "$", " ", "<unk>", "a"],
+                )
+            self.assertTrue(result["supported"])
+            self.assertTrue(
+                (root / "export/android_text/model-en.onnx").is_file(),
+            )
+            self.assertTrue(
+                (root / "export/android_text/model-fr.onnx").is_file(),
+            )
+            metadata = {
+                item.key: item.value for item in onnx.load(
+                    root / "export/android_text/model-fr.onnx",
+                ).metadata_props
+            }
+            self.assertEqual(metadata["voice"], "fr-fr")
+            self.assertTrue(
+                (root / "export/android_text/espeak-ng-data/phontab").is_file(),
+            )
+            self.assertEqual(
+                (root / "export/android_text/tokens.txt").read_text(
+                    encoding="utf-8",
+                ),
+                "_ 0\n^ 1\n$ 2\n3\na 5\n",
+            )
+
     def test_legacy_noise_checkpoint_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "untrained text prior"):
             require_checkpoint_format(1)

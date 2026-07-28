@@ -3,6 +3,11 @@
 用 Qwen3-TTS 生成训练数据，训练多语言、多音色 VITS，并导出移动端可用的
 ONNX 资源。
 
+> 要在 Android 上直接输入普通文本，请把训练配置的
+> `"preset": "quality"` 改为 `"preset": "mobile"`。`quality` 使用中日韩
+> 专用 G2P，音质/发音上限更高，但导出的 ONNX 不能单独在手机上处理普通文本；
+> `mobile` 使用可随包部署的统一 eSpeak 前端。两者 token 结构不同，不能训练后再切换。
+
 ## 三个配置概念
 
 | 名称 | 属于哪里 | 作用 |
@@ -705,12 +710,17 @@ runs/<model_name>/
 
 artifacts/<model_name>/
 ├── model.onnx
-├── model.json
+├── model.onnx.json
 ├── tokens.txt
 ├── tokens.json
-├── voices.json
 ├── frontend.json
-└── frontend.conformance.json
+├── frontend.conformance.json
+└── android_text/               # 仅 preset=mobile
+    ├── espeak-ng-data/
+    ├── model.weights            # 所有语言共享的一份权重
+    ├── model-zh.onnx
+    ├── model-en.onnx
+    └── ...
 ```
 
 务必保留 `runs/<model_name>/checkpoints/`。ONNX 用于推理，checkpoint 用于续训、增加
@@ -739,6 +749,40 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer verify-frontend \
 
 最终发布资源不只有 `model.onnx`。移动端还必须携带 tokens、语言/音色映射和
 `frontend.json` 指定的语言前端资源。
+
+### Android 直接输入普通文本
+
+最小配置与普通训练相同，只需选择 `mobile`：
+
+```json
+{
+  "task": "train",
+  "preset": "mobile",
+  "experiment": {
+    "name": "my_mobile_tts",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "cuda:0"
+  },
+  "dataset": {
+    "sentences_per_language": 2000,
+    "speakers": {
+      "xiaoling": "voice_xiaoling"
+    }
+  },
+  "training": {
+    "batch_size": 4,
+    "epochs": 200
+  }
+}
+```
+
+导出时会自动检查前端契约。只有统一 eSpeak 且采用 Piper token 插空规则的模型，
+`model.onnx.json` 中才会出现 `"text_input": {"supported": true}`，并生成
+`android_text/`。Java Demo 会检查这个字段，不会把不兼容模型静默读错。
+
+`mobile` 的中日韩 G2P 与 `quality` 不同，因此应分别做母语试听。若产品必须保留
+OpenJTalk、pypinyin/g2pk2 的专用发音质量，就需要在 App 内接入对应原生前端，
+不能只复制一个 ONNX 文件解决。
 
 ## 模型和前端资源
 
@@ -826,6 +870,8 @@ configs/models.json
 
 - `quality`：默认推荐，约 39M Generator，质量优先；
 - `compact`：小模型和流程验证，音质上限较低。
+- `mobile`：质量架构 + 七语统一 eSpeak/Piper 前端，可由 sherpa-onnx Android
+  直接接收普通文本；必须从头训练。
 
 不要只因为训练能运行就使用 `compact` 发布产品模型。
 
