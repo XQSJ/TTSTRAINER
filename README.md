@@ -903,8 +903,12 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer export-vits \
 
 - Qwen Teacher 的公开语言范围决定自动生成音频的语言范围。
 - 七语同音色质量仍取决于 Teacher 数据、文本覆盖和各语言发音评测。
-- VITS 音色相似不代表韵律一定自然；应试听 `runs/<name>/validation-audio/` 并选择
-  best checkpoint。
+- VITS 音色相似不代表韵律一定自然；应试听 `runs/<name>/validation-audio/`。默认
+  best checkpoint 按 `prior_mel` 选择文字先验最好的版本，不要因为 epoch 更新就默认
+  `last` 更好；长句时长比持续升高或 `aligned_prior_mel` 恶化表示训练正在退化。
+- 旧版 `preset=mobile` 曾把 Piper 的有效 blank token 当成不可训练的 batch padding。
+  更新项目后应从旧 checkpoint `warm_start` 若干轮，让 token 0 学习后再导出；新版会
+  拒绝直接导出尚未迁移的旧 mobile checkpoint。quality/专用 G2P 模型不在该问题范围。
 - 新增语言需要新前端和重新训练。
 - 结构变化通常不能直接 `resume`；高级迁移参考
   [sdp-warm-start.example.json](training_configs/sdp-warm-start.example.json)。

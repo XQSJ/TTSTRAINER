@@ -85,6 +85,10 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
         "selection": selection,
         "data_split": data_split,
         "quality_summary": quality_summary,
+        # Mobile/Piper uses token 0 as a valid inter-phoneme blank. Checkpoints
+        # created before this marker froze that row as padding and must learn it
+        # through an updated resume/warm-start before mobile export.
+        "learned_blank_token": True,
         "metrics": metrics or {},
     }
     metadata_tmp = destination / "metadata.json.tmp"

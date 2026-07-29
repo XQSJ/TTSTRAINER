@@ -25,6 +25,7 @@ from tts_trainer.vits.trainer import (_load_expanded_generator,
                                       _load_warm_start_generator,
                                       _resolve_frontend_contract)
 from tts_trainer.vits.exporter import (PiperInferenceWrapper, export_vits_onnx,
+                                       require_mobile_blank_semantics,
                                        validate_onnx_runtime, voice_profiles,
                                        _export_sherpa_android_text_package)
 from tts_trainer.vits.runtime import OnnxTTS
@@ -170,8 +171,8 @@ class VitsTests(unittest.TestCase):
     def test_text_embedding_scale_and_positions_are_well_conditioned(self):
         embedding = self.model.text_encoder.embedding.weight.detach()
         expected_std = self.config.hidden_channels ** -0.5
-        self.assertLess(abs(float(embedding[1:].std()) - expected_std), expected_std * 0.35)
-        self.assertTrue(torch.equal(embedding[0], torch.zeros_like(embedding[0])))
+        self.assertLess(abs(float(embedding.std()) - expected_std), expected_std * 0.35)
+        self.assertGreater(float(embedding[0].abs().sum()), 0.0)
 
         positions = sinusoidal_position_encoding(
             4, self.config.hidden_channels, device=embedding.device, dtype=embedding.dtype,
@@ -259,6 +260,32 @@ class VitsTests(unittest.TestCase):
         self.assertEqual(audio.ndim, 3)
         self.assertEqual(audio.shape[-1], int(lengths.max()) * self.config.hop_length)
         self.assertEqual(attention.shape[2], 3)
+
+    def test_valid_piper_blank_embedding_receives_gradient(self):
+        tokens = torch.tensor([[2, 4, 0, 5, 0, 3]])
+        lengths = torch.tensor([6])
+        condition = self.model.conditioning(torch.tensor([0]), torch.tensor([0]))
+        hidden, _, _, _ = self.model.text_encoder(tokens, lengths, condition)
+        hidden[0, 0, 2].backward()
+        gradient = self.model.text_encoder.embedding.weight.grad
+        self.assertIsNotNone(gradient)
+        self.assertGreater(float(gradient[0].abs().sum()), 0.0)
+
+    def test_legacy_mobile_checkpoint_requires_blank_retraining(self):
+        metadata = {
+            "frontend": {
+                "token_encoding": "piper-bos-phoneme-pad-eos-v1",
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "valid blank token"):
+            require_mobile_blank_semantics(metadata)
+        require_mobile_blank_semantics({
+            **metadata,
+            "learned_blank_token": True,
+        })
+        require_mobile_blank_semantics({
+            "frontend": {"token_encoding": "bos-phonemes-eos-v1"},
+        })
 
     def test_stochastic_duration_predictor_has_deterministic_zero_noise_mode(self):
         tokens = torch.tensor([[2, 4, 3]])

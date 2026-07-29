@@ -53,7 +53,7 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(config["experiment"]["languages"], ["zh", "en", "ja", "ko", "fr", "es", "pt"])
         self.assertEqual(config["language_registry"]["de"]["teacher"]["language"], "German")
         self.assertTrue(config["validation"]["enabled"])
-        self.assertEqual(config["validation"]["metric"], "total")
+        self.assertEqual(config["validation"]["metric"], "prior_mel")
         self.assertEqual(config["validation"]["export_checkpoint"], "best")
         self.assertTrue(config["quality"]["enabled"])
 

@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 SHERPA_ONNX_ANDROID_VERSION = "1.13.4"
 
 
+def require_mobile_blank_semantics(metadata: dict) -> None:
+    frontend = metadata.get("frontend") or {}
+    if (
+        frontend.get("token_encoding")
+        == "piper-bos-phoneme-pad-eos-v1"
+        and not bool(metadata.get("learned_blank_token", False))
+    ):
+        raise ValueError(
+            "this mobile checkpoint was trained while Piper's valid blank token "
+            "was frozen as batch padding; update TTSTRAINER, resume or warm-start "
+            "the checkpoint so token 0 can learn, then export the newly saved "
+            "checkpoint"
+        )
+
+
 class PiperInferenceWrapper(nn.Module):
     """Expose standard Piper inputs while retaining two internal conditions.
 
@@ -201,6 +216,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     output_dir = Path(output_dir); output_dir.mkdir(parents=True, exist_ok=True)
     metadata = json.loads((checkpoint_dir / "metadata.json").read_text(encoding="utf-8"))
     require_checkpoint_format(int(metadata["format"]))
+    require_mobile_blank_semantics(metadata)
     config = _config_from_metadata(metadata)
     logger.info("ONNX export step=1/5 action=load_checkpoint path=%s", checkpoint_dir)
     generator = MultilingualVITS(config)

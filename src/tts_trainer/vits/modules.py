@@ -62,13 +62,14 @@ class TextEncoder(nn.Module):
     def __init__(self, vocab_size: int, hidden_channels: int, latent_channels: int,
                  condition_channels: int, layers: int, heads: int):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, hidden_channels, padding_idx=0)
+        # Token 0 is both the batch-padding value and Piper's *valid* inter-
+        # phoneme blank. Sequence masks already remove batch padding, so the
+        # embedding must stay learnable for mobile/Piper training.
+        self.embedding = nn.Embedding(vocab_size, hidden_channels)
         # VITS scales embeddings by sqrt(hidden), so their initialization must
         # use hidden**-0.5. PyTorch's default N(0, 1) initialization would make
         # the first attention layer see values roughly sqrt(hidden) too large.
         nn.init.normal_(self.embedding.weight, 0.0, hidden_channels ** -0.5)
-        with torch.no_grad():
-            self.embedding.weight[0].zero_()
         self.condition = nn.Linear(condition_channels, hidden_channels)
         self.encoder = nn.ModuleList(SelfAttentionBlock(hidden_channels, heads) for _ in range(layers))
         self.projection = nn.Conv1d(hidden_channels, latent_channels * 2, 1)
