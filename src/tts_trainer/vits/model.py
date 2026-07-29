@@ -12,6 +12,23 @@ from .modules import (GlobalConditioning, PosteriorEncoder,
                       maximum_path, slice_latent, slice_latent_at)
 
 
+def integer_durations(
+    log_duration: torch.Tensor,
+    text_mask: torch.Tensor,
+    length_scale: float | torch.Tensor,
+) -> torch.Tensor:
+    """Convert predicted durations without systematically lengthening speech.
+
+    ``ceil`` turns a prediction just above one frame into two frames. Mobile
+    Piper sequences contain many one-frame blank/phoneme tokens, so that bias
+    can almost double a sentence. Nearest-integer conversion preserves the
+    learned MAS duration and still assigns every valid token at least one frame.
+    """
+    valid = text_mask.to(torch.bool)
+    rounded = torch.round(torch.exp(log_duration) * length_scale).to(torch.long)
+    return torch.where(valid, rounded.clamp_min(1), torch.zeros_like(rounded))
+
+
 @dataclass
 class VitsTrainingOutput:
     audio: torch.Tensor
@@ -105,7 +122,7 @@ class MultilingualVITS(nn.Module):
         log_duration = self.duration_predictor.sample(
             text_hidden, text_mask, g, duration_noise_scale,
         )
-        durations = torch.ceil(torch.exp(log_duration) * text_mask * length_scale).long().clamp_min(0)
+        durations = integer_durations(log_duration, text_mask, length_scale)
         frame_lengths = durations.sum((1, 2)).clamp_min(1).clamp_max(max_frames)
         frames = int(frame_lengths.max().item())
         attention = duration_path(durations, frames)
@@ -146,9 +163,7 @@ class MultilingualVITS(nn.Module):
         log_duration = self.duration_predictor.sample(
             text_hidden, text_mask, g, scales[2],
         )
-        durations = torch.ceil(
-            torch.exp(log_duration) * text_mask * scales[1]
-        ).to(torch.long).clamp_min(0)
+        durations = integer_durations(log_duration, text_mask, scales[1])
         frame_lengths = durations.sum((1, 2)).clamp_min(1).clamp_max(max_frames)
         frames = frame_lengths.max()
         attention = duration_path(durations, frames)

@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from ..frontend import FrontendContract, FrontendRouter, frontend_from_contract
+from ..frontend.contract import PIPER_TOKEN_ENCODING
 
 
 class OnnxTTS:
@@ -30,7 +31,21 @@ class OnnxTTS:
         unknown = [unit for unit in units if unit not in self.token_ids]
         if unknown:
             raise ValueError(f"tokens not present in model vocabulary: {sorted(set(unknown))!r}")
-        return np.asarray([[self.token_ids["^"], *(self.token_ids[unit] for unit in units), self.token_ids["$"]]], dtype=np.int64)
+        encoded = [self.token_ids[unit] for unit in units]
+        if (
+            self.frontend_contract
+            and self.frontend_contract.token_encoding == PIPER_TOKEN_ENCODING
+        ):
+            pad = self.token_ids["_"]
+            encoded = [
+                value
+                for token_id in encoded
+                for value in (token_id, pad)
+            ]
+        return np.asarray(
+            [[self.token_ids["^"], *encoded, self.token_ids["$"]]],
+            dtype=np.int64,
+        )
 
     def synthesize_units(self, units: tuple[str, ...], *, language: str, speaker: str,
                          noise_scale: float = 0.667, length_scale: float = 1.0,

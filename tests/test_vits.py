@@ -15,6 +15,7 @@ from tts_trainer.checkpoints import (load_training_checkpoint,
                                      require_warm_start_checkpoint_format,
                                      save_training_checkpoint)
 from tts_trainer.vits import MultilingualVITS, VitsConfig, VitsDiscriminator
+from tts_trainer.vits.model import integer_durations
 from tts_trainer.vits.data import (AudioConfig, inspect_alignment_item,
                                    slice_waveforms)
 from tts_trainer.vits.losses import discriminator_loss, generator_adversarial_loss
@@ -28,7 +29,8 @@ from tts_trainer.vits.exporter import (PiperInferenceWrapper, export_vits_onnx,
                                        _export_sherpa_android_text_package)
 from tts_trainer.vits.runtime import OnnxTTS
 from tts_trainer.vits.validation import split_train_validation
-from tts_trainer.frontend import frontend_contract_from_config
+from tts_trainer.frontend import FrontendContract, frontend_contract_from_config
+from tts_trainer.frontend.contract import PIPER_TOKEN_ENCODING
 from tts_trainer.manifest import Item
 from tts_trainer.text import Vocabulary
 
@@ -292,6 +294,12 @@ class VitsTests(unittest.TestCase):
         self.assertGreater(float(gradient[0].abs().sum()), 0.0)
         self.assertGreater(float(gradient[1].abs().sum()), 0.0)
 
+    def test_integer_durations_do_not_double_one_frame_tokens(self):
+        log_duration = torch.log(torch.tensor([[[1.01, 1.49, 1.51, 2.49]]]))
+        mask = torch.tensor([[[1.0, 1.0, 1.0, 0.0]]])
+        actual = integer_durations(log_duration, mask, 1.0)
+        self.assertTrue(torch.equal(actual, torch.tensor([[[1, 1, 2, 0]]])))
+
     def test_piper_sid_splits_into_language_and_speaker(self):
         wrapper = PiperInferenceWrapper(self.model.eval())
         captured = {}
@@ -486,6 +494,13 @@ class VitsTests(unittest.TestCase):
             shape = validate_onnx_runtime(target)
             self.assertEqual(shape[0:2], (1, 1))
             runtime = OnnxTTS(target.parent)
+            self.assertEqual(runtime.encode(("a",)).tolist(), [[1, 5, 2]])
+            runtime.frontend_contract = FrontendContract(
+                provider="espeak-ng",
+                languages={"en": {"provider": "espeak-ng", "voice": "en-us"}},
+                token_encoding=PIPER_TOKEN_ENCODING,
+            )
+            self.assertEqual(runtime.encode(("a",)).tolist(), [[1, 5, 0, 2]])
             audio = runtime.synthesize_units(
                 ("a",), language="en", speaker="voice_02",
                 noise_scale=0.0, duration_noise_scale=0.0,
