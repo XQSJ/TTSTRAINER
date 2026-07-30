@@ -155,7 +155,7 @@ class FrontendTests(unittest.TestCase):
         self.assertEqual(router.declared.provider, "espeak-ng")
         self.assertEqual(
             router.declared.token_encoding,
-            "piper-bos-phoneme-pad-eos-v1",
+            "piper-bos-pad-phoneme-pad-eos-v2",
         )
         self.assertEqual(router.declared.languages["zh"]["voice"], "cmn")
         self.assertEqual(router.declared.languages["ja"]["voice"], "ja")
@@ -249,6 +249,7 @@ class FrontendTests(unittest.TestCase):
             conformance["cases"][0]["token_ids"],
             [
                 vocabulary.ids["^"],
+                vocabulary.ids["_"],
                 vocabulary.ids["h"], vocabulary.ids["_"],
                 vocabulary.ids["ə"], vocabulary.ids["_"],
                 vocabulary.ids["$"],

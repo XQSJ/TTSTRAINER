@@ -31,7 +31,8 @@ from tts_trainer.vits.exporter import (PiperInferenceWrapper, export_vits_onnx,
 from tts_trainer.vits.runtime import OnnxTTS
 from tts_trainer.vits.validation import split_train_validation
 from tts_trainer.frontend import FrontendContract, frontend_contract_from_config
-from tts_trainer.frontend.contract import PIPER_TOKEN_ENCODING
+from tts_trainer.frontend.contract import (LEGACY_PIPER_TOKEN_ENCODING,
+                                           PIPER_TOKEN_ENCODING)
 from tts_trainer.manifest import Item
 from tts_trainer.text import Vocabulary
 
@@ -69,8 +70,8 @@ class VitsTests(unittest.TestCase):
                 piper_compatible=True,
             )
             self.assertEqual(result["audio_frames"], 5)
-            self.assertEqual(result["text_tokens"], 8)
-            self.assertEqual(result["frame_deficit"], 3)
+            self.assertEqual(result["text_tokens"], 9)
+            self.assertEqual(result["frame_deficit"], 4)
             self.assertFalse(result["passed"])
 
     def test_mobile_export_writes_per_language_sherpa_models(self):
@@ -117,6 +118,7 @@ class VitsTests(unittest.TestCase):
                 ).metadata_props
             }
             self.assertEqual(metadata["voice"], "fr-fr")
+            self.assertEqual(metadata["add_blank"], "0")
             self.assertTrue(
                 (root / "export/android_text/espeak-ng-data/phontab").is_file(),
             )
@@ -293,13 +295,17 @@ class VitsTests(unittest.TestCase):
     def test_legacy_mobile_checkpoint_requires_blank_retraining(self):
         metadata = {
             "frontend": {
-                "token_encoding": "piper-bos-phoneme-pad-eos-v1",
+                "token_encoding": LEGACY_PIPER_TOKEN_ENCODING,
             },
         }
-        with self.assertRaisesRegex(ValueError, "valid blank token"):
+        with self.assertRaisesRegex(ValueError, "omitted the blank immediately after BOS"):
             require_mobile_blank_semantics(metadata)
+        with self.assertRaisesRegex(ValueError, "valid blank token"):
+            require_mobile_blank_semantics({
+                "frontend": {"token_encoding": PIPER_TOKEN_ENCODING},
+            })
         require_mobile_blank_semantics({
-            **metadata,
+            "frontend": {"token_encoding": PIPER_TOKEN_ENCODING},
             "learned_blank_token": True,
         })
         require_mobile_blank_semantics({
@@ -359,6 +365,31 @@ class VitsTests(unittest.TestCase):
         self.assertEqual(captured["language"].item(), 2)
         self.assertEqual(captured["speaker"].item(), 1)
         self.assertEqual(output.ndim, 3)
+
+    def test_mobile_export_adapter_inserts_canonical_blank_after_bos(self):
+        wrapper = PiperInferenceWrapper(
+            self.model.eval(), insert_pad_after_bos=True,
+        )
+        captured = {}
+        original = self.model.infer_deploy
+
+        def capture(tokens, lengths, language_ids, speaker_ids, scales):
+            captured["tokens"] = tokens.clone()
+            captured["lengths"] = lengths.clone()
+            return original(
+                tokens, lengths, language_ids, speaker_ids, scales,
+                max_frames=20,
+            )
+
+        self.model.infer_deploy = capture
+        wrapper(
+            torch.tensor([[1, 5, 0, 2]]), torch.tensor([4]),
+            torch.tensor([0.0, 1.0, 0.0]), torch.tensor([0]),
+        )
+        self.assertEqual(
+            captured["tokens"].tolist(), [[1, 0, 5, 0, 2]],
+        )
+        self.assertEqual(captured["lengths"].tolist(), [5])
 
     def test_voice_profile_mapping(self):
         profiles = voice_profiles({"a": 0, "b": 1}, {"zh": 0, "en": 1})
@@ -546,9 +577,78 @@ class VitsTests(unittest.TestCase):
                 languages={"en": {"provider": "espeak-ng", "voice": "en-us"}},
                 token_encoding=PIPER_TOKEN_ENCODING,
             )
-            self.assertEqual(runtime.encode(("a",)).tolist(), [[1, 5, 0, 2]])
+            self.assertEqual(runtime.encode(("a",)).tolist(), [[1, 0, 5, 0, 2]])
             audio = runtime.synthesize_units(
                 ("a",), language="en", speaker="voice_02",
+                noise_scale=0.0, duration_noise_scale=0.0,
+            )
+            self.assertGreater(audio.shape[0], 0)
+
+    def test_mobile_onnx_adapts_sherpa_1134_wire_tokens(self):
+        discriminator = VitsDiscriminator(periods=(2,))
+        optimizer_g = torch.optim.AdamW(self.model.parameters())
+        optimizer_d = torch.optim.AdamW(discriminator.parameters())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "checkpoint"
+            espeak_data = root / "espeak-ng-data"
+            espeak_data.mkdir()
+            (espeak_data / "phontab").write_bytes(b"test")
+            mobile_frontend = frontend_contract_from_config(
+                {
+                    "provider": "espeak-ng",
+                    "piper_compatible": True,
+                    "voices": {"en": "en-us"},
+                },
+                ("en",),
+                engine_version="eSpeak NG mobile test",
+            )
+            save_training_checkpoint(
+                checkpoint, generator=self.model, discriminator=discriminator,
+                optimizer_g=optimizer_g, optimizer_d=optimizer_d,
+                epoch=1, global_step=1, config=self.config,
+                language_map={"en": 0},
+                speaker_map={"voice_01": 0},
+                tokens=["_", "^", "$", " ", "<unk>", "a"],
+                frontend=mobile_frontend.to_dict(),
+                frontend_conformance={
+                    "format": 1,
+                    "cases_per_language": 1,
+                    "languages": ["en"],
+                    "piper_compatible": True,
+                    "cases": [{
+                        "language": "en", "language_id": 0, "text": "a",
+                        "phonemes": ["a"],
+                        "token_ids": [1, 0, 5, 0, 2],
+                    }],
+                },
+            )
+            with patch(
+                "tts_trainer.vits.exporter._find_espeak_data_dir",
+                return_value=espeak_data,
+            ):
+                target = export_vits_onnx(
+                    checkpoint, root / "export", sample_rate=8000,
+                )
+            deployment = json.loads(
+                (target.parent / "model.onnx.json").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(
+                deployment["model_token_encoding"], PIPER_TOKEN_ENCODING,
+            )
+            self.assertEqual(
+                deployment["wire_token_encoding"],
+                LEGACY_PIPER_TOKEN_ENCODING,
+            )
+            self.assertEqual(
+                deployment["input_adapter"], "insert-pad-after-bos-v1",
+            )
+            runtime = OnnxTTS(target.parent)
+            # Match sherpa-onnx 1.13.4's historical wire sequence. The ONNX
+            # adapter inserts the missing blank before invoking the VITS core.
+            self.assertEqual(runtime.encode(("a",)).tolist(), [[1, 5, 0, 2]])
+            audio = runtime.synthesize_units(
+                ("a",), language="en", speaker="voice_01",
                 noise_scale=0.0, duration_noise_scale=0.0,
             )
             self.assertGreater(audio.shape[0], 0)

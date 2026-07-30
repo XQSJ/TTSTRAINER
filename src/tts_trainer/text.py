@@ -44,6 +44,11 @@ class Vocabulary:
                 for token_id in encoded
                 for value in (token_id, self.ids[PAD])
             ]
+            # Piper frames BOS like every other input symbol. This leading
+            # blank is semantically significant and must match deployment.
+            return [
+                self.ids[BOS], self.ids[PAD], *encoded, self.ids[EOS],
+            ]
         return [self.ids[BOS], *encoded, self.ids[EOS]]
 
     def encode_item(self, item: Item, *, piper_compatible: bool = False) -> list[int]:

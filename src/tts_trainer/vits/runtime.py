@@ -6,7 +6,8 @@ from pathlib import Path
 import numpy as np
 
 from ..frontend import FrontendContract, FrontendRouter, frontend_from_contract
-from ..frontend.contract import PIPER_TOKEN_ENCODING
+from ..frontend.contract import (LEGACY_PIPER_TOKEN_ENCODING,
+                                 PIPER_TOKEN_ENCODING)
 
 
 class OnnxTTS:
@@ -22,6 +23,9 @@ class OnnxTTS:
         tokens = json.loads((self.model_dir / "tokens.json").read_text(encoding="utf-8"))["tokens"]
         self.token_ids = {token: index for index, token in enumerate(tokens)}
         self.sample_rate = int(config["sample_rate"])
+        self.wire_token_encoding = str(
+            config.get("wire_token_encoding", "")
+        )
         frontend_raw = config.get("frontend")
         self.frontend_contract = FrontendContract.from_dict(frontend_raw) if isinstance(frontend_raw, dict) else None
         self.profiles = {(row["speaker"], row["language"]): row["sid"] for row in config["voice_profiles"]}
@@ -32,7 +36,14 @@ class OnnxTTS:
         if unknown:
             raise ValueError(f"tokens not present in model vocabulary: {sorted(set(unknown))!r}")
         encoded = [self.token_ids[unit] for unit in units]
-        if (
+        if self.wire_token_encoding == LEGACY_PIPER_TOKEN_ENCODING:
+            pad = self.token_ids["_"]
+            encoded = [
+                value
+                for token_id in encoded
+                for value in (token_id, pad)
+            ]
+        elif (
             self.frontend_contract
             and self.frontend_contract.token_encoding == PIPER_TOKEN_ENCODING
         ):
@@ -42,6 +53,7 @@ class OnnxTTS:
                 for token_id in encoded
                 for value in (token_id, pad)
             ]
+            encoded.insert(0, pad)
         return np.asarray(
             [[self.token_ids["^"], *encoded, self.token_ids["$"]]],
             dtype=np.int64,

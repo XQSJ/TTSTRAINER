@@ -14,6 +14,9 @@ from torch import nn
 
 from ..checkpoints import require_checkpoint_format
 from ..frontend import frontend_contract_from_config
+from ..frontend.contract import (DIRECT_TOKEN_ENCODING,
+                                 LEGACY_PIPER_TOKEN_ENCODING,
+                                 PIPER_TOKEN_ENCODING)
 from ..frontend.conformance import save_frontend_conformance
 from .config import VitsConfig
 from .model import MultilingualVITS
@@ -25,9 +28,15 @@ SHERPA_ONNX_ANDROID_VERSION = "1.13.4"
 
 def require_mobile_blank_semantics(metadata: dict) -> None:
     frontend = metadata.get("frontend") or {}
+    if frontend.get("token_encoding") == LEGACY_PIPER_TOKEN_ENCODING:
+        raise ValueError(
+            "this mobile checkpoint uses the legacy Piper sequence that omitted "
+            "the blank immediately after BOS; start a new preset=mobile model "
+            "from scratch with the corrected v2 frontend contract"
+        )
     if (
         frontend.get("token_encoding")
-        == "piper-bos-phoneme-pad-eos-v1"
+        == PIPER_TOKEN_ENCODING
         and not bool(metadata.get("learned_blank_token", False))
     ):
         raise ValueError(
@@ -45,13 +54,25 @@ class PiperInferenceWrapper(nn.Module):
       speaker_id = sid // num_languages
       language_id = sid % num_languages
     """
-    def __init__(self, model: MultilingualVITS):
+    def __init__(
+        self, model: MultilingualVITS, *,
+        insert_pad_after_bos: bool = False,
+    ):
         super().__init__()
         self.model = model
         self.num_languages = model.config.num_languages
+        self.insert_pad_after_bos = insert_pad_after_bos
 
     def forward(self, input: torch.Tensor, input_lengths: torch.Tensor,
                 scales: torch.Tensor, sid: torch.Tensor):
+        if self.insert_pad_after_bos:
+            # sherpa-onnx 1.13.4 emits the historical
+            # BOS,(phone,PAD)*,EOS wire sequence. Normalize it inside the
+            # exported graph to the canonical BOS,PAD,(phone,PAD)*,EOS
+            # sequence used to train the mobile model.
+            pad = torch.zeros_like(input[:, :1])
+            input = torch.cat((input[:, :1], pad, input[:, 1:]), dim=1)
+            input_lengths = input_lengths + 1
         sid = sid.to(torch.long)
         language_ids = torch.remainder(sid, self.num_languages)
         speaker_ids = torch.div(sid, self.num_languages, rounding_mode="floor")
@@ -126,7 +147,7 @@ def _export_sherpa_android_text_package(
     """Write language-specific metadata wrappers for sherpa's eSpeak frontend."""
     if frontend.get("provider") != "espeak-ng" or frontend.get(
         "token_encoding",
-    ) != "piper-bos-phoneme-pad-eos-v1":
+    ) != PIPER_TOKEN_ENCODING:
         return {
             "supported": False,
             "reason": (
@@ -217,12 +238,19 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     metadata = json.loads((checkpoint_dir / "metadata.json").read_text(encoding="utf-8"))
     require_checkpoint_format(int(metadata["format"]))
     require_mobile_blank_semantics(metadata)
+    frontend = metadata.get("frontend") or frontend_contract_from_config(
+        {}, tuple(metadata["language_map"])
+    ).to_dict()
+    mobile_piper = frontend.get("token_encoding") == PIPER_TOKEN_ENCODING
     config = _config_from_metadata(metadata)
     logger.info("ONNX export step=1/5 action=load_checkpoint path=%s", checkpoint_dir)
     generator = MultilingualVITS(config)
     state = torch.load(checkpoint_dir / "training-state.pt", map_location="cpu", weights_only=False)
     generator.load_state_dict(state["generator"])
-    wrapper = PiperInferenceWrapper(generator.eval())
+    wrapper = PiperInferenceWrapper(
+        generator.eval(),
+        insert_pad_after_bos=mobile_piper,
+    )
     target = output_dir / "model.onnx"
     tokens = torch.tensor([[2, 4, 5, 3]], dtype=torch.long)
     lengths = torch.tensor([4], dtype=torch.long)
@@ -246,9 +274,6 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     logger.info("ONNX export step=3/5 action=check_model size_bytes=%d", target.stat().st_size)
     model = onnx.load(str(target)); onnx.checker.check_model(model)
     profiles = voice_profiles(metadata["speaker_map"], metadata["language_map"])
-    frontend = metadata.get("frontend") or frontend_contract_from_config(
-        {}, tuple(metadata["language_map"])
-    ).to_dict()
     text_input = _export_sherpa_android_text_package(
         onnx, model, output_dir, frontend, profiles, sample_rate=sample_rate,
         tokens=metadata["tokens"],
@@ -268,6 +293,18 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         },
         "sid_formula": "speaker_id * num_languages + language_id",
         "frontend": frontend,
+        "model_token_encoding": frontend.get(
+            "token_encoding", DIRECT_TOKEN_ENCODING,
+        ),
+        "wire_token_encoding": (
+            LEGACY_PIPER_TOKEN_ENCODING
+            if mobile_piper else frontend.get(
+                "token_encoding", DIRECT_TOKEN_ENCODING,
+            )
+        ),
+        "input_adapter": (
+            "insert-pad-after-bos-v1" if mobile_piper else "none"
+        ),
         "frontend_note": "application supplies matching phoneme ids; stock sherpa multilingual switching requires an adapter",
         "text_input": text_input,
         "num_languages": config.num_languages,

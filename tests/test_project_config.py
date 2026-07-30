@@ -39,6 +39,27 @@ class ProjectConfigTests(unittest.TestCase):
             )
             self.assertEqual(resolved["validation"]["every_epochs"], 5)
 
+    def test_mobile_preset_is_isolated_from_quality_frontend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            quality_path = root / "quality.json"
+            mobile_path = root / "mobile.json"
+            common = {
+                "experiment": {"name": "frontend-check", "languages": ["zh", "en"]},
+            }
+            quality_path.write_text(json.dumps({
+                **common, "preset": "quality",
+            }), encoding="utf-8")
+            mobile_path.write_text(json.dumps({
+                **common, "preset": "mobile",
+            }), encoding="utf-8")
+            quality = load_project_config(quality_path)
+            mobile = load_project_config(mobile_path)
+            self.assertEqual(quality["frontend"]["provider"], "language-router")
+            self.assertFalse(quality["frontend"].get("piper_compatible", False))
+            self.assertEqual(mobile["frontend"]["provider"], "espeak-ng")
+            self.assertTrue(mobile["frontend"]["piper_compatible"])
+
     def test_rejects_unknown_public_preset(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "invalid.json"

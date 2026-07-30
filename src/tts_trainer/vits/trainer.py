@@ -22,6 +22,7 @@ from ..experiments import prepare_experiment, resolve_experiment
 from ..frontend import (FrontendContract, frontend_contract_from_config,
                         frontend_lock_path, load_frontend_contract,
                         build_frontend_conformance)
+from ..frontend.contract import PIPER_TOKEN_ENCODING
 from ..manifest import validate_manifest
 from ..logging_utils import (TerminalProgress, configure_logging_from_config,
                              format_duration, progress_bar)
@@ -299,7 +300,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         ])
     piper_compatible = (
         frontend_contract.get("token_encoding")
-        == "piper-bos-phoneme-pad-eos-v1"
+        == PIPER_TOKEN_ENCODING
     )
     quality_config = raw.get("quality", {})
     quality_summary = None

@@ -12,7 +12,12 @@ FRONTEND_CONTRACT_FORMAT = 1
 NORMALIZATION_CONTRACT = "unicode-nfkc-collapse-whitespace-v1"
 TOKEN_CONTRACT = "routed-phoneme-units-v1"
 DIRECT_TOKEN_ENCODING = "bos-phonemes-eos-v1"
-PIPER_TOKEN_ENCODING = "piper-bos-phoneme-pad-eos-v1"
+# Piper's canonical phonemes_to_ids sequence is:
+#   BOS, PAD, (phoneme, PAD)*, EOS
+# Version 1 of TTSTRAINER (and sherpa-onnx 1.13.4) omitted the PAD after BOS.
+# Keep the old name solely so old mobile checkpoints can be rejected clearly.
+LEGACY_PIPER_TOKEN_ENCODING = "piper-bos-phoneme-pad-eos-v1"
+PIPER_TOKEN_ENCODING = "piper-bos-pad-phoneme-pad-eos-v2"
 MOBILE_ESPEAK_VOICES = {
     "zh": "cmn",
     "en": "en-us",

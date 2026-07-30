@@ -27,19 +27,46 @@ output:        float [B, 1, N]
 `experiment.languages` 决定。Python 参考实现位于
 `tts_trainer.vits.runtime.OnnxTTS`。
 
-## 为什么还不能直接称为 stock sherpa 多语模型
+## mobile 与 quality 相互独立
 
-sherpa-onnx 的 Piper/VITS 前端从 ONNX metadata 读取一个 eSpeak `voice`，然后
-把原始文本转为 token。我们的模型在一次加载中需要根据每条请求切换多个
-language profile；stock VITS 配置没有对应的逐请求 language 参数。因此：
+`quality` 保留逐语言专用前端：
 
-- ONNX 推理图本身可在移动端 ONNX Runtime 运行；
-- App 必须先按 language 生成与训练相同的 phoneme unit；或者
-- 给 sherpa-onnx VITS 前端增加 `language/profile` 路由；或者
-- 导出多个固定语言入口，但这样会重复模型权重。
+```text
+zh -> Piper Plus
+ja -> Open JTalk
+ko -> Piper Plus
+en/fr/es/pt/... -> eSpeak NG
+```
 
-项目采用“一个 ONNX 核心 + App/native 前端路由”作为默认方向。完成 native
-适配前，不在模型中写入错误的单语言 Piper metadata。
+`mobile` 单独使用 eSpeak/Piper，以便 stock sherpa-onnx 在 Android 上直接接收
+普通文本。两者不会共享或覆盖 frontend contract。训练数据 WAV 可以复用，
+checkpoint 不可以跨 preset 续训。
+
+mobile 训练核心使用 Piper 官方序列：
+
+```text
+BOS, PAD, phoneme_1, PAD, phoneme_2, PAD, ..., EOS
+```
+
+项目当前固定的 sherpa-onnx 1.13.4 会产生旧 wire 序列：
+
+```text
+BOS, phoneme_1, PAD, phoneme_2, PAD, ..., EOS
+```
+
+因此 mobile ONNX 导出图内置 `insert-pad-after-bos-v1` 输入适配器。导出的
+`model.onnx.json` 会同时记录 `wire_token_encoding`、`model_token_encoding`
+和 `input_adapter`。不要替换 sherpa 运行时版本后跳过一致性验证。
+
+## 多语言入口
+
+mobile 导出会为每种语言生成一个很小的 ONNX metadata wrapper；所有 wrapper
+引用同一个 `model.weights`，不会重复保存主体权重。App 根据语言选择
+`android_text/model-<language>.onnx`，并继续使用统一的 tokens 与
+eSpeak 数据目录。
+
+quality 导出仍采用“一个 ONNX 核心 + App/native 专用前端路由”，不强制经过
+上述 mobile wrapper。
 
 ## 前端一致性
 

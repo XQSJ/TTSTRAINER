@@ -131,3 +131,13 @@ sid = speaker_id * num_languages + language_id
 同目录的 `frontend.json` 告诉 App 每种语言应调用哪个 provider 及 voice/词典；
 移动端必须得到与训练 metadata 相同的 token unit 后，再调用同一个 ONNX。
 `frontend.conformance.json` 用于在发布前证明这一映射确实一致。
+
+`preset=mobile` 使用独立的 Piper v2 token contract：
+
+```text
+BOS, PAD, (phoneme, PAD)*, EOS
+```
+
+训练、验证和 PyTorch 诊断均使用该 canonical 序列。为兼容项目固定的
+sherpa-onnx 1.13.4，ONNX 导出 wrapper 会把其旧 wire 输入在 BOS 后补一个 PAD，
+再交给 VITS 核心。`preset=quality` 不启用该适配器，仍保留逐语言专用 G2P。

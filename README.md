@@ -870,8 +870,15 @@ configs/models.json
 
 - `quality`：默认推荐，约 39M Generator，质量优先；
 - `compact`：小模型和流程验证，音质上限较低。
-- `mobile`：质量架构 + 七语统一 eSpeak/Piper 前端，可由 sherpa-onnx Android
-  直接接收普通文本；必须从头训练。
+- `mobile`：独立的移动部署链路。模型尺寸仍采用质量架构，但文本前端改为统一
+  eSpeak/Piper，训练使用官方 canonical
+  `BOS,PAD,(phoneme,PAD)*,EOS` 序列；导出模型内置 sherpa-onnx 1.13.4
+  输入适配，可在 Android 直接接收普通文本。必须从头训练。
+
+`quality` 和 `mobile` 的前端契约彼此隔离：选择 `mobile` 不会修改
+`quality` 的中文 Piper Plus、日语 Open JTalk、韩语 Piper Plus 路由。
+不要在两个 preset 之间 `resume` 或 `warm_start`，音频数据可以复用，但模型必须
+分别训练。
 
 不要只因为训练能运行就使用 `compact` 发布产品模型。
 
@@ -906,9 +913,9 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer export-vits \
 - VITS 音色相似不代表韵律一定自然；应试听 `runs/<name>/validation-audio/`。默认
   best checkpoint 按 `prior_mel` 选择文字先验最好的版本，不要因为 epoch 更新就默认
   `last` 更好；长句时长比持续升高或 `aligned_prior_mel` 恶化表示训练正在退化。
-- 旧版 `preset=mobile` 曾把 Piper 的有效 blank token 当成不可训练的 batch padding。
-  更新项目后应从旧 checkpoint `warm_start` 若干轮，让 token 0 学习后再导出；新版会
-  拒绝直接导出尚未迁移的旧 mobile checkpoint。quality/专用 G2P 模型不在该问题范围。
+- 旧版 `preset=mobile` 使用了缺少 BOS 后 blank 的历史 Piper 序列。新版会明确拒绝
+  续训或导出旧 mobile checkpoint；请保留原始 WAV/文本并使用新的
+  `experiment.name` 从零训练。`quality` checkpoint 和专用 G2P 数据不受影响。
 - 新增语言需要新前端和重新训练。
 - 结构变化通常不能直接 `resume`；高级迁移参考
   [sdp-warm-start.example.json](training_configs/sdp-warm-start.example.json)。

@@ -1,5 +1,5 @@
 {
-  "_comment": "Android 可直接输入普通文本的七语模型 / Seven-language Android model with direct text input",
+  "_comment": "独立 mobile 模型：Android 可直接输入普通文本；不要从 quality/旧 mobile checkpoint 续训 / Independent mobile model with direct Android text input; do not resume from quality or legacy-mobile checkpoints",
   "task": "train",
   "preset": "mobile",
   "experiment": {
