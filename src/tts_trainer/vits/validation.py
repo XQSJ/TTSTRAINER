@@ -201,9 +201,16 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                     output.audio_mask[0:1, :, :target_frames],
                     batch["language_ids"][0:1], batch["speaker_ids"][0:1],
                 )
+                full_posterior = generator.decode_posterior(
+                    output.latent[0:1, :, :target_frames],
+                    output.audio_mask[0:1, :, :target_frames],
+                    batch["language_ids"][0:1], batch["speaker_ids"][0:1],
+                )
                 audio_files = {
                     "target.wav": batch["waveforms"][0, 0, :target_samples],
-                    "posterior-reconstruction.wav": output.audio[0, 0],
+                    "posterior-reconstruction.wav": full_posterior[
+                        0, 0, :target_frames * audio_config.hop_length
+                    ],
                     "aligned-text-prior.wav": full_prior[0, 0, :target_frames * audio_config.hop_length],
                     "text-only-inference.wav": inferred[0, 0],
                     "text-only-deterministic.wav": deterministic[0, 0],

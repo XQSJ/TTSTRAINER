@@ -34,6 +34,9 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(resolved["training"]["log_every_steps"], 50)
             self.assertEqual(resolved["training"]["checkpoint_every_steps"], 10000)
             self.assertEqual(resolved["training"]["checkpoint_every_epochs"], 5)
+            self.assertEqual(
+                resolved["training"]["aligned_prior_mel_weight"], 10.0,
+            )
             self.assertEqual(resolved["validation"]["every_epochs"], 5)
 
     def test_rejects_unknown_public_preset(self):

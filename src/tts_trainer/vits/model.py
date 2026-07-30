@@ -134,20 +134,28 @@ class MultilingualVITS(nn.Module):
         latent, _ = self.flow(latent_prior, audio_mask, g, reverse=True)
         return self.decoder(latent, g), frame_lengths, attention
 
-    @torch.no_grad()
     def decode_aligned_prior(self, prior_mean: torch.Tensor, audio_mask: torch.Tensor,
                              language_ids: torch.Tensor, speaker_ids: torch.Tensor,
                              starts: torch.Tensor | None = None) -> torch.Tensor:
         """Decode the text prior under an oracle MAS alignment.
 
         This isolates text-prior/flow quality from duration prediction. It is
-        used only for validation diagnostics and checkpoint selection.
+        also used by the aligned-prior auxiliary training loss. Validation
+        already runs under ``torch.no_grad()``, while training must retain this
+        graph so the text encoder and inverse flow receive a direct acoustic
+        signal instead of relying only on KL divergence.
         """
         g = self.conditioning(language_ids, speaker_ids)
         latent, _ = self.flow(prior_mean * audio_mask, audio_mask, g, reverse=True)
         if starts is not None:
             latent = slice_latent_at(latent, starts, self.config.segment_frames)
         return self.decoder(latent, g)
+
+    def decode_posterior(self, latent: torch.Tensor, audio_mask: torch.Tensor,
+                         language_ids: torch.Tensor, speaker_ids: torch.Tensor) -> torch.Tensor:
+        """Decode a full posterior latent for validation diagnostics."""
+        g = self.conditioning(language_ids, speaker_ids)
+        return self.decoder(latent * audio_mask, g)
 
     def infer_deploy(self, tokens: torch.Tensor, text_lengths: torch.Tensor,
                      language_ids: torch.Tensor, speaker_ids: torch.Tensor,

@@ -583,10 +583,17 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         n_mels=audio_config.n_mels, center=False, power=audio_config.mel_power,
     ).to(device)
     logger.info(
-        "loss setup mel_power=%.1f segment_frames=%d segment_samples=%d",
+        "loss setup mel_power=%.1f segment_frames=%d segment_samples=%d "
+        "aligned_prior_mel_weight=%.2f",
         audio_config.mel_power, config.segment_frames,
         config.segment_frames * audio_config.hop_length,
+        float(raw["training"].get("aligned_prior_mel_weight", 0.0)),
     )
+    aligned_prior_mel_weight = float(
+        raw["training"].get("aligned_prior_mel_weight", 0.0)
+    )
+    if aligned_prior_mel_weight < 0.0:
+        raise ValueError("training.aligned_prior_mel_weight must not be negative")
     destination = layout.checkpoints_dir
     vocabulary.save(layout.run_dir / "vocab.json")
     if start_epoch > raw["training"]["epochs"]:
@@ -689,10 +696,25 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             mel_real = torch.log(mel_transform(real_audio.squeeze(1)).clamp_min(1e-5))
             mel_fake = torch.log(mel_transform(output.audio.squeeze(1)).clamp_min(1e-5))
             loss_mel = F.l1_loss(mel_fake, mel_real)
+            if aligned_prior_mel_weight:
+                aligned_prior_audio = generator.decode_aligned_prior(
+                    output.prior_mean, output.audio_mask,
+                    batch["language_ids"], batch["speaker_ids"],
+                    output.slice_starts,
+                )
+                aligned_prior_mel = torch.log(
+                    mel_transform(aligned_prior_audio.squeeze(1)).clamp_min(1e-5)
+                )
+                loss_aligned_prior_mel = F.l1_loss(
+                    aligned_prior_mel, mel_real,
+                )
+            else:
+                loss_aligned_prior_mel = loss_mel.new_zeros(())
             loss_kl = kl_loss(output.latent_prior, output.posterior_log_scale,
                               output.prior_mean, output.prior_log_scale, output.audio_mask)
             loss_g = (
                 45.0 * loss_mel + output.duration_loss + loss_kl
+                + aligned_prior_mel_weight * loss_aligned_prior_mel
                 + generator_adversarial_loss(fake_features)
                 + 2.0 * feature_matching_loss(real_features, fake_features)
             )
@@ -705,6 +727,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 "generator": float(loss_g.item()),
                 "discriminator": float(loss_d.item()),
                 "mel": float(loss_mel.item()),
+                "prior_mel": float(loss_aligned_prior_mel.item()),
                 "duration": float(output.duration_loss.item()),
                 "kl": float(loss_kl.item()),
             })
@@ -730,13 +753,14 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 logger.info(
                     "TRAIN %s %6.2f%% | epoch=%d/%d | batch=%d/%d | step=%d/%d | "
                     "step_time=%.2fs | rolling=%.2fs | speed=%.2f steps/min | ETA=%s | "
-                    "generator=%.4f | discriminator=%.4f | mel=%.4f | "
+                    "generator=%.4f | discriminator=%.4f | mel=%.4f | prior_mel=%.4f | "
                     "duration=%.4f | kl=%.4f | lr=%.8f",
                     progress_bar(global_step, planned_total_steps), overall_progress,
                     epoch, raw["training"]["epochs"],
                     batch_index, len(loader), global_step, planned_total_steps,
                     seconds_per_step, rolling_step_time, 60.0 / max(rolling_step_time, 1e-9),
                     eta, loss_g.item(), loss_d.item(), loss_mel.item(),
+                    loss_aligned_prior_mel.item(),
                     output.duration_loss.item(), loss_kl.item(),
                     optimizer_g.param_groups[0]["lr"],
                     extra={"tts_style": "progress"},

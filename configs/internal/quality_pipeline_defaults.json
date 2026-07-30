@@ -20,6 +20,7 @@
     "batch_size": 4,
     "learning_rate_generator": 0.0002,
     "learning_rate_discriminator": 0.0002,
+    "aligned_prior_mel_weight": 10.0,
     "epochs": 200,
     "checkpoint_every_steps": 10000,
     "checkpoint_every_epochs": 5,

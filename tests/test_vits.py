@@ -214,6 +214,25 @@ class VitsTests(unittest.TestCase):
         self.assertIsNotNone(gradient)
         self.assertGreater(float(gradient.abs().sum()), 0.0)
 
+    def test_aligned_prior_audio_loss_trains_text_path(self):
+        tokens = torch.tensor([[2, 4, 5, 3]])
+        text_lengths = torch.tensor([4])
+        spectrogram = torch.randn(1, 9, 8)
+        spec_lengths = torch.tensor([8])
+        output = self.model(
+            tokens, text_lengths, spectrogram, spec_lengths,
+            torch.tensor([0]), torch.tensor([0]),
+        )
+        prior_audio = self.model.decode_aligned_prior(
+            output.prior_mean, output.audio_mask,
+            torch.tensor([0]), torch.tensor([0]), output.slice_starts,
+        )
+        prior_audio.abs().mean().backward()
+
+        gradient = self.model.text_encoder.projection.weight.grad
+        self.assertIsNotNone(gradient)
+        self.assertGreater(float(gradient.abs().sum()), 0.0)
+
     def test_vectorized_maximum_path_matches_reference_alignment(self):
         value = torch.randn(2, 9, 5)
         text_lengths = torch.tensor([5, 3])
@@ -641,6 +660,13 @@ class VitsTests(unittest.TestCase):
                 (preview / "diagnostics.json").read_text(encoding="utf-8")
             )
             self.assertIn("duration_ratio", diagnostics)
+            with wave.open(
+                str(preview / "posterior-reconstruction.wav"), "rb",
+            ) as posterior:
+                self.assertEqual(
+                    posterior.getnframes(),
+                    diagnostics["target_frames"] * config["audio"]["hop_length"],
+                )
             self.assertTrue((root / "run" / "splits" / "validation.csv").is_file())
 
 
