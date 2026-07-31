@@ -707,7 +707,7 @@ runs/<model_name>/
 │   └── epoch-XXXX/
 │       ├── target.wav
 │       ├── posterior-reconstruction.wav
-│       ├── posterior-mean-reconstruction.wav
+│       ├── posterior-sampled-reconstruction.wav
 │       ├── aligned-text-prior.wav
 │       ├── text-only-inference.wav
 │       ├── text-only-deterministic.wav
@@ -737,15 +737,21 @@ artifacts/<model_name>/
 验证音频按链路逐级排错：
 
 1. `target.wav` 是数据集原音频。
-2. `posterior-reconstruction.wav` 保持训练时的 posterior 随机采样语义，检查
-   WAV→频谱→Posterior Encoder→Decoder，不经过文本前端。
-3. `posterior-mean-reconstruction.wav` 去除随机采样；它与采样版差异很大时，应查看
+2. `posterior-reconstruction.wav` 使用稳定的 posterior 均值，检查
+   WAV→频谱→Posterior Encoder→Decoder，不经过文本前端；该文件名保持跨版本兼容。
+3. `posterior-sampled-reconstruction.wav` 使用训练时的随机采样；它与均值版差异很大时，应查看
    `diagnostics.json` 的 `posterior_scale_*`。
 4. `aligned-text-prior.wav` 加入文本编码和 MAS 真值对齐，但不测试时长预测。
 5. 两个 `text-only-*` 才是完整 TTS 推理链路。
 
 `aligned-text-prior.wav` 只用于验证，不会作为额外 Mel 损失反向更新共享 Decoder；
 文本先验继续由标准 VITS 的 KL 和 Duration 目标训练，避免破坏 posterior 主重建。
+
+从零训练的 `epoch-0001` 是冷启动诊断，不是可发布音质。以单音色、单语言、
+2,000 条样本、`batch_size=4` 为例，扣除 5% 验证集后第一轮约只有 475 step；
+39M Generator 和判别器此时仍可能只产生噪音。先看稳定的
+`posterior-reconstruction.wav` 是否随 5,000～10,000 step 持续改善，再判断主链；
+`aligned-text-prior.wav` 和两个 `text-only-*` 在 epoch 1 是噪音并不表示链路损坏。
 
 2026-07-30 训练回归的完整时间线、原因和迁移建议见
 [中英文回归说明](docs/regression_2026-07-30.md)。

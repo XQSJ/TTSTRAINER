@@ -884,7 +884,7 @@ class VitsTests(unittest.TestCase):
             self.assertTrue((preview / "target.wav").is_file())
             self.assertTrue((preview / "posterior-reconstruction.wav").is_file())
             self.assertTrue(
-                (preview / "posterior-mean-reconstruction.wav").is_file()
+                (preview / "posterior-sampled-reconstruction.wav").is_file()
             )
             self.assertTrue((preview / "aligned-text-prior.wav").is_file())
             self.assertTrue((preview / "text-only-inference.wav").is_file())

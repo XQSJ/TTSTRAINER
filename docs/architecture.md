@@ -75,8 +75,9 @@ Posterior Encoder + Decoder 的重建是基础主链。`aligned-text-prior.wav` 
 Text Encoder/Flow/MAS 的验证信号，不作为额外 Mel 损失反向更新共享 Decoder；
 文本先验使用标准 VITS 的 KL 和 Duration 目标训练。
 
-验证目录同时保存 posterior 随机重建与均值重建。随机版保持训练时的真实路径，均值
-版用于隔离 posterior 方差；二者需要结合判断。
+验证目录同时保存 posterior 均值重建与随机重建。历史文件名
+`posterior-reconstruction.wav` 始终指稳定均值版，随机训练路径单独保存为
+`posterior-sampled-reconstruction.wav`；二者需要结合判断。
 
 自动指标不能直接“听懂”语音。`best` 默认只按 posterior Mel 保存为主链诊断，
 `prior_mel` 作为文字先验诊断；自动流水线默认导出 `last`。产品验收仍需结合

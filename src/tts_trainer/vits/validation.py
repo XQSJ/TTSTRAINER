@@ -238,10 +238,13 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                 )
                 audio_files = {
                     "target.wav": batch["waveforms"][0, 0, :target_samples],
-                    "posterior-reconstruction.wav": full_posterior[
+                    # 保持历史文件名表示稳定的 posterior 均值，便于跨版本比较。
+                    # Keep the historical filename bound to the stable
+                    # posterior mean so previews remain comparable over time.
+                    "posterior-reconstruction.wav": full_posterior_mean[
                         0, 0, :comparison_samples
                     ],
-                    "posterior-mean-reconstruction.wav": full_posterior_mean[
+                    "posterior-sampled-reconstruction.wav": full_posterior[
                         0, 0, :comparison_samples
                     ],
                     "aligned-text-prior.wav": full_prior[0, 0, :target_frames * audio_config.hop_length],
