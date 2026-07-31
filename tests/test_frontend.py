@@ -146,16 +146,16 @@ class FrontendTests(unittest.TestCase):
             runtime_contract.declaration_key(), router.declared.declaration_key(),
         )
 
-    def test_mobile_espeak_routes_all_languages_and_freezes_piper_encoding(self):
+    def test_mobile_espeak_routes_all_languages_and_freezes_direct_encoding(self):
         router = frontend_from_config(
-            {"provider": "espeak-ng", "piper_compatible": True,
+            {"provider": "espeak-ng", "mobile_direct": True,
              "executable": "/bin/echo"},
             languages=("zh", "en", "ja", "ko", "fr", "es", "pt"),
         )
         self.assertEqual(router.declared.provider, "espeak-ng")
         self.assertEqual(
             router.declared.token_encoding,
-            "piper-bos-pad-phoneme-pad-eos-v2",
+            "mobile-espeak-bos-phonemes-eos-v3",
         )
         self.assertEqual(router.declared.languages["zh"]["voice"], "cmn")
         self.assertEqual(router.declared.languages["ja"]["voice"], "ja")
@@ -164,6 +164,18 @@ class FrontendTests(unittest.TestCase):
             router.provider_for(language) == "espeak-ng"
             for language in router.routes
         ))
+
+    def test_mobile_direct_and_piper_training_modes_are_mutually_exclusive(self):
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            frontend_from_config(
+                {
+                    "provider": "espeak-ng",
+                    "mobile_direct": True,
+                    "piper_compatible": True,
+                    "executable": "/bin/echo",
+                },
+                languages=("en",),
+            )
 
     def test_piper_plus_keeps_multicharacter_phone_units(self):
         phonemizer = SimpleNamespace(phonemize=lambda text: ["tɕʰ", "i", "tone4"])

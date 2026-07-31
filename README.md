@@ -776,9 +776,11 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer verify-frontend \
 }
 ```
 
-导出时会自动检查前端契约。只有统一 eSpeak 且采用 Piper token 插空规则的模型，
-`model.onnx.json` 中才会出现 `"text_input": {"supported": true}`，并生成
-`android_text/`。Java Demo 会检查这个字段，不会把不兼容模型静默读错。
+导出时会自动检查前端契约。`mobile` 使用统一 eSpeak，但 VITS 训练核心采用更容易
+稳定对齐的紧凑序列 `BOS,(phoneme)*,EOS`。sherpa 传入的 Piper PAD 只属于部署传输
+格式，会由 ONNX 输入适配器删除。`model.onnx.json` 中会出现
+`"text_input": {"supported": true}`，并生成 `android_text/`。Java Demo 会检查
+这个字段，不会把不兼容模型静默读错。
 
 `mobile` 的中日韩 G2P 与 `quality` 不同，因此应分别做母语试听。若产品必须保留
 OpenJTalk、pypinyin/g2pk2 的专用发音质量，就需要在 App 内接入对应原生前端，
@@ -871,9 +873,9 @@ configs/models.json
 - `quality`：默认推荐，约 39M Generator，质量优先；
 - `compact`：小模型和流程验证，音质上限较低。
 - `mobile`：独立的移动部署链路。模型尺寸仍采用质量架构，但文本前端改为统一
-  eSpeak/Piper，训练使用官方 canonical
-  `BOS,PAD,(phoneme,PAD)*,EOS` 序列；导出模型内置 sherpa-onnx 1.13.4
-  输入适配，可在 Android 直接接收普通文本。必须从头训练。
+  eSpeak。训练核心使用 `BOS,(phoneme)*,EOS`，导出图通过
+  `strip-piper-pads-v1` 将 sherpa/Piper 传输序列规范化后再进入 VITS，可在
+  Android 直接接收普通文本。必须从头训练。
 
 `quality` 和 `mobile` 的前端契约彼此隔离：选择 `mobile` 不会修改
 `quality` 的中文 Piper Plus、日语 Open JTalk、韩语 Piper Plus 路由。
@@ -913,9 +915,10 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer export-vits \
 - VITS 音色相似不代表韵律一定自然；应试听 `runs/<name>/validation-audio/`。默认
   best checkpoint 按 `prior_mel` 选择文字先验最好的版本，不要因为 epoch 更新就默认
   `last` 更好；长句时长比持续升高或 `aligned_prior_mel` 恶化表示训练正在退化。
-- 旧版 `preset=mobile` 使用了缺少 BOS 后 blank 的历史 Piper 序列。新版会明确拒绝
-  续训或导出旧 mobile checkpoint；请保留原始 WAV/文本并使用新的
-  `experiment.name` 从零训练。`quality` checkpoint 和专用 G2P 数据不受影响。
+- 旧版 `preset=mobile` 曾直接使用带 blank 的 Piper v1/v2 序列训练。当前 v3 将
+  Piper wire PAD 与 VITS 训练序列解耦；请保留原始 WAV/文本并使用新的
+  `experiment.name` 从零训练。公共音频会复用，`quality` checkpoint 和专用 G2P
+  数据不受影响。
 - 新增语言需要新前端和重新训练。
 - 结构变化通常不能直接 `resume`；高级迁移参考
   [sdp-warm-start.example.json](training_configs/sdp-warm-start.example.json)。

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ..languages import resolve_language_registry
 from .contract import FrontendContract, frontend_contract_from_config
-from .contract import PIPER_TOKEN_ENCODING
+from .contract import MOBILE_DIRECT_TOKEN_ENCODING, PIPER_TOKEN_ENCODING
 from .espeak import EspeakFrontend
 from .openjtalk import OpenJTalkFrontend
 from .piper_plus import PiperPlusFrontend
@@ -147,6 +147,9 @@ def frontend_from_contract(contract: FrontendContract, config: dict | None = Non
     resolved_config["provider"] = contract.provider
     resolved_config["piper_compatible"] = (
         contract.token_encoding == PIPER_TOKEN_ENCODING
+    )
+    resolved_config["mobile_direct"] = (
+        contract.token_encoding == MOBILE_DIRECT_TOKEN_ENCODING
     )
     resolved_config["voices"] = {**voices, **config.get("voices", {})}
     return frontend_from_config(

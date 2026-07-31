@@ -32,6 +32,7 @@ from tts_trainer.vits.runtime import OnnxTTS
 from tts_trainer.vits.validation import split_train_validation
 from tts_trainer.frontend import FrontendContract, frontend_contract_from_config
 from tts_trainer.frontend.contract import (LEGACY_PIPER_TOKEN_ENCODING,
+                                           MOBILE_DIRECT_TOKEN_ENCODING,
                                            PIPER_TOKEN_ENCODING)
 from tts_trainer.manifest import Item
 from tts_trainer.text import Vocabulary
@@ -88,7 +89,7 @@ class VitsTests(unittest.TestCase):
             frontend = frontend_contract_from_config(
                 {
                     "provider": "espeak-ng",
-                    "piper_compatible": True,
+                    "mobile_direct": True,
                     "voices": {"en": "en-us", "fr": "fr-fr"},
                 },
                 ("en", "fr"),
@@ -391,6 +392,34 @@ class VitsTests(unittest.TestCase):
         )
         self.assertEqual(captured["lengths"].tolist(), [5])
 
+    def test_mobile_export_adapter_strips_legacy_and_canonical_piper_pads(self):
+        wrapper = PiperInferenceWrapper(
+            self.model.eval(), strip_piper_pads=True,
+        )
+        captured = []
+        original = self.model.infer_deploy
+
+        def capture(tokens, lengths, language_ids, speaker_ids, scales):
+            captured.append((tokens.clone(), lengths.clone()))
+            return original(
+                tokens, lengths, language_ids, speaker_ids, scales,
+                max_frames=20,
+            )
+
+        self.model.infer_deploy = capture
+        wrapper(
+            torch.tensor([[1, 5, 0, 6, 0, 2]]), torch.tensor([6]),
+            torch.tensor([0.0, 1.0, 0.0]), torch.tensor([0]),
+        )
+        wrapper(
+            torch.tensor([[1, 0, 5, 0, 6, 0, 2]]), torch.tensor([7]),
+            torch.tensor([0.0, 1.0, 0.0]), torch.tensor([0]),
+        )
+        self.assertEqual(captured[0][0].tolist(), [[1, 5, 6, 2]])
+        self.assertEqual(captured[0][1].tolist(), [4])
+        self.assertEqual(captured[1][0].tolist(), [[1, 5, 6, 2]])
+        self.assertEqual(captured[1][1].tolist(), [4])
+
     def test_voice_profile_mapping(self):
         profiles = voice_profiles({"a": 0, "b": 1}, {"zh": 0, "en": 1})
         self.assertEqual([(p["sid"], p["speaker"], p["language"]) for p in profiles],
@@ -584,7 +613,7 @@ class VitsTests(unittest.TestCase):
             )
             self.assertGreater(audio.shape[0], 0)
 
-    def test_mobile_onnx_adapts_sherpa_1134_wire_tokens(self):
+    def test_mobile_onnx_strips_sherpa_wire_pads_before_direct_model(self):
         discriminator = VitsDiscriminator(periods=(2,))
         optimizer_g = torch.optim.AdamW(self.model.parameters())
         optimizer_d = torch.optim.AdamW(discriminator.parameters())
@@ -597,7 +626,7 @@ class VitsTests(unittest.TestCase):
             mobile_frontend = frontend_contract_from_config(
                 {
                     "provider": "espeak-ng",
-                    "piper_compatible": True,
+                    "mobile_direct": True,
                     "voices": {"en": "en-us"},
                 },
                 ("en",),
@@ -615,11 +644,11 @@ class VitsTests(unittest.TestCase):
                     "format": 1,
                     "cases_per_language": 1,
                     "languages": ["en"],
-                    "piper_compatible": True,
+                    "piper_compatible": False,
                     "cases": [{
                         "language": "en", "language_id": 0, "text": "a",
                         "phonemes": ["a"],
-                        "token_ids": [1, 0, 5, 0, 2],
+                        "token_ids": [1, 5, 2],
                     }],
                 },
             )
@@ -634,18 +663,19 @@ class VitsTests(unittest.TestCase):
                 (target.parent / "model.onnx.json").read_text(encoding="utf-8"),
             )
             self.assertEqual(
-                deployment["model_token_encoding"], PIPER_TOKEN_ENCODING,
+                deployment["model_token_encoding"],
+                MOBILE_DIRECT_TOKEN_ENCODING,
             )
             self.assertEqual(
                 deployment["wire_token_encoding"],
                 LEGACY_PIPER_TOKEN_ENCODING,
             )
             self.assertEqual(
-                deployment["input_adapter"], "insert-pad-after-bos-v1",
+                deployment["input_adapter"], "strip-piper-pads-v1",
             )
             runtime = OnnxTTS(target.parent)
             # Match sherpa-onnx 1.13.4's historical wire sequence. The ONNX
-            # adapter inserts the missing blank before invoking the VITS core.
+            # adapter removes transport pads before invoking the VITS core.
             self.assertEqual(runtime.encode(("a",)).tolist(), [[1, 5, 0, 2]])
             audio = runtime.synthesize_units(
                 ("a",), language="en", speaker="voice_01",

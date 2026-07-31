@@ -22,7 +22,8 @@ from ..experiments import prepare_experiment, resolve_experiment
 from ..frontend import (FrontendContract, frontend_contract_from_config,
                         frontend_lock_path, load_frontend_contract,
                         build_frontend_conformance)
-from ..frontend.contract import PIPER_TOKEN_ENCODING
+from ..frontend.contract import (MOBILE_DIRECT_TOKEN_ENCODING,
+                                 PIPER_TOKEN_ENCODING)
 from ..manifest import validate_manifest
 from ..logging_utils import (TerminalProgress, configure_logging_from_config,
                              format_duration, progress_bar)
@@ -301,6 +302,17 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     piper_compatible = (
         frontend_contract.get("token_encoding")
         == PIPER_TOKEN_ENCODING
+    )
+    token_encoding = frontend_contract.get("token_encoding")
+    logger.info(
+        "frontend training contract provider=%s token_encoding=%s "
+        "insert_piper_pads=%s mobile_wire_adapter=%s",
+        frontend_contract.get("provider"), token_encoding,
+        piper_compatible,
+        (
+            "strip-piper-pads-v1"
+            if token_encoding == MOBILE_DIRECT_TOKEN_ENCODING else "none"
+        ),
     )
     quality_config = raw.get("quality", {})
     quality_summary = None

@@ -18,6 +18,10 @@ DIRECT_TOKEN_ENCODING = "bos-phonemes-eos-v1"
 # Keep the old name solely so old mobile checkpoints can be rejected clearly.
 LEGACY_PIPER_TOKEN_ENCODING = "piper-bos-phoneme-pad-eos-v1"
 PIPER_TOKEN_ENCODING = "piper-bos-pad-phoneme-pad-eos-v2"
+# Mobile v3 deliberately separates sherpa's Piper wire representation from
+# the sequence learned by VITS. sherpa may emit PAD separators, but the ONNX
+# input adapter removes them before the text encoder sees this direct sequence.
+MOBILE_DIRECT_TOKEN_ENCODING = "mobile-espeak-bos-phonemes-eos-v3"
 MOBILE_ESPEAK_VOICES = {
     "zh": "cmn",
     "en": "en-us",
@@ -143,6 +147,12 @@ def frontend_contract_from_config(config: dict | None, languages,
     }
     if missing:
         raise ValueError(f"missing frontend profiles for: {', '.join(sorted(missing))}")
+    if bool(config.get("mobile_direct", False)) and bool(
+        config.get("piper_compatible", False)
+    ):
+        raise ValueError(
+            "frontend.mobile_direct and frontend.piper_compatible are mutually exclusive"
+        )
     profiles = {}
     for language in languages:
         spec = registry[language]
@@ -166,8 +176,13 @@ def frontend_contract_from_config(config: dict | None, languages,
         engine_version=engine_version,
         languages=profiles,
         token_encoding=(
-            PIPER_TOKEN_ENCODING if provider == "espeak-ng"
-            and bool(config.get("piper_compatible", False))
-            else DIRECT_TOKEN_ENCODING
+            MOBILE_DIRECT_TOKEN_ENCODING
+            if provider == "espeak-ng" and bool(config.get("mobile_direct", False))
+            else (
+                PIPER_TOKEN_ENCODING
+                if provider == "espeak-ng"
+                and bool(config.get("piper_compatible", False))
+                else DIRECT_TOKEN_ENCODING
+            )
         ),
     )

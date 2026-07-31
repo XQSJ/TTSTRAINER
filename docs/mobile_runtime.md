@@ -42,21 +42,26 @@ en/fr/es/pt/... -> eSpeak NG
 普通文本。两者不会共享或覆盖 frontend contract。训练数据 WAV 可以复用，
 checkpoint 不可以跨 preset 续训。
 
-mobile 训练核心使用 Piper 官方序列：
+mobile v3 训练核心使用紧凑序列：
 
 ```text
-BOS, PAD, phoneme_1, PAD, phoneme_2, PAD, ..., EOS
+BOS, phoneme_1, phoneme_2, ..., EOS
 ```
 
-项目当前固定的 sherpa-onnx 1.13.4 会产生旧 wire 序列：
+项目当前固定的 sherpa-onnx 1.13.4 仍会产生 Piper wire 序列：
 
 ```text
 BOS, phoneme_1, PAD, phoneme_2, PAD, ..., EOS
 ```
 
-因此 mobile ONNX 导出图内置 `insert-pad-after-bos-v1` 输入适配器。导出的
+官方 Piper 的修正版序列还会在 BOS 后多一个 PAD。两种 wire 序列里的 PAD 都不再
+参与 VITS 训练，mobile ONNX 导出图使用 `strip-piper-pads-v1` 统一删除。因此
+sherpa 1.13.4 是否漏掉句首 PAD 都不会改变核心模型实际收到的 token。导出的
 `model.onnx.json` 会同时记录 `wire_token_encoding`、`model_token_encoding`
 和 `input_adapter`。不要替换 sherpa 运行时版本后跳过一致性验证。
+
+旧 mobile v1/v2 checkpoint 的训练序列不同，不能续训为 v3。使用新的
+`experiment.name` 从零训练即可，公共文本和 Qwen WAV 不需要重新生成。
 
 ## 多语言入口
 

@@ -58,7 +58,8 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(quality["frontend"]["provider"], "language-router")
             self.assertFalse(quality["frontend"].get("piper_compatible", False))
             self.assertEqual(mobile["frontend"]["provider"], "espeak-ng")
-            self.assertTrue(mobile["frontend"]["piper_compatible"])
+            self.assertTrue(mobile["frontend"]["mobile_direct"])
+            self.assertFalse(mobile["frontend"].get("piper_compatible", False))
 
     def test_rejects_unknown_public_preset(self):
         with tempfile.TemporaryDirectory() as directory:

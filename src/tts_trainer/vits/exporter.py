@@ -16,6 +16,7 @@ from ..checkpoints import require_checkpoint_format
 from ..frontend import frontend_contract_from_config
 from ..frontend.contract import (DIRECT_TOKEN_ENCODING,
                                  LEGACY_PIPER_TOKEN_ENCODING,
+                                 MOBILE_DIRECT_TOKEN_ENCODING,
                                  PIPER_TOKEN_ENCODING)
 from ..frontend.conformance import save_frontend_conformance
 from .config import VitsConfig
@@ -57,11 +58,17 @@ class PiperInferenceWrapper(nn.Module):
     def __init__(
         self, model: MultilingualVITS, *,
         insert_pad_after_bos: bool = False,
+        strip_piper_pads: bool = False,
     ):
         super().__init__()
+        if insert_pad_after_bos and strip_piper_pads:
+            raise ValueError(
+                "insert_pad_after_bos and strip_piper_pads are mutually exclusive"
+            )
         self.model = model
         self.num_languages = model.config.num_languages
         self.insert_pad_after_bos = insert_pad_after_bos
+        self.strip_piper_pads = strip_piper_pads
 
     def forward(self, input: torch.Tensor, input_lengths: torch.Tensor,
                 scales: torch.Tensor, sid: torch.Tensor):
@@ -73,6 +80,19 @@ class PiperInferenceWrapper(nn.Module):
             pad = torch.zeros_like(input[:, :1])
             input = torch.cat((input[:, :1], pad, input[:, 1:]), dim=1)
             input_lengths = input_lengths + 1
+        elif self.strip_piper_pads:
+            # sherpa invokes a VITS graph with one sentence at a time. Remove
+            # every Piper transport PAD (token id 0) so the core text encoder
+            # receives the compact BOS,(phoneme)*,EOS sequence used in
+            # training. This accepts both sherpa-onnx 1.13.4's historical wire
+            # sequence and Piper's corrected sequence with a PAD after BOS.
+            positions = torch.arange(
+                input.shape[1], device=input.device,
+            ).unsqueeze(0)
+            valid = positions < input_lengths.unsqueeze(1)
+            keep = valid & input.ne(0)
+            input = torch.masked_select(input, keep).unsqueeze(0)
+            input_lengths = keep.sum(dim=1)
         sid = sid.to(torch.long)
         language_ids = torch.remainder(sid, self.num_languages)
         speaker_ids = torch.div(sid, self.num_languages, rounding_mode="floor")
@@ -145,9 +165,13 @@ def _export_sherpa_android_text_package(
     *, sample_rate: int, tokens: list[str],
 ) -> dict:
     """Write language-specific metadata wrappers for sherpa's eSpeak frontend."""
+    supported_encodings = {
+        PIPER_TOKEN_ENCODING,
+        MOBILE_DIRECT_TOKEN_ENCODING,
+    }
     if frontend.get("provider") != "espeak-ng" or frontend.get(
         "token_encoding",
-    ) != PIPER_TOKEN_ENCODING:
+    ) not in supported_encodings:
         return {
             "supported": False,
             "reason": (
@@ -242,6 +266,9 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         {}, tuple(metadata["language_map"])
     ).to_dict()
     mobile_piper = frontend.get("token_encoding") == PIPER_TOKEN_ENCODING
+    mobile_direct = (
+        frontend.get("token_encoding") == MOBILE_DIRECT_TOKEN_ENCODING
+    )
     config = _config_from_metadata(metadata)
     logger.info("ONNX export step=1/5 action=load_checkpoint path=%s", checkpoint_dir)
     generator = MultilingualVITS(config)
@@ -250,6 +277,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     wrapper = PiperInferenceWrapper(
         generator.eval(),
         insert_pad_after_bos=mobile_piper,
+        strip_piper_pads=mobile_direct,
     )
     target = output_dir / "model.onnx"
     tokens = torch.tensor([[2, 4, 5, 3]], dtype=torch.long)
@@ -257,6 +285,15 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     scales = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
     sid = torch.tensor([0], dtype=torch.long)
     logger.info("ONNX export step=2/5 action=build_graph opset=%d output=%s", opset, target)
+    dynamic_axes = {
+        "input": {1: "text_length"},
+        "output": {2: "audio_length"},
+    }
+    if not mobile_direct:
+        dynamic_axes["input"][0] = "batch"
+        dynamic_axes["input_lengths"] = {0: "batch"}
+        dynamic_axes["sid"] = {0: "batch"}
+        dynamic_axes["output"][0] = "batch"
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore", message="Constant folding - Only steps=1 can be constant folded.*",
@@ -266,9 +303,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
             wrapper, (tokens, lengths, scales, sid), str(target),
             input_names=["input", "input_lengths", "scales", "sid"],
             output_names=["output"], opset_version=opset, do_constant_folding=True,
-            dynamic_axes={"input": {0: "batch", 1: "text_length"},
-                          "input_lengths": {0: "batch"}, "sid": {0: "batch"},
-                          "output": {0: "batch", 2: "audio_length"}},
+            dynamic_axes=dynamic_axes,
             dynamo=False,
         )
     logger.info("ONNX export step=3/5 action=check_model size_bytes=%d", target.stat().st_size)
@@ -298,12 +333,15 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         ),
         "wire_token_encoding": (
             LEGACY_PIPER_TOKEN_ENCODING
-            if mobile_piper else frontend.get(
+            if mobile_piper or mobile_direct else frontend.get(
                 "token_encoding", DIRECT_TOKEN_ENCODING,
             )
         ),
         "input_adapter": (
-            "insert-pad-after-bos-v1" if mobile_piper else "none"
+            "insert-pad-after-bos-v1"
+            if mobile_piper else (
+                "strip-piper-pads-v1" if mobile_direct else "none"
+            )
         ),
         "frontend_note": "application supplies matching phoneme ids; stock sherpa multilingual switching requires an adapter",
         "text_input": text_input,

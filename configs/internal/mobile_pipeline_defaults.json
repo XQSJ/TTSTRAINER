@@ -2,7 +2,7 @@
   "extends": "quality_pipeline_defaults.json",
   "frontend": {
     "provider": "espeak-ng",
-    "piper_compatible": true,
+    "mobile_direct": true,
     "strict_language_switches": true,
     "voices": {
       "zh": "cmn",

@@ -132,12 +132,14 @@ sid = speaker_id * num_languages + language_id
 移动端必须得到与训练 metadata 相同的 token unit 后，再调用同一个 ONNX。
 `frontend.conformance.json` 用于在发布前证明这一映射确实一致。
 
-`preset=mobile` 使用独立的 Piper v2 token contract：
+`preset=mobile` 使用独立的 v3 token contract。训练核心只学习：
 
 ```text
-BOS, PAD, (phoneme, PAD)*, EOS
+BOS, (phoneme)*, EOS
 ```
 
-训练、验证和 PyTorch 诊断均使用该 canonical 序列。为兼容项目固定的
-sherpa-onnx 1.13.4，ONNX 导出 wrapper 会把其旧 wire 输入在 BOS 后补一个 PAD，
-再交给 VITS 核心。`preset=quality` 不启用该适配器，仍保留逐语言专用 G2P。
+stock sherpa 仍通过 Piper wire 传入 `BOS,(phoneme,PAD)*,EOS`；修复版还可能在
+BOS 后包含一个 PAD。ONNX 导出 wrapper 的 `strip-piper-pads-v1` 会删除所有 wire
+PAD，再交给 VITS 核心。这样 MAS 不必给大量重复传输 blank 强制分配音频帧，同时
+兼容 sherpa 1.13.4 与修正后的句首 PAD 语义。`preset=quality` 不启用该适配器，
+仍保留逐语言专用 G2P。
