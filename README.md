@@ -704,6 +704,14 @@ runs/<model_name>/
 ├── pipeline-report.json
 ├── quality/
 ├── validation-audio/
+│   └── epoch-XXXX/
+│       ├── target.wav
+│       ├── posterior-reconstruction.wav
+│       ├── posterior-sampled-reconstruction.wav
+│       ├── aligned-text-prior.wav
+│       ├── text-only-inference.wav
+│       ├── text-only-deterministic.wav
+│       └── diagnostics.json
 └── checkpoints/
     ├── best/
     └── last/
@@ -725,6 +733,20 @@ artifacts/<model_name>/
 
 务必保留 `runs/<model_name>/checkpoints/`。ONNX 用于推理，checkpoint 用于续训、增加
 音色、迁移结构和后续压缩。
+
+验证音频按链路逐级排错：
+
+1. `target.wav` 是数据集原音频。
+2. `posterior-reconstruction.wav` 使用 Posterior Encoder 的均值，检查
+   WAV→频谱→Posterior Encoder→Decoder，不经过文本前端。
+3. `posterior-sampled-reconstruction.wav` 额外加入 posterior 随机采样；它与均值版
+   差异很大时，应查看 `diagnostics.json` 的 `posterior_scale_*`。
+4. `aligned-text-prior.wav` 加入文本编码和 MAS 真值对齐，但不测试时长预测。
+5. 两个 `text-only-*` 才是完整 TTS 推理链路。
+
+从零训练时，文本 prior 的辅助 Mel 损失默认先等待 5,000 step，再用 10,000 step
+平滑加入，避免尚未学会声码器时破坏 posterior 主重建。训练日志中的
+`prior_weight` 会显示当前实际权重；epoch 1 通常应为 `0.000`。
 
 旧配置中的单数 `dataset.voice` 仍可读取，以避免已有训练任务失效；新配置统一使用
 `dataset.voices`。

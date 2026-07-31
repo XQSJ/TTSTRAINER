@@ -44,6 +44,17 @@ from .validation import (evaluate_validation, save_split_artifacts,
 logger = logging.getLogger(__name__)
 
 
+def scheduled_weight(
+    target: float, step: int, *, start_steps: int, warmup_steps: int,
+) -> float:
+    """Delay an auxiliary loss, then introduce it without shocking training."""
+    if target <= 0.0 or step <= start_steps:
+        return 0.0
+    if warmup_steps <= 0:
+        return target
+    return target * min(1.0, (step - start_steps) / warmup_steps)
+
+
 def select_device(requested: str = "auto") -> torch.device:
     if requested != "auto":
         return torch.device(requested)
@@ -597,16 +608,33 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     ).to(device)
     logger.info(
         "loss setup mel_power=%.1f segment_frames=%d segment_samples=%d "
-        "aligned_prior_mel_weight=%.2f",
+        "aligned_prior_mel_weight=%.2f aligned_prior_start_steps=%d "
+        "aligned_prior_warmup_steps=%d",
         audio_config.mel_power, config.segment_frames,
         config.segment_frames * audio_config.hop_length,
         float(raw["training"].get("aligned_prior_mel_weight", 0.0)),
+        int(raw["training"].get("aligned_prior_mel_start_steps", 0)),
+        int(raw["training"].get("aligned_prior_mel_warmup_steps", 0)),
     )
     aligned_prior_mel_weight = float(
         raw["training"].get("aligned_prior_mel_weight", 0.0)
     )
+    aligned_prior_mel_start_steps = int(
+        raw["training"].get("aligned_prior_mel_start_steps", 0)
+    )
+    aligned_prior_mel_warmup_steps = int(
+        raw["training"].get("aligned_prior_mel_warmup_steps", 0)
+    )
     if aligned_prior_mel_weight < 0.0:
         raise ValueError("training.aligned_prior_mel_weight must not be negative")
+    if aligned_prior_mel_start_steps < 0:
+        raise ValueError(
+            "training.aligned_prior_mel_start_steps must not be negative"
+        )
+    if aligned_prior_mel_warmup_steps < 0:
+        raise ValueError(
+            "training.aligned_prior_mel_warmup_steps must not be negative"
+        )
     destination = layout.checkpoints_dir
     vocabulary.save(layout.run_dir / "vocab.json")
     if start_epoch > raw["training"]["epochs"]:
@@ -721,7 +749,13 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             mel_real = torch.log(mel_transform(real_audio.squeeze(1)).clamp_min(1e-5))
             mel_fake = torch.log(mel_transform(output.audio.squeeze(1)).clamp_min(1e-5))
             loss_mel = F.l1_loss(mel_fake, mel_real)
-            if aligned_prior_mel_weight:
+            effective_prior_mel_weight = scheduled_weight(
+                aligned_prior_mel_weight,
+                global_step + 1,
+                start_steps=aligned_prior_mel_start_steps,
+                warmup_steps=aligned_prior_mel_warmup_steps,
+            )
+            if effective_prior_mel_weight:
                 aligned_prior_audio = generator.decode_aligned_prior(
                     output.prior_mean, output.audio_mask,
                     batch["language_ids"], batch["speaker_ids"],
@@ -739,7 +773,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                               output.prior_mean, output.prior_log_scale, output.audio_mask)
             loss_g = (
                 45.0 * loss_mel + output.duration_loss + loss_kl
-                + aligned_prior_mel_weight * loss_aligned_prior_mel
+                + effective_prior_mel_weight * loss_aligned_prior_mel
                 + generator_adversarial_loss(fake_features)
                 + 2.0 * feature_matching_loss(real_features, fake_features)
             )
@@ -754,6 +788,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 "discriminator": float(loss_d.item()),
                 "mel": float(loss_mel.item()),
                 "prior_mel": float(loss_aligned_prior_mel.item()),
+                "prior_mel_weight": effective_prior_mel_weight,
                 "duration": float(output.duration_loss.item()),
                 "kl": float(loss_kl.item()),
             })
@@ -781,6 +816,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     "run_step=%d/%d | global_step=%d/%d | "
                     "step_time=%.2fs | rolling=%.2fs | speed=%.2f steps/min | ETA=%s | "
                     "generator=%.4f | discriminator=%.4f | mel=%.4f | prior_mel=%.4f | "
+                    "prior_weight=%.3f | posterior_scale=%.3f | "
                     "duration=%.4f | kl=%.4f | lr=%.8f",
                     progress_bar(run_step, planned_run_steps), overall_progress,
                     epoch, raw["training"]["epochs"],
@@ -789,6 +825,8 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     seconds_per_step, rolling_step_time, 60.0 / max(rolling_step_time, 1e-9),
                     eta, loss_g.item(), loss_d.item(), loss_mel.item(),
                     loss_aligned_prior_mel.item(),
+                    effective_prior_mel_weight,
+                    output.posterior_log_scale.exp().mean().item(),
                     output.duration_loss.item(), loss_kl.item(),
                     optimizer_g.param_groups[0]["lr"],
                     extra={"tts_style": "progress"},

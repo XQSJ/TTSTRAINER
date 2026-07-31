@@ -71,6 +71,15 @@ ASR 回识别和 speaker embedding 相似度属于可选重型门禁，不会默
 Waveform Decoder、Multi-Period/Scale Discriminator。损失包括 Mel、KL、Duration、
 Adversarial 和 Feature Matching。
 
+训练顺序不是把所有损失从第一个 step 同时压上去。Posterior Encoder + Decoder 的
+重建是基础主链；质量预设先让它单独稳定 5,000 step，随后才用 10,000 step 把
+aligned text-prior Mel 辅助损失从 0 平滑升到目标权重。这样既训练文本先验，又避免
+随机文本先验在训练早期直接拉坏共享 Decoder。
+
+验证目录同时保存 posterior 均值重建与随机样本重建。均值重建用于稳定判断主链是否
+正常，随机重建用于观察 posterior 方差；不能再把单次随机采样的噪声直接当作
+Posterior Encoder 已损坏。
+
 ## 推理图
 
 部署仅执行：

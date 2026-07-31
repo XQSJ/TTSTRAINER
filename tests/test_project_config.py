@@ -37,6 +37,12 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(
                 resolved["training"]["aligned_prior_mel_weight"], 10.0,
             )
+            self.assertEqual(
+                resolved["training"]["aligned_prior_mel_start_steps"], 5000,
+            )
+            self.assertEqual(
+                resolved["training"]["aligned_prior_mel_warmup_steps"], 10000,
+            )
             self.assertEqual(resolved["validation"]["every_epochs"], 5)
 
     def test_mobile_preset_is_isolated_from_quality_frontend(self):

@@ -20,7 +20,8 @@ from tts_trainer.vits.data import (AudioConfig, inspect_alignment_item,
                                    slice_waveforms)
 from tts_trainer.vits.losses import discriminator_loss, generator_adversarial_loss
 from tts_trainer.vits.modules import maximum_path, sinusoidal_position_encoding
-from tts_trainer.vits.trainer import _semantic_reference_root, train_vits
+from tts_trainer.vits.trainer import (_semantic_reference_root,
+                                      scheduled_weight, train_vits)
 from tts_trainer.vits.trainer import (_load_expanded_generator,
                                       _load_warm_start_generator,
                                       _resolve_frontend_contract)
@@ -50,6 +51,20 @@ def tiny_config():
 
 
 class VitsTests(unittest.TestCase):
+    def test_aligned_prior_auxiliary_weight_is_delayed_and_ramped(self):
+        self.assertEqual(
+            scheduled_weight(10.0, 5000, start_steps=5000, warmup_steps=10000),
+            0.0,
+        )
+        self.assertEqual(
+            scheduled_weight(10.0, 10000, start_steps=5000, warmup_steps=10000),
+            5.0,
+        )
+        self.assertEqual(
+            scheduled_weight(10.0, 15000, start_steps=5000, warmup_steps=10000),
+            10.0,
+        )
+
     def test_alignment_gate_detects_piper_token_overflow(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -715,7 +730,10 @@ class VitsTests(unittest.TestCase):
                 "frontend": {"require_phonemes": False},
                 "training": {"batch_size": 1, "learning_rate_generator": 0.0002,
                              "learning_rate_discriminator": 0.0002, "epochs": 1,
-                             "checkpoint_every_steps": 50, "seed": 7},
+                             "checkpoint_every_steps": 50, "seed": 7,
+                             "aligned_prior_mel_weight": 10.0,
+                             "aligned_prior_mel_start_steps": 5000,
+                             "aligned_prior_mel_warmup_steps": 10000},
             }
             config_path = root / "config.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -733,6 +751,9 @@ class VitsTests(unittest.TestCase):
             saved = json.loads((checkpoint / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["language_map"], {"en": 0})
             self.assertEqual(saved["config"]["num_languages"], 1)
+            self.assertEqual(
+                saved["metrics"]["train"]["prior_mel_weight"], 0.0,
+            )
 
     def test_validation_creates_best_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -784,12 +805,18 @@ class VitsTests(unittest.TestCase):
             preview = root / "run" / "validation-audio" / "epoch-0001"
             self.assertTrue((preview / "target.wav").is_file())
             self.assertTrue((preview / "posterior-reconstruction.wav").is_file())
+            self.assertTrue(
+                (preview / "posterior-sampled-reconstruction.wav").is_file()
+            )
             self.assertTrue((preview / "aligned-text-prior.wav").is_file())
             self.assertTrue((preview / "text-only-inference.wav").is_file())
             diagnostics = json.loads(
                 (preview / "diagnostics.json").read_text(encoding="utf-8")
             )
             self.assertIn("duration_ratio", diagnostics)
+            self.assertIn("posterior_mean_full_mel", diagnostics)
+            self.assertIn("posterior_sampled_full_mel", diagnostics)
+            self.assertIn("posterior_scale_mean", diagnostics)
             with wave.open(
                 str(preview / "posterior-reconstruction.wav"), "rb",
             ) as posterior:

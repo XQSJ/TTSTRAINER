@@ -206,9 +206,42 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                     output.audio_mask[0:1, :, :target_frames],
                     batch["language_ids"][0:1], batch["speaker_ids"][0:1],
                 )
+                full_posterior_mean = generator.decode_posterior(
+                    output.posterior_mean[0:1, :, :target_frames],
+                    output.audio_mask[0:1, :, :target_frames],
+                    batch["language_ids"][0:1], batch["speaker_ids"][0:1],
+                )
+                comparison_samples = target_frames * audio_config.hop_length
+                comparison_target = batch["waveforms"][
+                    0:1, 0, :comparison_samples
+                ]
+                comparison_mean = full_posterior_mean[
+                    0:1, 0, :comparison_samples
+                ]
+                comparison_sampled = full_posterior[
+                    0:1, 0, :comparison_samples
+                ]
+                comparison_mel = torch.log(
+                    mel_transform(comparison_target).clamp_min(1e-5)
+                )
+                posterior_mean_mel = F.l1_loss(
+                    torch.log(
+                        mel_transform(comparison_mean).clamp_min(1e-5)
+                    ),
+                    comparison_mel,
+                )
+                posterior_sampled_mel = F.l1_loss(
+                    torch.log(
+                        mel_transform(comparison_sampled).clamp_min(1e-5)
+                    ),
+                    comparison_mel,
+                )
                 audio_files = {
                     "target.wav": batch["waveforms"][0, 0, :target_samples],
-                    "posterior-reconstruction.wav": full_posterior[
+                    "posterior-reconstruction.wav": full_posterior_mean[
+                        0, 0, :comparison_samples
+                    ],
+                    "posterior-sampled-reconstruction.wav": full_posterior[
                         0, 0, :target_frames * audio_config.hop_length
                     ],
                     "aligned-text-prior.wav": full_prior[0, 0, :target_frames * audio_config.hop_length],
@@ -235,6 +268,23 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                         "duration_noise_scale": 0.35,
                     },
                     "posterior_mel": float(mel.item()),
+                    "posterior_segment_sampled_mel": float(mel.item()),
+                    "posterior_mean_full_mel": float(
+                        posterior_mean_mel.item()
+                    ),
+                    "posterior_sampled_full_mel": float(
+                        posterior_sampled_mel.item()
+                    ),
+                    "posterior_scale_mean": float(
+                        output.posterior_log_scale[
+                            0, :, :target_frames
+                        ].exp().mean().item()
+                    ),
+                    "posterior_scale_max": float(
+                        output.posterior_log_scale[
+                            0, :, :target_frames
+                        ].exp().max().item()
+                    ),
                     "aligned_prior_mel": float(prior_mel.item()),
                     "files": list(audio_files),
                 }, ensure_ascii=False, indent=2), encoding="utf-8")
