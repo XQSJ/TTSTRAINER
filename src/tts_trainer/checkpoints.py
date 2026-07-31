@@ -5,11 +5,13 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 
-# Formats 1 and 2 were produced with broken text-prior training semantics.
-# Format 3 is usable as a backbone warm start, but its deterministic duration
-# predictor is not compatible with the stochastic duration model in format 4.
+# 格式 1/2 的文本先验训练语义有误；格式 3 可迁移主干，但确定性时长预测器
+# 与格式 4 的随机时长模型不兼容。
+# Formats 1/2 have broken text-prior semantics. Format 3 can warm-start the
+# backbone, but its deterministic duration predictor is incompatible with v4.
 CHECKPOINT_FORMAT = 4
 WARM_START_FORMATS = frozenset((3, CHECKPOINT_FORMAT))
+TRAINING_OBJECTIVE = "standard-vits-mel-kl-duration-gan-feature-v1"
 
 
 def require_checkpoint_format(value: int) -> None:
@@ -38,7 +40,7 @@ def require_checkpoint_format(value: int) -> None:
 
 
 def require_warm_start_checkpoint_format(value: int) -> None:
-    """Accept only checkpoints whose inference backbone is safe to transfer."""
+    """仅接受可安全迁移推理主干的 checkpoint。 / Accept safe backbones only."""
     if value in WARM_START_FORMATS:
         return
     require_checkpoint_format(value)
@@ -53,12 +55,14 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
                              selection: dict | None = None,
                              data_split: dict | None = None,
                              quality_summary: dict | None = None,
+                             audio=None,
                              scheduler_g=None, scheduler_d=None, scaler=None) -> Path:
     import torch
     destination = Path(directory)
     destination.mkdir(parents=True, exist_ok=True)
     state = {
         "format": CHECKPOINT_FORMAT,
+        "training_objective": TRAINING_OBJECTIVE,
         "epoch": epoch,
         "global_step": global_step,
         "generator": generator.state_dict(),
@@ -74,6 +78,7 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
     temporary.replace(destination / "training-state.pt")
     metadata = {
         "format": CHECKPOINT_FORMAT,
+        "training_objective": TRAINING_OBJECTIVE,
         "epoch": epoch,
         "global_step": global_step,
         "config": asdict(config) if is_dataclass(config) else config,
@@ -85,9 +90,10 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
         "selection": selection,
         "data_split": data_split,
         "quality_summary": quality_summary,
-        # Mobile/Piper uses token 0 as a valid inter-phoneme blank. Checkpoints
-        # created before this marker froze that row as padding and must learn it
-        # through an updated resume/warm-start before mobile export.
+        "audio": asdict(audio) if is_dataclass(audio) else audio,
+        # Mobile/Piper 把 token 0 同时用作有效音素间 blank；此标记说明该行可训练。
+        # Mobile/Piper also uses token 0 as a valid inter-phoneme blank; this
+        # marker certifies that the embedding row was trainable.
         "learned_blank_token": True,
         "metrics": metrics or {},
     }
@@ -106,6 +112,13 @@ def load_training_checkpoint(directory: str | Path, *, generator, discriminator=
     state = torch.load(source / "training-state.pt", map_location=map_location, weights_only=False)
     require_checkpoint_format(int(metadata["format"]))
     require_checkpoint_format(int(state["format"]))
+    for label, payload in (("metadata", metadata), ("training state", state)):
+        objective = payload.get("training_objective")
+        if objective is not None and objective != TRAINING_OBJECTIVE:
+            raise ValueError(
+                f"unsupported {label} objective {objective!r}; "
+                f"expected {TRAINING_OBJECTIVE!r}"
+            )
     generator.load_state_dict(state["generator"])
     if discriminator is not None: discriminator.load_state_dict(state["discriminator"])
     if optimizer_g is not None: optimizer_g.load_state_dict(state["optimizer_g"])

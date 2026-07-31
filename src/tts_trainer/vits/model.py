@@ -134,16 +134,15 @@ class MultilingualVITS(nn.Module):
         latent, _ = self.flow(latent_prior, audio_mask, g, reverse=True)
         return self.decoder(latent, g), frame_lengths, attention
 
+    @torch.no_grad()
     def decode_aligned_prior(self, prior_mean: torch.Tensor, audio_mask: torch.Tensor,
                              language_ids: torch.Tensor, speaker_ids: torch.Tensor,
                              starts: torch.Tensor | None = None) -> torch.Tensor:
-        """Decode the text prior under an oracle MAS alignment.
+        """在 MAS 真值对齐下解码文本先验。 / Decode with oracle MAS alignment.
 
-        This isolates text-prior/flow quality from duration prediction. It is
-        also used by the aligned-prior auxiliary training loss. Validation
-        already runs under ``torch.no_grad()``, while training must retain this
-        graph so the text encoder and inverse flow receive a direct acoustic
-        signal instead of relying only on KL divergence.
+        仅用于隔离文本先验/Flow 与时长预测问题，不参与反向传播。
+        This isolates text-prior/flow quality from duration prediction and is
+        validation-only: it never participates in backpropagation.
         """
         g = self.conditioning(language_ids, speaker_ids)
         latent, _ = self.flow(prior_mean * audio_mask, audio_mask, g, reverse=True)
@@ -153,7 +152,7 @@ class MultilingualVITS(nn.Module):
 
     def decode_posterior(self, latent: torch.Tensor, audio_mask: torch.Tensor,
                          language_ids: torch.Tensor, speaker_ids: torch.Tensor) -> torch.Tensor:
-        """Decode a full posterior latent for validation diagnostics."""
+        """解码完整 posterior 供诊断。 / Decode a full posterior for diagnostics."""
         g = self.conditioning(language_ids, speaker_ids)
         return self.decoder(latent * audio_mask, g)
 

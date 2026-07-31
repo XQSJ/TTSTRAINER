@@ -12,15 +12,15 @@ FRONTEND_CONTRACT_FORMAT = 1
 NORMALIZATION_CONTRACT = "unicode-nfkc-collapse-whitespace-v1"
 TOKEN_CONTRACT = "routed-phoneme-units-v1"
 DIRECT_TOKEN_ENCODING = "bos-phonemes-eos-v1"
-# Piper's canonical phonemes_to_ids sequence is:
+# Piper 官方序列 / canonical phonemes_to_ids sequence:
 #   BOS, PAD, (phoneme, PAD)*, EOS
-# Version 1 of TTSTRAINER (and sherpa-onnx 1.13.4) omitted the PAD after BOS.
-# Keep the old name solely so old mobile checkpoints can be rejected clearly.
+# TTSTRAINER v1 和 sherpa-onnx 1.13.4 的 wire 输入缺少 BOS 后的 PAD。
+# The v1/sherpa-onnx 1.13.4 wire input omitted the PAD after BOS.
 LEGACY_PIPER_TOKEN_ENCODING = "piper-bos-phoneme-pad-eos-v1"
 PIPER_TOKEN_ENCODING = "piper-bos-pad-phoneme-pad-eos-v2"
-# Mobile v3 deliberately separates sherpa's Piper wire representation from
-# the sequence learned by VITS. sherpa may emit PAD separators, but the ONNX
-# input adapter removes them before the text encoder sees this direct sequence.
+# Mobile v3 将 Piper 传输 PAD 与 VITS 训练序列分离；ONNX 适配器先删除 PAD。
+# Mobile v3 separates Piper wire PADs from VITS training; the ONNX adapter
+# strips PADs before the text encoder sees the compact sequence.
 MOBILE_DIRECT_TOKEN_ENCODING = "mobile-espeak-bos-phonemes-eos-v3"
 MOBILE_ESPEAK_VOICES = {
     "zh": "cmn",

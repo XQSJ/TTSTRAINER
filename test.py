@@ -1,4 +1,4 @@
-from vits.runtime import OnnxTTS, write_wav
+from tts_trainer.vits.runtime import OnnxTTS, write_wav
 
 tts = OnnxTTS("artifacts/model_1")
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -9,6 +10,7 @@ import subprocess
 import warnings
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -120,6 +122,21 @@ def voice_profiles(speaker_map: dict[str, int], language_map: dict[str, int]) ->
                 "language_id": language_id,
             })
     return profiles
+
+
+def _representative_wire_input(tokens: list[str], frontend: dict) -> torch.Tensor:
+    """构造真实非空部署输入。 / Build a real non-empty runtime wire input."""
+    if len(tokens) < 5:
+        raise ValueError("checkpoint vocabulary is missing required special tokens")
+    unit_id = 5 if len(tokens) > 5 else 4
+    token_encoding = frontend.get("token_encoding", DIRECT_TOKEN_ENCODING)
+    if token_encoding in {PIPER_TOKEN_ENCODING, MOBILE_DIRECT_TOKEN_ENCODING}:
+        # sherpa-onnx 1.13.4 传输格式 / wire format:
+        # BOS,(phone,PAD)*,EOS.
+        values = [1, unit_id, 0, 2]
+    else:
+        values = [1, unit_id, 2]
+    return torch.tensor([values], dtype=torch.long)
 
 
 def _replace_onnx_metadata(model, values: dict[str, object]) -> None:
@@ -265,11 +282,31 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     frontend = metadata.get("frontend") or frontend_contract_from_config(
         {}, tuple(metadata["language_map"])
     ).to_dict()
+    checkpoint_audio = metadata.get("audio") or {}
+    checkpoint_sample_rate = checkpoint_audio.get("sample_rate")
+    if (
+        checkpoint_sample_rate is not None
+        and int(checkpoint_sample_rate) != int(sample_rate)
+    ):
+        raise ValueError(
+            "export sample rate does not match checkpoint: "
+            f"requested {sample_rate}, checkpoint {checkpoint_sample_rate}"
+        )
     mobile_piper = frontend.get("token_encoding") == PIPER_TOKEN_ENCODING
     mobile_direct = (
         frontend.get("token_encoding") == MOBILE_DIRECT_TOKEN_ENCODING
     )
     config = _config_from_metadata(metadata)
+    if config.num_languages != len(metadata["language_map"]):
+        raise ValueError(
+            "checkpoint language map does not match model architecture: "
+            f"map={len(metadata['language_map'])}, model={config.num_languages}"
+        )
+    if config.num_speakers != len(metadata["speaker_map"]):
+        raise ValueError(
+            "checkpoint speaker map does not match model architecture: "
+            f"map={len(metadata['speaker_map'])}, model={config.num_speakers}"
+        )
     logger.info("ONNX export step=1/5 action=load_checkpoint path=%s", checkpoint_dir)
     generator = MultilingualVITS(config)
     state = torch.load(checkpoint_dir / "training-state.pt", map_location="cpu", weights_only=False)
@@ -280,10 +317,12 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         strip_piper_pads=mobile_direct,
     )
     target = output_dir / "model.onnx"
-    tokens = torch.tensor([[2, 4, 5, 3]], dtype=torch.long)
-    lengths = torch.tensor([4], dtype=torch.long)
+    tokens = _representative_wire_input(metadata["tokens"], frontend)
+    lengths = torch.tensor([tokens.shape[1]], dtype=torch.long)
     scales = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
     sid = torch.tensor([0], dtype=torch.long)
+    with torch.no_grad():
+        reference_output = wrapper(tokens, lengths, scales, sid).cpu().numpy()
     logger.info("ONNX export step=2/5 action=build_graph opset=%d output=%s", opset, target)
     dynamic_axes = {
         "input": {1: "text_length"},
@@ -308,6 +347,41 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         )
     logger.info("ONNX export step=3/5 action=check_model size_bytes=%d", target.stat().st_size)
     model = onnx.load(str(target)); onnx.checker.check_model(model)
+    try:
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise RuntimeError(
+            "ONNX parity validation requires: pip install -e '.[export]'"
+        ) from exc
+    session = ort.InferenceSession(
+        str(target), providers=["CPUExecutionProvider"],
+    )
+    runtime_output = session.run(None, {
+        "input": tokens.numpy(),
+        "input_lengths": lengths.numpy(),
+        "scales": scales.numpy(),
+        "sid": sid.numpy(),
+    })[0]
+    if runtime_output.shape != reference_output.shape:
+        raise RuntimeError(
+            "ONNX parity validation shape mismatch: "
+            f"PyTorch {reference_output.shape}, ONNX {runtime_output.shape}"
+        )
+    maximum_error = float(np.max(np.abs(runtime_output - reference_output)))
+    if not np.allclose(
+        runtime_output, reference_output, atol=2e-4, rtol=2e-4,
+    ):
+        raise RuntimeError(
+            "ONNX output differs from PyTorch inference; "
+            f"maximum_absolute_error={maximum_error:.6g}"
+        )
+    logger.info(
+        "ONNX export parity status=passed maximum_absolute_error=%.6g "
+        "test_input_length=%d",
+        maximum_error, tokens.shape[1],
+    )
+    with target.open("rb") as stream:
+        model_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
     profiles = voice_profiles(metadata["speaker_map"], metadata["language_map"])
     text_input = _export_sherpa_android_text_package(
         onnx, model, output_dir, frontend, profiles, sample_rate=sample_rate,
@@ -316,6 +390,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     deployment = {
         "format": 2,
         "model_type": "multilingual-vits-piper-shaped",
+        "model_sha256": model_sha256,
         "sample_rate": sample_rate,
         "hop_length": config.hop_length,
         "inputs": ["input", "input_lengths", "scales", "sid"],
@@ -348,6 +423,11 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         "num_languages": config.num_languages,
         "num_speakers": config.num_speakers,
         "voice_profiles": profiles,
+        "export_validation": {
+            "pytorch_onnx_parity": True,
+            "maximum_absolute_error": maximum_error,
+            "input_length": int(tokens.shape[1]),
+        },
     }
     (output_dir / "model.onnx.json").write_text(json.dumps(deployment, ensure_ascii=False, indent=2), encoding="utf-8")
     (output_dir / "frontend.json").write_text(json.dumps(frontend, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -366,17 +446,37 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
 
 
 def validate_onnx_runtime(model_path: str | Path) -> tuple[int, ...]:
-    import numpy as np
     import onnxruntime as ort
+    model_path = Path(model_path)
+    deployment = json.loads(
+        (model_path.parent / "model.onnx.json").read_text(encoding="utf-8")
+    )
+    tokens = json.loads(
+        (model_path.parent / "tokens.json").read_text(encoding="utf-8")
+    )["tokens"]
+    test_input = _representative_wire_input(
+        tokens, deployment.get("frontend") or {},
+    ).numpy()
+    profiles = deployment.get("voice_profiles") or []
+    sid = int(profiles[0]["sid"]) if profiles else 0
     logger.info("ONNX runtime validation status=started provider=CPUExecutionProvider model=%s", model_path)
     session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
     output = session.run(None, {
-        "input": np.asarray([[2, 3]], dtype=np.int64),
-        "input_lengths": np.asarray([2], dtype=np.int64),
+        "input": test_input,
+        "input_lengths": np.asarray([test_input.shape[1]], dtype=np.int64),
         "scales": np.asarray([0.0, 1.0, 0.0], dtype=np.float32),
-        "sid": np.asarray([0], dtype=np.int64),
+        "sid": np.asarray([sid], dtype=np.int64),
     })[0]
     if output.ndim != 3 or output.shape[1] != 1 or output.shape[2] <= 0:
         raise RuntimeError(f"unexpected ONNX output shape: {output.shape}")
-    logger.info("ONNX runtime validation status=completed output_shape=%s", tuple(output.shape))
+    if not np.isfinite(output).all():
+        raise RuntimeError("ONNX output contains NaN or infinity")
+    peak = float(np.max(np.abs(output)))
+    if peak > 1.001:
+        raise RuntimeError(f"ONNX output exceeds waveform range: peak={peak}")
+    logger.info(
+        "ONNX runtime validation status=completed output_shape=%s "
+        "input_length=%d sid=%d peak=%.6f",
+        tuple(output.shape), test_input.shape[1], sid, peak,
+    )
     return tuple(output.shape)

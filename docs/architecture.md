@@ -71,14 +71,16 @@ ASR 回识别和 speaker embedding 相似度属于可选重型门禁，不会默
 Waveform Decoder、Multi-Period/Scale Discriminator。损失包括 Mel、KL、Duration、
 Adversarial 和 Feature Matching。
 
-训练顺序不是把所有损失从第一个 step 同时压上去。Posterior Encoder + Decoder 的
-重建是基础主链；质量预设先让它单独稳定 5,000 step，随后才用 10,000 step 把
-aligned text-prior Mel 辅助损失从 0 平滑升到目标权重。这样既训练文本先验，又避免
-随机文本先验在训练早期直接拉坏共享 Decoder。
+Posterior Encoder + Decoder 的重建是基础主链。`aligned-text-prior.wav` 是隔离
+Text Encoder/Flow/MAS 的验证信号，不作为额外 Mel 损失反向更新共享 Decoder；
+文本先验使用标准 VITS 的 KL 和 Duration 目标训练。
 
-验证目录同时保存 posterior 均值重建与随机样本重建。均值重建用于稳定判断主链是否
-正常，随机重建用于观察 posterior 方差；不能再把单次随机采样的噪声直接当作
-Posterior Encoder 已损坏。
+验证目录同时保存 posterior 随机重建与均值重建。随机版保持训练时的真实路径，均值
+版用于隔离 posterior 方差；二者需要结合判断。
+
+自动指标不能直接“听懂”语音。`best` 默认只按 posterior Mel 保存为主链诊断，
+`prior_mel` 作为文字先验诊断；自动流水线默认导出 `last`。产品验收仍需结合
+`text-only-*`、ASR 回识别和人工试听，不能把单个 Mel 最小值等同于最好听的模型。
 
 ## 推理图
 

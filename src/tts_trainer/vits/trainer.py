@@ -44,15 +44,30 @@ from .validation import (evaluate_validation, save_split_artifacts,
 logger = logging.getLogger(__name__)
 
 
-def scheduled_weight(
-    target: float, step: int, *, start_steps: int, warmup_steps: int,
-) -> float:
-    """Delay an auxiliary loss, then introduce it without shocking training."""
-    if target <= 0.0 or step <= start_steps:
-        return 0.0
-    if warmup_steps <= 0:
-        return target
-    return target * min(1.0, (step - start_steps) / warmup_steps)
+def profile_balancing_weights(items) -> list[float]:
+    """让每个语言×音色组合获得相同采样质量。 / Balance every lang×voice pair."""
+    counts = Counter((item.language, item.speaker) for item in items)
+    return [
+        1.0 / counts[(item.language, item.speaker)]
+        for item in items
+    ]
+
+
+def reject_removed_prior_options(training: dict) -> None:
+    """拒绝会恢复旧回归的配置。 / Reject options that revive the regression."""
+    removed = sorted({
+        "aligned_prior_mel_weight",
+        "aligned_prior_mel_start_steps",
+        "aligned_prior_mel_warmup_steps",
+    } & set(training))
+    if removed:
+        raise ValueError(
+            "这些训练参数已移除，因为会破坏 posterior 重建 / "
+            "removed training options would damage posterior reconstruction: "
+            + ", ".join(removed)
+            + "; 请删除后使用标准 VITS 损失 / delete them and use the "
+            "standard VITS objective"
+        )
 
 
 def select_device(requested: str = "auto") -> torch.device:
@@ -254,6 +269,11 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         output_override=output_dir, device_override=device_name,
     )
     configure_logging_from_config(raw)
+    # 2026-07-30 的辅助 prior Mel 会从随机 text prior 反向更新共享 Decoder，
+    # 实测会破坏 posterior 重建，因此旧配置必须显式失败，不能静默忽略。
+    # The 2026-07-30 auxiliary prior-Mel loss backpropagated from a random text
+    # prior into the shared decoder and damaged posterior reconstruction.
+    reject_removed_prior_options(raw["training"])
     prepare_experiment(layout, raw, config_path)
     logger.info("training setup model=%s languages=%s", layout.name, ",".join(layout.languages))
     audio_config = AudioConfig(**raw["audio"])
@@ -298,9 +318,9 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 "old speakers are absent from the new metadata and may be forgotten: " + ", ".join(sorted(missing_old)),
                 stacklevel=2,
             )
-    # Build a permissive preliminary vocabulary for the alignment gate. The
-    # final initialization rules are applied again after incompatible rows are
-    # removed, so a rejected row cannot introduce an otherwise unused token.
+    # 先为 MAS 门禁建立宽松词表；过滤不兼容样本后再按初始化规则重建最终词表。
+    # Build a permissive vocabulary for the MAS gate, then rebuild the final
+    # vocabulary after rejected rows are removed.
     discovered = Vocabulary.build(items)
     if previous is None:
         vocabulary = discovered
@@ -505,12 +525,16 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         train_items, vocabulary, speaker_map, language_map, audio_config,
         piper_compatible=piper_compatible,
     )
-    language_counts = Counter(item.language for item in train_items)
-    speaker_counts = Counter(item.speaker for item in train_items)
-    weights = [
-        1.0 / (language_counts[item.language] * speaker_counts[item.speaker]) ** 0.5
-        for item in train_items
-    ]
+    profile_counts = Counter(
+        (item.language, item.speaker) for item in train_items
+    )
+    weights = profile_balancing_weights(train_items)
+    logger.info(
+        "sampling strategy=equal-language-speaker-profile profiles=%d "
+        "minimum_samples=%d maximum_samples=%d",
+        len(profile_counts), min(profile_counts.values()),
+        max(profile_counts.values()),
+    )
     sampler = torch.utils.data.WeightedRandomSampler(weights, len(train_items), replacement=True)
     loader = torch.utils.data.DataLoader(
         dataset, batch_size=raw["training"]["batch_size"], sampler=sampler,
@@ -607,34 +631,10 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         n_mels=audio_config.n_mels, center=False, power=audio_config.mel_power,
     ).to(device)
     logger.info(
-        "loss setup mel_power=%.1f segment_frames=%d segment_samples=%d "
-        "aligned_prior_mel_weight=%.2f aligned_prior_start_steps=%d "
-        "aligned_prior_warmup_steps=%d",
+        "loss setup mel_power=%.1f segment_frames=%d segment_samples=%d",
         audio_config.mel_power, config.segment_frames,
         config.segment_frames * audio_config.hop_length,
-        float(raw["training"].get("aligned_prior_mel_weight", 0.0)),
-        int(raw["training"].get("aligned_prior_mel_start_steps", 0)),
-        int(raw["training"].get("aligned_prior_mel_warmup_steps", 0)),
     )
-    aligned_prior_mel_weight = float(
-        raw["training"].get("aligned_prior_mel_weight", 0.0)
-    )
-    aligned_prior_mel_start_steps = int(
-        raw["training"].get("aligned_prior_mel_start_steps", 0)
-    )
-    aligned_prior_mel_warmup_steps = int(
-        raw["training"].get("aligned_prior_mel_warmup_steps", 0)
-    )
-    if aligned_prior_mel_weight < 0.0:
-        raise ValueError("training.aligned_prior_mel_weight must not be negative")
-    if aligned_prior_mel_start_steps < 0:
-        raise ValueError(
-            "training.aligned_prior_mel_start_steps must not be negative"
-        )
-    if aligned_prior_mel_warmup_steps < 0:
-        raise ValueError(
-            "training.aligned_prior_mel_warmup_steps must not be negative"
-        )
     destination = layout.checkpoints_dir
     vocabulary.save(layout.run_dir / "vocab.json")
     if start_epoch > raw["training"]["epochs"]:
@@ -644,10 +644,13 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     log_every = int(raw["training"].get("log_every_steps", 10))
     if log_every < 1:
         raise ValueError("training.log_every_steps must be at least 1")
-    selection_metric = str(validation_config.get("metric", "prior_mel"))
-    if selection_metric not in {"mel", "prior_mel", "duration", "kl", "total"}:
+    selection_metric = str(validation_config.get("metric", "mel"))
+    if selection_metric not in {
+        "mel", "prior_mel", "combined_mel", "duration", "kl", "total",
+    }:
         raise ValueError(
-            "validation.metric must be mel, prior_mel, duration, kl, or total"
+            "validation.metric must be mel, prior_mel, combined_mel, "
+            "duration, kl, or total"
         )
     previous_selection = (
         previous.get("selection")
@@ -749,31 +752,10 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             mel_real = torch.log(mel_transform(real_audio.squeeze(1)).clamp_min(1e-5))
             mel_fake = torch.log(mel_transform(output.audio.squeeze(1)).clamp_min(1e-5))
             loss_mel = F.l1_loss(mel_fake, mel_real)
-            effective_prior_mel_weight = scheduled_weight(
-                aligned_prior_mel_weight,
-                global_step + 1,
-                start_steps=aligned_prior_mel_start_steps,
-                warmup_steps=aligned_prior_mel_warmup_steps,
-            )
-            if effective_prior_mel_weight:
-                aligned_prior_audio = generator.decode_aligned_prior(
-                    output.prior_mean, output.audio_mask,
-                    batch["language_ids"], batch["speaker_ids"],
-                    output.slice_starts,
-                )
-                aligned_prior_mel = torch.log(
-                    mel_transform(aligned_prior_audio.squeeze(1)).clamp_min(1e-5)
-                )
-                loss_aligned_prior_mel = F.l1_loss(
-                    aligned_prior_mel, mel_real,
-                )
-            else:
-                loss_aligned_prior_mel = loss_mel.new_zeros(())
             loss_kl = kl_loss(output.latent_prior, output.posterior_log_scale,
                               output.prior_mean, output.prior_log_scale, output.audio_mask)
             loss_g = (
                 45.0 * loss_mel + output.duration_loss + loss_kl
-                + effective_prior_mel_weight * loss_aligned_prior_mel
                 + generator_adversarial_loss(fake_features)
                 + 2.0 * feature_matching_loss(real_features, fake_features)
             )
@@ -787,8 +769,6 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 "generator": float(loss_g.item()),
                 "discriminator": float(loss_d.item()),
                 "mel": float(loss_mel.item()),
-                "prior_mel": float(loss_aligned_prior_mel.item()),
-                "prior_mel_weight": effective_prior_mel_weight,
                 "duration": float(output.duration_loss.item()),
                 "kl": float(loss_kl.item()),
             })
@@ -815,8 +795,8 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     "TRAIN %s %6.2f%% | epoch=%d/%d | batch=%d/%d | "
                     "run_step=%d/%d | global_step=%d/%d | "
                     "step_time=%.2fs | rolling=%.2fs | speed=%.2f steps/min | ETA=%s | "
-                    "generator=%.4f | discriminator=%.4f | mel=%.4f | prior_mel=%.4f | "
-                    "prior_weight=%.3f | posterior_scale=%.3f | "
+                    "generator=%.4f | discriminator=%.4f | mel=%.4f | "
+                    "posterior_scale=%.3f | "
                     "duration=%.4f | kl=%.4f | lr=%.8f",
                     progress_bar(run_step, planned_run_steps), overall_progress,
                     epoch, raw["training"]["epochs"],
@@ -824,8 +804,6 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     global_step, target_global_step,
                     seconds_per_step, rolling_step_time, 60.0 / max(rolling_step_time, 1e-9),
                     eta, loss_g.item(), loss_d.item(), loss_mel.item(),
-                    loss_aligned_prior_mel.item(),
-                    effective_prior_mel_weight,
                     output.posterior_log_scale.exp().mean().item(),
                     output.duration_loss.item(), loss_kl.item(),
                     optimizer_g.param_groups[0]["lr"],
@@ -852,6 +830,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     },
                     data_split=split_report,
                     quality_summary=quality_summary,
+                    audio=audio_config,
                     scheduler_g=scheduler_g, scheduler_d=scheduler_d,
                     metrics={"generator": loss_g.item(), "discriminator": loss_d.item(), "mel": loss_mel.item()},
                 )
@@ -875,7 +854,10 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         validation_metrics = None
         should_evaluate = validation_loader is not None and (
             epoch == start_epoch or epoch % evaluation_every == 0
-            or (max_steps is not None and global_step >= max_steps)
+            or (
+                max_steps is not None
+                and global_step - run_start_step >= max_steps
+            )
         )
         if should_evaluate:
             live_progress.clear()
@@ -889,7 +871,10 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             preview_dir = (
                 layout.run_dir / "validation-audio" / f"epoch-{epoch:04d}"
                 if epoch == start_epoch or epoch % preview_every == 0
-                or (max_steps is not None and global_step >= max_steps)
+                or (
+                    max_steps is not None
+                    and global_step - run_start_step >= max_steps
+                )
                 else None
             )
             validation_metrics = evaluate_validation(
@@ -900,9 +885,11 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             current_value = float(validation_metrics[selection_metric])
             logger.info(
                 "VALIDATION DONE | epoch=%d | mel=%.4f | prior_mel=%.4f | "
-                "duration=%.4f | kl=%.4f | total=%.4f",
-                epoch, validation_metrics["mel"], validation_metrics["prior_mel"], validation_metrics["duration"],
-                validation_metrics["kl"], validation_metrics["total"],
+                "combined_mel=%.4f | duration=%.4f | kl=%.4f | total=%.4f",
+                epoch, validation_metrics["mel"], validation_metrics["prior_mel"],
+                validation_metrics["combined_mel"], validation_metrics["duration"],
+                validation_metrics["kl"],
+                validation_metrics["total"],
             )
             if current_value < best_value:
                 best_value = current_value
@@ -926,6 +913,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     frontend_conformance=frontend_conformance,
                     selection=selection, data_split=split_report,
                     quality_summary=quality_summary,
+                    audio=audio_config,
                     scheduler_g=scheduler_g, scheduler_d=scheduler_d,
                     metrics={"train": train_metrics, "validation": validation_metrics},
                 )
@@ -961,6 +949,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 frontend_conformance=frontend_conformance,
                 selection=selection, data_split=split_report,
                 quality_summary=quality_summary,
+                audio=audio_config,
                 scheduler_g=scheduler_g, scheduler_d=scheduler_d,
                 metrics={"train": train_metrics, "validation": validation_metrics},
             )

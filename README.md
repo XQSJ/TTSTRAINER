@@ -707,7 +707,7 @@ runs/<model_name>/
 │   └── epoch-XXXX/
 │       ├── target.wav
 │       ├── posterior-reconstruction.wav
-│       ├── posterior-sampled-reconstruction.wav
+│       ├── posterior-mean-reconstruction.wav
 │       ├── aligned-text-prior.wav
 │       ├── text-only-inference.wav
 │       ├── text-only-deterministic.wav
@@ -737,16 +737,18 @@ artifacts/<model_name>/
 验证音频按链路逐级排错：
 
 1. `target.wav` 是数据集原音频。
-2. `posterior-reconstruction.wav` 使用 Posterior Encoder 的均值，检查
+2. `posterior-reconstruction.wav` 保持训练时的 posterior 随机采样语义，检查
    WAV→频谱→Posterior Encoder→Decoder，不经过文本前端。
-3. `posterior-sampled-reconstruction.wav` 额外加入 posterior 随机采样；它与均值版
-   差异很大时，应查看 `diagnostics.json` 的 `posterior_scale_*`。
+3. `posterior-mean-reconstruction.wav` 去除随机采样；它与采样版差异很大时，应查看
+   `diagnostics.json` 的 `posterior_scale_*`。
 4. `aligned-text-prior.wav` 加入文本编码和 MAS 真值对齐，但不测试时长预测。
 5. 两个 `text-only-*` 才是完整 TTS 推理链路。
 
-从零训练时，文本 prior 的辅助 Mel 损失默认先等待 5,000 step，再用 10,000 step
-平滑加入，避免尚未学会声码器时破坏 posterior 主重建。训练日志中的
-`prior_weight` 会显示当前实际权重；epoch 1 通常应为 `0.000`。
+`aligned-text-prior.wav` 只用于验证，不会作为额外 Mel 损失反向更新共享 Decoder；
+文本先验继续由标准 VITS 的 KL 和 Duration 目标训练，避免破坏 posterior 主重建。
+
+2026-07-30 训练回归的完整时间线、原因和迁移建议见
+[中英文回归说明](docs/regression_2026-07-30.md)。
 
 旧配置中的单数 `dataset.voice` 仍可读取，以避免已有训练任务失效；新配置统一使用
 `dataset.voices`。
@@ -934,9 +936,10 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer export-vits \
 
 - Qwen Teacher 的公开语言范围决定自动生成音频的语言范围。
 - 七语同音色质量仍取决于 Teacher 数据、文本覆盖和各语言发音评测。
-- VITS 音色相似不代表韵律一定自然；应试听 `runs/<name>/validation-audio/`。默认
-  best checkpoint 按 `prior_mel` 选择文字先验最好的版本，不要因为 epoch 更新就默认
-  `last` 更好；长句时长比持续升高或 `aligned_prior_mel` 恶化表示训练正在退化。
+- VITS 音色相似不代表韵律一定自然；应试听 `runs/<name>/validation-audio/`。
+  `best` 默认按 posterior `mel` 保存，只能说明音频重建主链较好，不能代替可懂度
+  试听或 ASR。流水线默认导出 `last`，避免早期随机噪声仅凭频谱距离被误选为最终模型；
+  `prior_mel` 和时长比用于观察文字先验及韵律是否继续改善。
 - 旧版 `preset=mobile` 曾直接使用带 blank 的 Piper v1/v2 序列训练。当前 v3 将
   Piper wire PAD 与 VITS 训练序列解耦；请保留原始 WAV/文本并使用新的
   `experiment.name` 从零训练。公共音频会复用，`quality` checkpoint 和专用 G2P

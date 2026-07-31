@@ -18,10 +18,12 @@ from tts_trainer.vits import MultilingualVITS, VitsConfig, VitsDiscriminator
 from tts_trainer.vits.model import integer_durations
 from tts_trainer.vits.data import (AudioConfig, inspect_alignment_item,
                                    slice_waveforms)
-from tts_trainer.vits.losses import discriminator_loss, generator_adversarial_loss
+from tts_trainer.vits.losses import (discriminator_loss,
+                                     generator_adversarial_loss, kl_loss)
 from tts_trainer.vits.modules import maximum_path, sinusoidal_position_encoding
 from tts_trainer.vits.trainer import (_semantic_reference_root,
-                                      scheduled_weight, train_vits)
+                                      profile_balancing_weights,
+                                      reject_removed_prior_options, train_vits)
 from tts_trainer.vits.trainer import (_load_expanded_generator,
                                       _load_warm_start_generator,
                                       _resolve_frontend_contract)
@@ -51,19 +53,36 @@ def tiny_config():
 
 
 class VitsTests(unittest.TestCase):
-    def test_aligned_prior_auxiliary_weight_is_delayed_and_ramped(self):
-        self.assertEqual(
-            scheduled_weight(10.0, 5000, start_steps=5000, warmup_steps=10000),
-            0.0,
-        )
-        self.assertEqual(
-            scheduled_weight(10.0, 10000, start_steps=5000, warmup_steps=10000),
-            5.0,
-        )
-        self.assertEqual(
-            scheduled_weight(10.0, 15000, start_steps=5000, warmup_steps=10000),
-            10.0,
-        )
+    def test_removed_prior_loss_options_fail_instead_of_being_ignored(self):
+        for key in (
+            "aligned_prior_mel_weight",
+            "aligned_prior_mel_start_steps",
+            "aligned_prior_mel_warmup_steps",
+        ):
+            with self.subTest(key=key), self.assertRaisesRegex(
+                ValueError, "已移除|removed",
+            ):
+                reject_removed_prior_options({key: 1})
+
+    def test_profile_sampler_balances_observed_language_speaker_pairs(self):
+        items = [
+            *[
+                Item(Path(f"en-a-{index}.wav"), "a", "en", "a", ("a",))
+                for index in range(4)
+            ],
+            Item(Path("en-b.wav"), "b", "en", "b", ("b",)),
+            Item(Path("fr-a.wav"), "c", "fr", "a", ("c",)),
+        ]
+        weights = profile_balancing_weights(items)
+        masses = {}
+        for item, weight in zip(items, weights):
+            key = (item.language, item.speaker)
+            masses[key] = masses.get(key, 0.0) + weight
+        self.assertEqual(masses, {
+            ("en", "a"): 1.0,
+            ("en", "b"): 1.0,
+            ("fr", "a"): 1.0,
+        })
 
     def test_alignment_gate_detects_piper_token_overflow(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -232,7 +251,62 @@ class VitsTests(unittest.TestCase):
         self.assertIsNotNone(gradient)
         self.assertGreater(float(gradient.abs().sum()), 0.0)
 
-    def test_aligned_prior_audio_loss_trains_text_path(self):
+    def test_standard_vits_objective_reaches_every_generator_subsystem(self):
+        tokens = torch.tensor([[2, 4, 5, 3], [2, 7, 3, 0]])
+        text_lengths = torch.tensor([4, 3])
+        spectrogram = torch.randn(2, 9, 8)
+        spec_lengths = torch.tensor([8, 7])
+        output = self.model(
+            tokens, text_lengths, spectrogram, spec_lengths,
+            torch.tensor([0, 1]), torch.tensor([0, 2]),
+        )
+        loss = (
+            output.audio.square().mean()
+            + output.duration_loss
+            + kl_loss(
+                output.latent_prior, output.posterior_log_scale,
+                output.prior_mean, output.prior_log_scale, output.audio_mask,
+            )
+        )
+        loss.backward()
+        for name in (
+            "conditioning", "text_encoder", "posterior_encoder",
+            "duration_predictor", "flow", "decoder",
+        ):
+            module = getattr(self.model, name)
+            gradient_sum = sum(
+                float(parameter.grad.abs().sum())
+                for parameter in module.parameters()
+                if parameter.grad is not None
+            )
+            self.assertGreater(gradient_sum, 0.0, name)
+
+    def test_mobile_token_sequence_does_not_change_posterior_forward_path(self):
+        direct_tokens = torch.tensor([[2, 4, 5, 3]])
+        piper_tokens = torch.tensor([[2, 0, 4, 0, 5, 0, 3]])
+        spectrogram = torch.randn(1, 9, 8)
+        spec_lengths = torch.tensor([8])
+        language_ids = torch.tensor([0])
+        speaker_ids = torch.tensor([0])
+
+        torch.manual_seed(123)
+        direct = self.model(
+            direct_tokens, torch.tensor([4]), spectrogram, spec_lengths,
+            language_ids, speaker_ids,
+        )
+        torch.manual_seed(123)
+        piper = self.model(
+            piper_tokens, torch.tensor([7]), spectrogram, spec_lengths,
+            language_ids, speaker_ids,
+        )
+
+        self.assertTrue(torch.equal(direct.posterior_mean, piper.posterior_mean))
+        self.assertTrue(torch.equal(direct.posterior_log_scale, piper.posterior_log_scale))
+        self.assertTrue(torch.equal(direct.latent, piper.latent))
+        self.assertTrue(torch.equal(direct.slice_starts, piper.slice_starts))
+        self.assertTrue(torch.equal(direct.audio, piper.audio))
+
+    def test_aligned_prior_decoder_is_validation_only(self):
         tokens = torch.tensor([[2, 4, 5, 3]])
         text_lengths = torch.tensor([4])
         spectrogram = torch.randn(1, 9, 8)
@@ -245,11 +319,7 @@ class VitsTests(unittest.TestCase):
             output.prior_mean, output.audio_mask,
             torch.tensor([0]), torch.tensor([0]), output.slice_starts,
         )
-        prior_audio.abs().mean().backward()
-
-        gradient = self.model.text_encoder.projection.weight.grad
-        self.assertIsNotNone(gradient)
-        self.assertGreater(float(gradient.abs().sum()), 0.0)
+        self.assertFalse(prior_audio.requires_grad)
 
     def test_vectorized_maximum_path_matches_reference_alignment(self):
         value = torch.randn(2, 9, 5)
@@ -471,6 +541,10 @@ class VitsTests(unittest.TestCase):
             restored = MultilingualVITS(self.config)
             result = load_training_checkpoint(directory, generator=restored)
             self.assertEqual(result["global_step"], 12)
+            self.assertEqual(
+                result["training_objective"],
+                "standard-vits-mel-kl-duration-gan-feature-v1",
+            )
             self.assertTrue(torch.equal(restored.conditioning.language_embedding.weight,
                                         self.model.conditioning.language_embedding.weight))
 
@@ -605,11 +679,15 @@ class VitsTests(unittest.TestCase):
                 (target.parent / "model.onnx.json").read_text(encoding="utf-8"),
             )
             self.assertEqual(deployment["format"], 2)
+            self.assertEqual(len(deployment["model_sha256"]), 64)
             self.assertEqual(
                 deployment["scales"],
                 ["noise_scale", "length_scale", "duration_noise_scale"],
             )
             self.assertEqual(deployment["scales_default"], [0.667, 1.0, 0.35])
+            self.assertTrue(
+                deployment["export_validation"]["pytorch_onnx_parity"]
+            )
             self.assertEqual(list(target.parent.glob("*.onnx")), [target])
             self.assertTrue((target.parent / "frontend.conformance.json").is_file())
             shape = validate_onnx_runtime(target)
@@ -629,8 +707,12 @@ class VitsTests(unittest.TestCase):
             self.assertGreater(audio.shape[0], 0)
 
     def test_mobile_onnx_strips_sherpa_wire_pads_before_direct_model(self):
+        mobile_config = VitsConfig(**{
+            **self.config.to_dict(), "num_languages": 1, "num_speakers": 1,
+        })
+        mobile_model = MultilingualVITS(mobile_config)
         discriminator = VitsDiscriminator(periods=(2,))
-        optimizer_g = torch.optim.AdamW(self.model.parameters())
+        optimizer_g = torch.optim.AdamW(mobile_model.parameters())
         optimizer_d = torch.optim.AdamW(discriminator.parameters())
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -648,9 +730,9 @@ class VitsTests(unittest.TestCase):
                 engine_version="eSpeak NG mobile test",
             )
             save_training_checkpoint(
-                checkpoint, generator=self.model, discriminator=discriminator,
+                checkpoint, generator=mobile_model, discriminator=discriminator,
                 optimizer_g=optimizer_g, optimizer_d=optimizer_d,
-                epoch=1, global_step=1, config=self.config,
+                epoch=1, global_step=1, config=mobile_config,
                 language_map={"en": 0},
                 speaker_map={"voice_01": 0},
                 tokens=["_", "^", "$", " ", "<unk>", "a"],
@@ -730,10 +812,7 @@ class VitsTests(unittest.TestCase):
                 "frontend": {"require_phonemes": False},
                 "training": {"batch_size": 1, "learning_rate_generator": 0.0002,
                              "learning_rate_discriminator": 0.0002, "epochs": 1,
-                             "checkpoint_every_steps": 50, "seed": 7,
-                             "aligned_prior_mel_weight": 10.0,
-                             "aligned_prior_mel_start_steps": 5000,
-                             "aligned_prior_mel_warmup_steps": 10000},
+                             "checkpoint_every_steps": 50, "seed": 7},
             }
             config_path = root / "config.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -751,9 +830,7 @@ class VitsTests(unittest.TestCase):
             saved = json.loads((checkpoint / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["language_map"], {"en": 0})
             self.assertEqual(saved["config"]["num_languages"], 1)
-            self.assertEqual(
-                saved["metrics"]["train"]["prior_mel_weight"], 0.0,
-            )
+            self.assertNotIn("prior_mel", saved["metrics"]["train"])
 
     def test_validation_creates_best_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -798,6 +875,7 @@ class VitsTests(unittest.TestCase):
             self.assertEqual(saved["selection"]["best_epoch"], 1)
             self.assertIn("validation", saved["metrics"])
             self.assertIn("prior_mel", saved["metrics"]["validation"])
+            self.assertIn("combined_mel", saved["metrics"]["validation"])
             state = torch.load(
                 best / "training-state.pt", map_location="cpu", weights_only=False,
             )
@@ -806,7 +884,7 @@ class VitsTests(unittest.TestCase):
             self.assertTrue((preview / "target.wav").is_file())
             self.assertTrue((preview / "posterior-reconstruction.wav").is_file())
             self.assertTrue(
-                (preview / "posterior-sampled-reconstruction.wav").is_file()
+                (preview / "posterior-mean-reconstruction.wav").is_file()
             )
             self.assertTrue((preview / "aligned-text-prior.wav").is_file())
             self.assertTrue((preview / "text-only-inference.wav").is_file())

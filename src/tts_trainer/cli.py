@@ -61,7 +61,10 @@ def _dispatch(argv=None) -> int:
     language_check = sub.add_parser("language-check", help="check selected language G2P and teacher mappings")
     language_check.add_argument("codes", nargs="*")
     language_check.add_argument("--config", default="training_configs/train1.json")
-    training = sub.add_parser("train"); training.add_argument("--config", required=True)
+    training = sub.add_parser(
+        "train", help="train the legacy Mel baseline (not the mobile VITS pipeline)",
+    )
+    training.add_argument("--config", required=True)
     vits_training = sub.add_parser("train-vits", help="train waveform VITS generator and discriminators")
     vits_training.add_argument("--config", default="training_configs/train1.json")
     vits_training.add_argument("--metadata")
@@ -81,7 +84,10 @@ def _dispatch(argv=None) -> int:
     many.add_argument("configs", nargs="+")
     many.add_argument("--max-parallel", type=int, default=1)
     many.add_argument("--max-steps", type=int)
-    export = sub.add_parser("export"); export.add_argument("--config", required=True); export.add_argument("--checkpoint", required=True); export.add_argument("--output", default="artifacts/model.onnx")
+    export = sub.add_parser(
+        "export", help="export the legacy Mel baseline (not a waveform TTS model)",
+    )
+    export.add_argument("--config", required=True); export.add_argument("--checkpoint", required=True); export.add_argument("--output", default="artifacts/model.onnx")
     vits_export = sub.add_parser("export-vits", help="export a training checkpoint with Piper-shaped inputs")
     source = vits_export.add_mutually_exclusive_group(required=True)
     source.add_argument("--checkpoint"); source.add_argument("--config")
@@ -197,7 +203,7 @@ def _dispatch(argv=None) -> int:
     elif args.command == "export-vits":
         if args.config:
             raw, layout = resolve_experiment(args.config)
-            checkpoint_name = raw.get("validation", {}).get("export_checkpoint", "best")
+            checkpoint_name = raw.get("validation", {}).get("export_checkpoint", "last")
             if checkpoint_name not in {"best", "last"}:
                 raise ValueError("validation.export_checkpoint must be best or last")
             checkpoint = layout.checkpoints_dir / checkpoint_name

@@ -238,11 +238,11 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                 )
                 audio_files = {
                     "target.wav": batch["waveforms"][0, 0, :target_samples],
-                    "posterior-reconstruction.wav": full_posterior_mean[
+                    "posterior-reconstruction.wav": full_posterior[
                         0, 0, :comparison_samples
                     ],
-                    "posterior-sampled-reconstruction.wav": full_posterior[
-                        0, 0, :target_frames * audio_config.hop_length
+                    "posterior-mean-reconstruction.wav": full_posterior_mean[
+                        0, 0, :comparison_samples
                     ],
                     "aligned-text-prior.wav": full_prior[0, 0, :target_frames * audio_config.hop_length],
                     "text-only-inference.wav": inferred[0, 0],
@@ -316,6 +316,11 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
     if examples == 0:
         raise ValueError("validation loader contains no examples")
     metrics = {key: value / examples for key, value in totals.items()}
-    metrics["total"] = 45.0 * metrics["prior_mel"] + metrics["duration"] + metrics["kl"]
+    metrics["combined_mel"] = metrics["mel"] + metrics["prior_mel"]
+    # total 必须对应可训练的标准 VITS 重建目标；prior_mel 只是 oracle 对齐诊断，
+    # 不能再静默替代 posterior 来选择 checkpoint。
+    # Keep total aligned with the trainable VITS objective. prior_mel is only
+    # an oracle-alignment diagnostic and must not replace posterior selection.
+    metrics["total"] = 45.0 * metrics["mel"] + metrics["duration"] + metrics["kl"]
     metrics["items"] = float(examples)
     return metrics

@@ -44,8 +44,9 @@ class Vocabulary:
                 for token_id in encoded
                 for value in (token_id, self.ids[PAD])
             ]
-            # Piper frames BOS like every other input symbol. This leading
-            # blank is semantically significant and must match deployment.
+            # Piper 会像普通符号一样给 BOS 加 blank；训练与部署必须一致。
+            # Piper frames BOS like any other symbol, so training and
+            # deployment must agree on this leading blank.
             return [
                 self.ids[BOS], self.ids[PAD], *encoded, self.ids[EOS],
             ]

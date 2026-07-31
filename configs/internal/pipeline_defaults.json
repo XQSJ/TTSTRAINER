@@ -75,6 +75,7 @@
     }
   },
   "validation": {
+    "_comment": "best 仅作为 posterior 重建诊断，默认导出 last；prior_mel 不等于可懂度 / best diagnoses posterior reconstruction only; export last by default because prior_mel is not intelligibility",
     "enabled": true,
     "fraction": 0.05,
     "minimum_per_profile": 1,
@@ -82,9 +83,9 @@
     "require_every_profile": true,
     "batch_size": 4,
     "every_epochs": 1,
-    "metric": "prior_mel",
+    "metric": "mel",
     "preview_every_epochs": 10,
-    "export_checkpoint": "best",
+    "export_checkpoint": "last",
     "seed": 1337
   },
   "quality": {

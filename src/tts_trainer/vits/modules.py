@@ -62,9 +62,10 @@ class TextEncoder(nn.Module):
     def __init__(self, vocab_size: int, hidden_channels: int, latent_channels: int,
                  condition_channels: int, layers: int, heads: int):
         super().__init__()
-        # Token 0 is both the batch-padding value and Piper's *valid* inter-
-        # phoneme blank. Sequence masks already remove batch padding, so the
-        # embedding must stay learnable for mobile/Piper training.
+        # token 0 同时是 batch padding 和 Piper 的有效音素间 blank；mask 已负责
+        # 移除 batch padding，因此 embedding 不能被冻结。
+        # Token 0 is both batch padding and Piper's valid inter-phoneme blank;
+        # sequence masks remove batch padding, so its embedding stays trainable.
         self.embedding = nn.Embedding(vocab_size, hidden_channels)
         # VITS scales embeddings by sqrt(hidden), so their initialization must
         # use hidden**-0.5. PyTorch's default N(0, 1) initialization would make

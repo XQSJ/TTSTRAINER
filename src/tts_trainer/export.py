@@ -18,7 +18,9 @@ def export_onnx(config_path: str, checkpoint_path: str, output_path: str) -> Pat
     model = build_model(checkpoint["vocab_size"], config.data.n_mels, config.model)
     model.load_state_dict(checkpoint["model"]); model.eval()
     target = Path(output_path); target.parent.mkdir(parents=True, exist_ok=True)
-    tokens = torch.tensor([[2, 3]], dtype=torch.long)
+    # Vocabulary special ids are PAD=0, BOS=1, EOS=2, SPACE=3, UNK=4.
+    # Trace a real non-empty BOS→unit→EOS sequence.
+    tokens = torch.tensor([[1, 4, 2]], dtype=torch.long)
     language = torch.tensor([0], dtype=torch.long)
     torch.onnx.export(model, (tokens, language), str(target), input_names=["tokens", "language_id"],
                       output_names=["mel"], dynamic_axes={"tokens": {1: "text_length"}, "mel": {2: "text_length"}},

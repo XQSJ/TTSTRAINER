@@ -180,7 +180,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
 
     if task == "train" and stages.get("export", True):
         stage_time = stage_started("export", "load checkpoint, export ONNX and validate runtime")
-        requested_checkpoint = raw.get("validation", {}).get("export_checkpoint", "best")
+        requested_checkpoint = raw.get("validation", {}).get("export_checkpoint", "last")
         if requested_checkpoint not in {"best", "last"}:
             raise ValueError("validation.export_checkpoint must be best or last")
         preferred = layout.checkpoints_dir / requested_checkpoint

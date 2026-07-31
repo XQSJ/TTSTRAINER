@@ -34,15 +34,15 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertEqual(resolved["training"]["log_every_steps"], 50)
             self.assertEqual(resolved["training"]["checkpoint_every_steps"], 10000)
             self.assertEqual(resolved["training"]["checkpoint_every_epochs"], 5)
-            self.assertEqual(
-                resolved["training"]["aligned_prior_mel_weight"], 10.0,
-            )
-            self.assertEqual(
-                resolved["training"]["aligned_prior_mel_start_steps"], 5000,
-            )
-            self.assertEqual(
-                resolved["training"]["aligned_prior_mel_warmup_steps"], 10000,
-            )
+            # These options caused the 2026-07-30 regression and must not
+            # silently return through a preset. / 这些选项曾导致 2026-07-30
+            # 回归，不能通过 preset 悄悄重新进入训练目标。
+            for key in (
+                "aligned_prior_mel_weight",
+                "aligned_prior_mel_start_steps",
+                "aligned_prior_mel_warmup_steps",
+            ):
+                self.assertNotIn(key, resolved["training"])
             self.assertEqual(resolved["validation"]["every_epochs"], 5)
 
     def test_mobile_preset_is_isolated_from_quality_frontend(self):
@@ -84,8 +84,8 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(config["experiment"]["languages"], ["zh", "en", "ja", "ko", "fr", "es", "pt"])
         self.assertEqual(config["language_registry"]["de"]["teacher"]["language"], "German")
         self.assertTrue(config["validation"]["enabled"])
-        self.assertEqual(config["validation"]["metric"], "prior_mel")
-        self.assertEqual(config["validation"]["export_checkpoint"], "best")
+        self.assertEqual(config["validation"]["metric"], "mel")
+        self.assertEqual(config["validation"]["export_checkpoint"], "last")
         self.assertTrue(config["quality"]["enabled"])
 
     def test_training_config_keeps_expert_defaults_internal(self):
