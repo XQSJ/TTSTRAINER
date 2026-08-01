@@ -65,22 +65,27 @@ token 规则。训练会校验它与配置、已有 checkpoint 是否兼容，�
 训练前的信号质检会阻止削波、静音、时长和语速异常样本进入训练。数据随后按
 `language + speaker` 分层、固定随机种子划分 train/validation，并保存 CSV 与
 指纹。每轮验证计算 Mel/Duration/KL 等确定性指标，`best/` 与 `last/` 分开保存。
+quality/mobile 默认按 `posterior_mel + prior_mel` 选择 best，兼顾声学重建和文字先验。
 ASR 回识别和 speaker embedding 相似度属于可选重型门禁，不会默认下载模型。
 
 训练态包含 Text Encoder、Duration Predictor、Posterior Encoder、MAS、Flow、
 Waveform Decoder、Multi-Period/Scale Discriminator。损失包括 Mel、KL、Duration、
 Adversarial 和 Feature Matching。
 
-Posterior Encoder + Decoder 的重建是基础主链。`aligned-text-prior.wav` 是隔离
-Text Encoder/Flow/MAS 的验证信号，不作为额外 Mel 损失反向更新共享 Decoder；
-文本先验使用标准 VITS 的 KL 和 Duration 目标训练。
+Posterior Encoder + Decoder 的重建是基础主链。标准阶段中，
+`aligned-text-prior.wav` 只是隔离 Text Encoder/Flow/MAS 的验证信号，不把随机文本
+先验的 Mel 梯度写入共享 Decoder。声学主链达到门槛后，训练器进入
+`text_prior_refinement`：冻结 Conditioning、Posterior Encoder、Decoder 和判别器，
+再用 MAS 对齐的文本先验 Mel、KL、随机时长 NLL 与平均时长 L1 强化 Text Encoder、
+Flow 和 Duration Predictor。Decoder 只作为固定的可微分声学映射，因此不会再次破坏
+已经学好的音色和 posterior 重建。
 
 验证目录同时保存 posterior 均值重建与随机重建。历史文件名
 `posterior-reconstruction.wav` 始终指稳定均值版，随机训练路径单独保存为
 `posterior-sampled-reconstruction.wav`；二者需要结合判断。
 
-自动指标不能直接“听懂”语音。`best` 默认只按 posterior Mel 保存为主链诊断，
-`prior_mel` 作为文字先验诊断；自动流水线默认导出 `last`。产品验收仍需结合
+自动指标不能直接“听懂”语音。`best` 默认按 posterior 与 prior Mel 之和保存，
+自动流水线默认导出 `last`。产品验收仍需结合
 `text-only-*`、ASR 回识别和人工试听，不能把单个 Mel 最小值等同于最好听的模型。
 
 ## 推理图

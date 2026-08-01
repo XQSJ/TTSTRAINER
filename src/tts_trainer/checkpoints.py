@@ -56,7 +56,10 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
                              data_split: dict | None = None,
                              quality_summary: dict | None = None,
                              audio=None,
-                             scheduler_g=None, scheduler_d=None, scaler=None) -> Path:
+                             scheduler_g=None, scheduler_d=None, scaler=None,
+                             optimizer_refinement=None,
+                             scheduler_refinement=None,
+                             training_phase: dict | None = None) -> Path:
     import torch
     destination = Path(directory)
     destination.mkdir(parents=True, exist_ok=True)
@@ -71,6 +74,13 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
         "optimizer_d": optimizer_d.state_dict(),
         "scheduler_g": scheduler_g.state_dict() if scheduler_g else None,
         "scheduler_d": scheduler_d.state_dict() if scheduler_d else None,
+        "optimizer_refinement": (
+            optimizer_refinement.state_dict() if optimizer_refinement else None
+        ),
+        "scheduler_refinement": (
+            scheduler_refinement.state_dict() if scheduler_refinement else None
+        ),
+        "training_phase": training_phase,
         "scaler": scaler.state_dict() if scaler else None,
     }
     temporary = destination / "training-state.pt.tmp"
@@ -91,6 +101,7 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
         "data_split": data_split,
         "quality_summary": quality_summary,
         "audio": asdict(audio) if is_dataclass(audio) else audio,
+        "training_phase": training_phase,
         # Mobile/Piper 把 token 0 同时用作有效音素间 blank；此标记说明该行可训练。
         # Mobile/Piper also uses token 0 as a valid inter-phoneme blank; this
         # marker certifies that the embedding row was trainable.
@@ -105,7 +116,9 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
 
 def load_training_checkpoint(directory: str | Path, *, generator, discriminator=None,
                              optimizer_g=None, optimizer_d=None, scheduler_g=None,
-                             scheduler_d=None, scaler=None, map_location="cpu") -> dict:
+                             scheduler_d=None, scaler=None, map_location="cpu",
+                             optimizer_refinement=None,
+                             scheduler_refinement=None) -> dict:
     import torch
     source = Path(directory)
     metadata = json.loads((source / "metadata.json").read_text(encoding="utf-8"))
@@ -127,6 +140,16 @@ def load_training_checkpoint(directory: str | Path, *, generator, discriminator=
         scheduler_g.load_state_dict(state["scheduler_g"])
     if scheduler_d is not None and state.get("scheduler_d") is not None:
         scheduler_d.load_state_dict(state["scheduler_d"])
+    if (
+        optimizer_refinement is not None
+        and state.get("optimizer_refinement") is not None
+    ):
+        optimizer_refinement.load_state_dict(state["optimizer_refinement"])
+    if (
+        scheduler_refinement is not None
+        and state.get("scheduler_refinement") is not None
+    ):
+        scheduler_refinement.load_state_dict(state["scheduler_refinement"])
     if scaler is not None and state.get("scaler") is not None:
         scaler.load_state_dict(state["scaler"])
     return {**metadata, "state": state}

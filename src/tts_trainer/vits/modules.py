@@ -181,6 +181,15 @@ class StochasticDurationPredictor(nn.Module):
         )
         return (negative_log_likelihood * mask).sum() / mask.sum().clamp_min(1.0)
 
+    def mean_loss(
+        self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor,
+        durations: torch.Tensor,
+    ) -> torch.Tensor:
+        """直接校正平均时长。 / Directly supervise mean log-duration."""
+        mean, _ = self.statistics(x, mask, g)
+        target = torch.log(durations.clamp_min(1.0)) * mask
+        return (torch.abs(mean - target) * mask).sum() / mask.sum().clamp_min(1.0)
+
     def sample(
         self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor,
         noise_scale: float | torch.Tensor,

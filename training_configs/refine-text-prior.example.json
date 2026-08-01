@@ -1,0 +1,25 @@
+{
+  "_comment": "保留旧模型音色与声码器，只强化文字转语音链路 / Keep the old voice and vocoder; refine only the text-to-speech path",
+  "task": "train",
+  "preset": "quality",
+  "experiment": {
+    "name": "model_1_prior_refined",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "cuda:0",
+    "initialization": {
+      "mode": "refine_text_prior",
+      "checkpoint": "runs/model_1/checkpoints/last"
+    }
+  },
+  "dataset": {
+    "_comment": "保持原模型 speaker 到公共 voice_id 的映射；程序自动复用 checkpoint 数据 / Keep the original speaker-to-voice mapping; checkpoint data is reused automatically",
+    "sentences_per_language": 2000,
+    "speakers": {
+      "voice_01": "voice_01"
+    }
+  },
+  "training": {
+    "batch_size": 4,
+    "epochs": 100
+  }
+}

@@ -71,10 +71,13 @@ def resolve_experiment(config_path: str | Path, *, metadata_override: str | None
     artifacts_dir = Path(experiment.get("artifact_root", "artifacts")) / name
     initialization = experiment.get("initialization", {"mode": "scratch"})
     mode = initialization.get("mode", "scratch")
-    if mode not in {"scratch", "resume", "warm_start", "expand_speakers"}:
+    if mode not in {
+        "scratch", "resume", "warm_start", "expand_speakers",
+        "refine_text_prior",
+    }:
         raise ValueError(
             "experiment.initialization.mode must be scratch, resume, warm_start, "
-            "or expand_speakers"
+            "expand_speakers, or refine_text_prior"
         )
     checkpoint_value = initialization.get("checkpoint")
     checkpoint = Path(checkpoint_value) if checkpoint_value else None

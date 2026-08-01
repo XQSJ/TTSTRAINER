@@ -84,9 +84,25 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(config["experiment"]["languages"], ["zh", "en", "ja", "ko", "fr", "es", "pt"])
         self.assertEqual(config["language_registry"]["de"]["teacher"]["language"], "German")
         self.assertTrue(config["validation"]["enabled"])
-        self.assertEqual(config["validation"]["metric"], "mel")
+        self.assertEqual(config["validation"]["metric"], "combined_mel")
         self.assertEqual(config["validation"]["export_checkpoint"], "last")
         self.assertTrue(config["quality"]["enabled"])
+        self.assertTrue(config["training"]["text_prior_refinement"]["enabled"])
+
+    def test_refinement_example_keeps_advanced_defaults_internal(self):
+        config = load_project_config(
+            "training_configs/refine-text-prior.example.json",
+        )
+        self.assertEqual(
+            config["experiment"]["initialization"]["mode"],
+            "refine_text_prior",
+        )
+        self.assertEqual(
+            config["validation"]["metric"], "combined_mel",
+        )
+        self.assertTrue(
+            config["training"]["text_prior_refinement"]["enabled"],
+        )
 
     def test_training_config_keeps_expert_defaults_internal(self):
         config = load_project_config("training_configs/train2.json")

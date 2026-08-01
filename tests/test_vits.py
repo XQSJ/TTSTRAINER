@@ -22,8 +22,11 @@ from tts_trainer.vits.losses import (discriminator_loss,
                                      generator_adversarial_loss, kl_loss)
 from tts_trainer.vits.modules import maximum_path, sinusoidal_position_encoding
 from tts_trainer.vits.trainer import (_semantic_reference_root,
+                                      configure_training_stage,
                                       profile_balancing_weights,
-                                      reject_removed_prior_options, train_vits)
+                                      refinement_mel_weight,
+                                      reject_removed_prior_options,
+                                      resolve_refinement_config, train_vits)
 from tts_trainer.vits.trainer import (_load_expanded_generator,
                                       _load_warm_start_generator,
                                       _resolve_frontend_contract)
@@ -53,6 +56,21 @@ def tiny_config():
 
 
 class VitsTests(unittest.TestCase):
+    def test_refinement_config_and_mel_warmup(self):
+        config = resolve_refinement_config({
+            "lr_decay": 0.9,
+            "text_prior_refinement": {
+                "enabled": True,
+                "mel_weight": 2.0,
+                "mel_warmup_steps": 10,
+            },
+        })
+        self.assertTrue(config["enabled"])
+        self.assertEqual(config["lr_decay"], 0.9)
+        self.assertEqual(refinement_mel_weight(config, 0), 0.0)
+        self.assertEqual(refinement_mel_weight(config, 5), 1.0)
+        self.assertEqual(refinement_mel_weight(config, 10), 2.0)
+
     def test_removed_prior_loss_options_fail_instead_of_being_ignored(self):
         for key in (
             "aligned_prior_mel_weight",
@@ -321,6 +339,45 @@ class VitsTests(unittest.TestCase):
         )
         self.assertFalse(prior_audio.requires_grad)
 
+    def test_text_prior_refinement_freezes_acoustics_and_trains_prior(self):
+        discriminator = VitsDiscriminator(periods=(2,))
+        configure_training_stage(
+            self.model, discriminator, "text_prior_refinement",
+        )
+        output = self.model.forward_text_refinement(
+            torch.tensor([[2, 4, 5, 3]]), torch.tensor([4]),
+            torch.randn(1, 9, 8), torch.tensor([8]),
+            torch.tensor([0]), torch.tensor([0]),
+        )
+        loss = (
+            output.audio.square().mean()
+            + output.duration_loss
+            + output.duration_mean_loss
+            + kl_loss(
+                output.latent_prior, output.posterior_log_scale,
+                output.prior_mean, output.prior_log_scale,
+                output.audio_mask,
+            )
+        )
+        loss.backward()
+
+        for name in ("text_encoder", "flow", "duration_predictor"):
+            module = getattr(self.model, name)
+            gradient = sum(
+                float(parameter.grad.abs().sum())
+                for parameter in module.parameters()
+                if parameter.grad is not None
+            )
+            self.assertGreater(gradient, 0.0, name)
+        for name in ("conditioning", "posterior_encoder", "decoder"):
+            module = getattr(self.model, name)
+            self.assertTrue(all(
+                parameter.grad is None for parameter in module.parameters()
+            ), name)
+        self.assertTrue(all(
+            parameter.grad is None for parameter in discriminator.parameters()
+        ))
+
     def test_vectorized_maximum_path_matches_reference_alignment(self):
         value = torch.randn(2, 9, 5)
         text_lengths = torch.tensor([5, 3])
@@ -530,6 +587,12 @@ class VitsTests(unittest.TestCase):
         discriminator = VitsDiscriminator(periods=(2,))
         optimizer_g = torch.optim.AdamW(self.model.parameters())
         optimizer_d = torch.optim.AdamW(discriminator.parameters())
+        optimizer_refinement = torch.optim.AdamW(
+            self.model.text_encoder.parameters(), lr=1e-4,
+        )
+        scheduler_refinement = torch.optim.lr_scheduler.ExponentialLR(
+            optimizer_refinement, gamma=0.9,
+        )
         with tempfile.TemporaryDirectory() as directory:
             save_training_checkpoint(
                 directory, generator=self.model, discriminator=discriminator,
@@ -537,9 +600,25 @@ class VitsTests(unittest.TestCase):
                 epoch=2, global_step=12, config=self.config,
                 language_map={"zh": 0}, speaker_map={"voice_01": 0},
                 tokens=["_", "^", "$", " ", "<unk>"], metrics={"loss": 1.0},
+                optimizer_refinement=optimizer_refinement,
+                scheduler_refinement=scheduler_refinement,
+                training_phase={
+                    "stage": "text_prior_refinement",
+                    "refinement_steps": 7,
+                },
             )
             restored = MultilingualVITS(self.config)
-            result = load_training_checkpoint(directory, generator=restored)
+            restored_optimizer = torch.optim.AdamW(
+                restored.text_encoder.parameters(), lr=1e-4,
+            )
+            restored_scheduler = torch.optim.lr_scheduler.ExponentialLR(
+                restored_optimizer, gamma=0.9,
+            )
+            result = load_training_checkpoint(
+                directory, generator=restored,
+                optimizer_refinement=restored_optimizer,
+                scheduler_refinement=restored_scheduler,
+            )
             self.assertEqual(result["global_step"], 12)
             self.assertEqual(
                 result["training_objective"],
@@ -547,6 +626,9 @@ class VitsTests(unittest.TestCase):
             )
             self.assertTrue(torch.equal(restored.conditioning.language_embedding.weight,
                                         self.model.conditioning.language_embedding.weight))
+            self.assertEqual(
+                result["training_phase"]["stage"], "text_prior_refinement",
+            )
 
     def test_expand_speakers_and_vocabulary_preserves_old_embeddings(self):
         discriminator = VitsDiscriminator(periods=(2,))
@@ -832,6 +914,80 @@ class VitsTests(unittest.TestCase):
             self.assertEqual(saved["config"]["num_languages"], 1)
             self.assertNotIn("prior_mel", saved["metrics"]["train"])
 
+            refinement_config = {
+                **config,
+                "experiment": {
+                    "name": "tiny-en-refined",
+                    "languages": ["en"],
+                    "initialization": {
+                        "mode": "refine_text_prior",
+                        "checkpoint": str(checkpoint),
+                    },
+                },
+            }
+            refinement_path = root / "refinement.json"
+            refinement_path.write_text(
+                json.dumps(refinement_config), encoding="utf-8",
+            )
+            refined = train_vits(
+                str(refinement_path), str(metadata), str(root / "refined-run"),
+                device_name="cpu", max_steps=1,
+            )
+            source_state = torch.load(
+                checkpoint / "training-state.pt", map_location="cpu",
+                weights_only=False,
+            )["generator"]
+            refined_state = torch.load(
+                refined / "training-state.pt", map_location="cpu",
+                weights_only=False,
+            )
+            self.assertEqual(
+                refined_state["training_phase"]["stage"],
+                "text_prior_refinement",
+            )
+            self.assertEqual(
+                refined_state["training_phase"]["refinement_steps"], 1,
+            )
+            for prefix in ("conditioning.", "posterior_encoder.", "decoder."):
+                for name, value in source_state.items():
+                    if name.startswith(prefix):
+                        self.assertTrue(
+                            torch.equal(value, refined_state["generator"][name]),
+                            name,
+                        )
+
+            resume_config = {
+                **config,
+                "experiment": {
+                    "name": "tiny-en-refined",
+                    "languages": ["en"],
+                    "initialization": {
+                        "mode": "resume",
+                        "checkpoint": str(refined),
+                    },
+                },
+                "training": {**config["training"], "epochs": 2},
+            }
+            resume_path = root / "resume-refinement.json"
+            resume_path.write_text(
+                json.dumps(resume_config), encoding="utf-8",
+            )
+            resumed = train_vits(
+                str(resume_path), str(metadata), str(root / "refined-run"),
+                device_name="cpu", max_steps=1,
+            )
+            resumed_state = torch.load(
+                resumed / "training-state.pt", map_location="cpu",
+                weights_only=False,
+            )
+            self.assertEqual(
+                resumed_state["training_phase"]["stage"],
+                "text_prior_refinement",
+            )
+            self.assertEqual(
+                resumed_state["training_phase"]["refinement_steps"], 2,
+            )
+
     def test_validation_creates_best_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -861,7 +1017,12 @@ class VitsTests(unittest.TestCase):
                                "metric": "mel", "seed": 7},
                 "training": {"batch_size": 1, "learning_rate_generator": 0.0002,
                              "learning_rate_discriminator": 0.0002, "epochs": 1,
-                             "checkpoint_every_steps": 50, "seed": 7},
+                             "checkpoint_every_steps": 50, "seed": 7,
+                             "text_prior_refinement": {
+                                 "enabled": True,
+                                 "start_steps": 0,
+                                 "posterior_mel_threshold": None,
+                             }},
             }
             config_path = root / "config.json"
             config_path.write_text(json.dumps(config), encoding="utf-8")
@@ -880,6 +1041,13 @@ class VitsTests(unittest.TestCase):
                 best / "training-state.pt", map_location="cpu", weights_only=False,
             )
             self.assertIsNotNone(state["scheduler_g"])
+            last_metadata = json.loads(
+                (last / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                last_metadata["training_phase"]["stage"],
+                "text_prior_refinement",
+            )
             preview = root / "run" / "validation-audio" / "epoch-0001"
             self.assertTrue((preview / "target.wav").is_file())
             self.assertTrue((preview / "posterior-reconstruction.wav").is_file())

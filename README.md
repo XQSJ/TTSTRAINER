@@ -20,7 +20,7 @@ ONNX 资源。
 `run-pipeline` 的明确执行模式。直接子命令（如 `generate-samples`、`train-vits`）本身
 已有明确动作，不依赖推断。旧配置未写 `task` 时默认按 `train` 处理。
 
-`resume`、`warm_start`、`expand_speakers` 不是第三种 task，它们只描述
+`resume`、`warm_start`、`refine_text_prior`、`expand_speakers` 不是第三种 task，它们只描述
 `task: "train"` 应如何初始化模型：
 
 ```json
@@ -636,6 +636,40 @@ metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程
 
 `resume` 要求语言及顺序、speaker 集合和模型结构与 checkpoint 一致。
 
+### 声音已学会，但文字推理仍不稳定
+
+`quality` 和 `mobile` 预设会在同一次训练中自动执行两个阶段：
+
+1. 标准阶段训练完整 VITS，先把音色、声码器和 posterior 重建学稳定；
+2. 验证集 posterior Mel 达标且达到最低 step 后，自动冻结音色条件、Posterior
+   Encoder、Decoder 和判别器，只强化 Text Encoder、Flow 与 Duration Predictor。
+
+日志出现 `TEXT PRIOR REFINEMENT ACTIVATED` 表示已经安全进入第二阶段。阶段和独立
+优化器都保存在 checkpoint 中，`resume` 后会从同一阶段继续。最终仍只有一个
+checkpoint 和一个 ONNX，不会产生需要组合的两个模型。
+
+如果已有 **format 4** checkpoint 的 posterior 音频正常，但
+`aligned-text-prior.wav`、`text-only-*.wav` 较差，可复制
+[refine-text-prior.example.json](training_configs/refine-text-prior.example.json)，设置：
+
+```json
+"initialization": {
+  "mode": "refine_text_prior",
+  "checkpoint": "runs/old_model/checkpoints/last"
+}
+```
+
+这会创建一个新实验目录并从旧权重开始；音色条件和声码器权重不会更新，显著降低
+强化文本先验时破坏已有声音的风险。
+语言顺序、speaker 映射、模型架构和前端必须与原 checkpoint 一致。format 1/2 的训练
+语义有误，format 3 的时长结构不同，不能使用此模式；它们仍需按错误提示迁移或重训。
+原模型是 `mobile` 就继续使用 `preset: "mobile"`，原模型是 `quality` 就继续使用
+`preset: "quality"`，不能借 refinement 切换前端。
+
+训练是否真正改善，应同时观察：posterior Mel 不应明显恶化、`prior_mel` 应下降、
+deterministic duration ratio 应逐渐接近 `1.0`，并试听 `text-only-deterministic.wav`。
+不要只按 epoch 数量判断。
+
 ## 增加音色
 
 使用 [add-speaker.example.json](training_configs/add-speaker.example.json)：
@@ -943,8 +977,8 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer export-vits \
 - Qwen Teacher 的公开语言范围决定自动生成音频的语言范围。
 - 七语同音色质量仍取决于 Teacher 数据、文本覆盖和各语言发音评测。
 - VITS 音色相似不代表韵律一定自然；应试听 `runs/<name>/validation-audio/`。
-  `best` 默认按 posterior `mel` 保存，只能说明音频重建主链较好，不能代替可懂度
-  试听或 ASR。流水线默认导出 `last`，避免早期随机噪声仅凭频谱距离被误选为最终模型；
+  `best` 默认按 `combined_mel = posterior_mel + prior_mel` 保存，用来同时约束声学
+  重建和文本先验，但仍不能代替可懂度试听或 ASR。流水线默认导出 `last`；
   `prior_mel` 和时长比用于观察文字先验及韵律是否继续改善。
 - 旧版 `preset=mobile` 曾直接使用带 blank 的 Piper v1/v2 序列训练。当前 v3 将
   Piper wire PAD 与 VITS 训练序列解耦；请保留原始 WAV/文本并使用新的

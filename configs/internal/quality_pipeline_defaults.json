@@ -25,10 +25,24 @@
     "checkpoint_every_epochs": 5,
     "log_every_steps": 50,
     "num_workers": 2,
-    "seed": 1337
+    "seed": 1337,
+    "text_prior_refinement": {
+      "_comment": "声学主链稳定后自动冻结音色/声码器，只强化文本先验、Flow 和时长；普通用户无需修改 / After acoustics stabilize, freeze voice/vocoder and refine text prior, flow and duration; no normal tuning needed",
+      "enabled": true,
+      "start_steps": 10000,
+      "posterior_mel_threshold": 0.5,
+      "learning_rate": 0.0001,
+      "lr_decay": 0.999875,
+      "mel_weight": 1.0,
+      "mel_warmup_steps": 5000,
+      "kl_weight": 1.0,
+      "duration_nll_weight": 1.0,
+      "duration_mean_weight": 1.0
+    }
   },
   "validation": {
     "every_epochs": 5,
+    "metric": "combined_mel",
     "preview_every_epochs": 10
   }
 }

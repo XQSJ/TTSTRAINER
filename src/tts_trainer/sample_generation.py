@@ -731,7 +731,9 @@ def _checkpoint_speaker_rows(
     layout, generation: dict, text_generation: dict,
     replaced_speakers: set[str],
 ) -> list[dict]:
-    if layout.initialization_mode not in {"resume", "warm_start", "expand_speakers"}:
+    if layout.initialization_mode not in {
+        "resume", "warm_start", "expand_speakers", "refine_text_prior",
+    }:
         return []
     metadata = _checkpoint_dataset_metadata(layout)
     if metadata is None:
@@ -1418,7 +1420,9 @@ def _generate_samples_single(
     ]
     previous_metadata = (
         _checkpoint_dataset_metadata(layout)
-        if layout.initialization_mode in {"resume", "expand_speakers"} else None
+        if layout.initialization_mode in {
+            "resume", "expand_speakers", "refine_text_prior",
+        } else None
     )
     if previous_metadata is not None and all(
         path.resolve() != previous_metadata.resolve()

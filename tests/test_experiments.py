@@ -65,6 +65,26 @@ class ExperimentTests(unittest.TestCase):
             )
             self.assertEqual(layout.initialization_exclude, ("duration_predictor",))
 
+    def test_refine_text_prior_requires_checkpoint_and_has_no_excludes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "model.json"
+            config.write_text(json.dumps({
+                "experiment": {
+                    "name": "prior-v2",
+                    "initialization": {
+                        "mode": "refine_text_prior",
+                        "checkpoint": "runs/old/checkpoints/last",
+                    },
+                },
+            }))
+            _, layout = resolve_experiment(config)
+            self.assertEqual(layout.initialization_mode, "refine_text_prior")
+            self.assertEqual(
+                layout.initialization_checkpoint,
+                Path("runs/old/checkpoints/last"),
+            )
+            self.assertEqual(layout.initialization_exclude, ())
+
     def test_rejects_path_like_model_name(self):
         with self.assertRaises(ValueError):
             validate_model_name("../overwrite")

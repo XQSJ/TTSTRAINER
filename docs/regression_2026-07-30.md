@@ -71,20 +71,22 @@ invokes the VITS core.
 ## 当前保护措施 / Current safeguards
 
 - `aligned_prior_mel_*` 配置会立即报错，不再静默生效。
-- `decode_aligned_prior()` 处于 `no_grad`，只用于验证。
+- 标准阶段的 `decode_aligned_prior()` 处于 `no_grad`，只用于验证。
+- 声学主链稳定后允许进入冻结式 text-prior refinement；Decoder 参与可微前向但权重冻结。
 - quality 与 mobile 都使用标准 VITS 训练损失。
 - mobile 使用 compact training tokens，部署层单独适配 Piper wire tokens。
 - ONNX 导出使用真实 BOS→音素→EOS 输入，并比较 PyTorch/ONNX 数值。
 - checkpoint 保存训练目标和音频参数；导出检查采样率及语言/音色维度。
-- `best` 只作为 posterior 重建诊断，流水线默认导出 `last`。
+- `best` 综合 posterior/prior Mel，流水线默认导出 `last`。
 
 - Old `aligned_prior_mel_*` options fail immediately.
-- `decode_aligned_prior()` is `no_grad` and validation-only.
+- Standard-stage `decode_aligned_prior()` is `no_grad` and validation-only.
+- Frozen text-prior refinement may use differentiable decoder operations, but decoder weights stay frozen.
 - Both quality and mobile use the standard VITS objective.
 - Mobile learns compact tokens; Piper wire adaptation stays in deployment.
 - ONNX export uses real BOS→phoneme→EOS input and checks PyTorch/ONNX parity.
 - Checkpoints record the objective and audio settings; export checks dimensions.
-- `best` diagnoses posterior reconstruction; the pipeline exports `last`.
+- `best` balances posterior/prior Mel; the pipeline exports `last`.
 
 ## 旧模型处理 / Handling affected models
 

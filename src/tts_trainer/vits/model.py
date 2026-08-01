@@ -44,6 +44,21 @@ class VitsTrainingOutput:
     slice_starts: torch.Tensor
 
 
+@dataclass
+class VitsRefinementOutput:
+    """冻结声码器时的文本先验训练输出。 / Text-prior refinement outputs."""
+
+    audio: torch.Tensor
+    duration_loss: torch.Tensor
+    duration_mean_loss: torch.Tensor
+    latent_prior: torch.Tensor
+    prior_mean: torch.Tensor
+    prior_log_scale: torch.Tensor
+    posterior_log_scale: torch.Tensor
+    audio_mask: torch.Tensor
+    slice_starts: torch.Tensor
+
+
 class MultilingualVITS(nn.Module):
     """Trainable multilingual, multi-speaker VITS generator.
 
@@ -155,6 +170,77 @@ class MultilingualVITS(nn.Module):
         """解码完整 posterior 供诊断。 / Decode a full posterior for diagnostics."""
         g = self.conditioning(language_ids, speaker_ids)
         return self.decoder(latent * audio_mask, g)
+
+    def forward_text_refinement(
+        self, tokens: torch.Tensor, text_lengths: torch.Tensor,
+        spectrogram: torch.Tensor, spec_lengths: torch.Tensor,
+        language_ids: torch.Tensor, speaker_ids: torch.Tensor,
+    ) -> VitsRefinementOutput:
+        """用固定声学主链训练文本先验。 / Refine text prior against frozen acoustics.
+
+        调用方必须冻结 conditioning、posterior_encoder 和 decoder。Decoder 仍参与
+        可微分前向传播，使 Mel 梯度只流向 Text Encoder 与逆 Flow。
+        The caller must freeze conditioning, posterior_encoder, and decoder.
+        Decoder operations stay differentiable with respect to their input, so
+        Mel gradients reach only the text encoder and inverse flow.
+        """
+        frozen = (self.conditioning, self.posterior_encoder, self.decoder)
+        if any(parameter.requires_grad for module in frozen for parameter in module.parameters()):
+            raise RuntimeError(
+                "text-prior refinement requires frozen conditioning, "
+                "posterior_encoder, and decoder"
+            )
+        with torch.no_grad():
+            g = self.conditioning(language_ids, speaker_ids)
+            latent, _, posterior_log_scale, audio_mask = self.posterior_encoder(
+                spectrogram, spec_lengths, g,
+            )
+        text_hidden, text_mean, text_log_scale, text_mask = self.text_encoder(
+            tokens, text_lengths, g,
+        )
+        latent_prior, _ = self.flow(latent, audio_mask, g)
+        with torch.no_grad():
+            difference = latent_prior.detach().unsqueeze(3) - text_mean.detach().unsqueeze(2)
+            inv_variance = torch.exp(-2.0 * text_log_scale.detach()).unsqueeze(2)
+            scores = (
+                -0.5 * difference.square() * inv_variance
+                - text_log_scale.detach().unsqueeze(2)
+            ).sum(1)
+            attention = maximum_path(scores, text_lengths, spec_lengths)
+            durations = attention.sum(1).unsqueeze(1)
+        expanded_mean = torch.matmul(
+            attention, text_mean.transpose(1, 2),
+        ).transpose(1, 2)
+        expanded_log_scale = torch.matmul(
+            attention, text_log_scale.transpose(1, 2),
+        ).transpose(1, 2)
+        duration_loss = self.duration_predictor.loss(
+            text_hidden, text_mask, g, durations,
+        )
+        duration_mean_loss = self.duration_predictor.mean_loss(
+            text_hidden, text_mask, g, durations,
+        )
+        _, starts = slice_latent(
+            latent, spec_lengths, self.config.segment_frames,
+        )
+        aligned_latent, _ = self.flow(
+            expanded_mean * audio_mask, audio_mask, g, reverse=True,
+        )
+        aligned_latent = slice_latent_at(
+            aligned_latent, starts, self.config.segment_frames,
+        )
+        audio = self.decoder(aligned_latent, g)
+        return VitsRefinementOutput(
+            audio=audio,
+            duration_loss=duration_loss,
+            duration_mean_loss=duration_mean_loss,
+            latent_prior=latent_prior,
+            prior_mean=expanded_mean,
+            prior_log_scale=expanded_log_scale,
+            posterior_log_scale=posterior_log_scale,
+            audio_mask=audio_mask,
+            slice_starts=starts,
+        )
 
     def infer_deploy(self, tokens: torch.Tensor, text_lengths: torch.Tensor,
                      language_ids: torch.Tensor, speaker_ids: torch.Tensor,

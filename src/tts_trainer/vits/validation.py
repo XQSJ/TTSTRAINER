@@ -320,10 +320,10 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
         raise ValueError("validation loader contains no examples")
     metrics = {key: value / examples for key, value in totals.items()}
     metrics["combined_mel"] = metrics["mel"] + metrics["prior_mel"]
-    # total 必须对应可训练的标准 VITS 重建目标；prior_mel 只是 oracle 对齐诊断，
-    # 不能再静默替代 posterior 来选择 checkpoint。
-    # Keep total aligned with the trainable VITS objective. prior_mel is only
-    # an oracle-alignment diagnostic and must not replace posterior selection.
+    # total 保持对应标准阶段的 VITS 目标；refinement 阶段使用 combined_mel
+    # 单独选择兼顾声学主链和文本先验的 checkpoint。
+    # Keep total aligned with the standard-stage VITS objective. Refinement
+    # uses combined_mel separately to balance acoustics and the text prior.
     metrics["total"] = 45.0 * metrics["mel"] + metrics["duration"] + metrics["kl"]
     metrics["items"] = float(examples)
     return metrics

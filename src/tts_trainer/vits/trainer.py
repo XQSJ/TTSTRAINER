@@ -70,6 +70,80 @@ def reject_removed_prior_options(training: dict) -> None:
         )
 
 
+def resolve_refinement_config(training: dict) -> dict:
+    """校验文本先验强化参数。 / Validate text-prior refinement settings."""
+    raw = dict(training.get("text_prior_refinement") or {})
+    config = {
+        "enabled": bool(raw.get("enabled", False)),
+        "start_steps": int(raw.get("start_steps", 10_000)),
+        "posterior_mel_threshold": raw.get("posterior_mel_threshold", 0.5),
+        "learning_rate": float(raw.get("learning_rate", 1e-4)),
+        "lr_decay": float(raw.get("lr_decay", training.get("lr_decay", 0.999875))),
+        "mel_weight": float(raw.get("mel_weight", 1.0)),
+        "mel_warmup_steps": int(raw.get("mel_warmup_steps", 5_000)),
+        "kl_weight": float(raw.get("kl_weight", 1.0)),
+        "duration_nll_weight": float(raw.get("duration_nll_weight", 1.0)),
+        "duration_mean_weight": float(raw.get("duration_mean_weight", 1.0)),
+    }
+    threshold = config["posterior_mel_threshold"]
+    if threshold is not None:
+        threshold = float(threshold)
+        if threshold <= 0.0:
+            raise ValueError(
+                "training.text_prior_refinement.posterior_mel_threshold "
+                "must be positive or null"
+            )
+        config["posterior_mel_threshold"] = threshold
+    if config["start_steps"] < 0 or config["mel_warmup_steps"] < 0:
+        raise ValueError(
+            "text-prior refinement step counts must not be negative"
+        )
+    if config["learning_rate"] <= 0.0:
+        raise ValueError("text-prior refinement learning_rate must be positive")
+    if not 0.0 < config["lr_decay"] <= 1.0:
+        raise ValueError("text-prior refinement lr_decay must be in (0, 1]")
+    for key in (
+        "mel_weight", "kl_weight", "duration_nll_weight",
+        "duration_mean_weight",
+    ):
+        if config[key] < 0.0:
+            raise ValueError(f"text-prior refinement {key} must not be negative")
+    if not any(config[key] > 0.0 for key in (
+        "mel_weight", "kl_weight", "duration_nll_weight",
+        "duration_mean_weight",
+    )):
+        raise ValueError("text-prior refinement must enable at least one loss")
+    return config
+
+
+def configure_training_stage(generator, discriminator, stage: str) -> None:
+    """切换可训练模块且不改变最终模型结构。 / Select trainable modules."""
+    if stage not in {"standard", "text_prior_refinement"}:
+        raise ValueError(f"unknown training stage: {stage}")
+    for parameter in generator.parameters():
+        parameter.requires_grad_(stage == "standard")
+    for parameter in discriminator.parameters():
+        parameter.requires_grad_(stage == "standard")
+    if stage == "text_prior_refinement":
+        for module in (
+            generator.text_encoder, generator.flow,
+            generator.duration_predictor,
+        ):
+            for parameter in module.parameters():
+                parameter.requires_grad_(True)
+
+
+def refinement_mel_weight(config: dict, refinement_steps: int) -> float:
+    """平滑加入安全 Mel 监督。 / Warm in the safe Mel supervision."""
+    target = config["mel_weight"]
+    warmup = config["mel_warmup_steps"]
+    if target <= 0.0:
+        return 0.0
+    if warmup <= 0:
+        return target
+    return target * min(1.0, max(refinement_steps, 0) / warmup)
+
+
 def select_device(requested: str = "auto") -> torch.device:
     if requested != "auto":
         return torch.device(requested)
@@ -100,8 +174,10 @@ def _vocabulary_for_initialization(items, mode: str, previous: dict | None) -> V
         return discovered
     old_tokens = list(previous["tokens"])
     additions = [token for token in discovered.tokens if token not in old_tokens]
-    if mode == "resume" and additions:
-        raise ValueError(f"resume data contains tokens absent from checkpoint: {additions!r}")
+    if mode in {"resume", "refine_text_prior"} and additions:
+        raise ValueError(
+            f"{mode} data contains tokens absent from checkpoint: {additions!r}"
+        )
     return Vocabulary([*old_tokens, *additions])
 
 
@@ -310,8 +386,12 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         speaker_map = {speaker: index for index, speaker in enumerate(sorted(current_speakers))}
     else:
         speaker_map = _extend_id_map(previous["speaker_map"], current_speakers)
-        if layout.initialization_mode == "resume" and set(speaker_map) != set(previous["speaker_map"]):
-            raise ValueError("resume cannot add speakers; use expand_speakers")
+        if layout.initialization_mode in {"resume", "refine_text_prior"} \
+                and set(speaker_map) != set(previous["speaker_map"]):
+            raise ValueError(
+                f"{layout.initialization_mode} cannot add speakers; "
+                "use expand_speakers"
+            )
         missing_old = set(previous["speaker_map"]) - current_speakers
         if layout.initialization_mode == "expand_speakers" and missing_old:
             warnings.warn(
@@ -491,7 +571,9 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 "validation is enabled but no validation rows can be selected; "
                 "provide more data or set validation.enabled=false for a smoke test"
             )
-        if previous and layout.initialization_mode == "resume" and previous.get("data_split"):
+        if previous and layout.initialization_mode in {
+            "resume", "refine_text_prior",
+        } and previous.get("data_split"):
             old_split = previous["data_split"]
             for key in ("train_fingerprint", "validation_fingerprint"):
                 if old_split.get(key) != split_report.get(key):
@@ -590,31 +672,79 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         discriminator.parameters(), lr=raw["training"]["learning_rate_discriminator"],
         betas=(0.8, 0.99), eps=1e-9,
     )
+    refinement_config = resolve_refinement_config(raw["training"])
+    if layout.initialization_mode == "refine_text_prior":
+        refinement_config["enabled"] = True
+    refinement_parameters = [
+        parameter
+        for module in (
+            generator.text_encoder, generator.flow,
+            generator.duration_predictor,
+        )
+        for parameter in module.parameters()
+    ]
+    optimizer_refinement = torch.optim.AdamW(
+        refinement_parameters,
+        lr=refinement_config["learning_rate"],
+        betas=(0.8, 0.99), eps=1e-9,
+    )
     lr_decay = float(raw["training"].get("lr_decay", 0.999875))
     if not 0.0 < lr_decay <= 1.0:
         raise ValueError("training.lr_decay must be in (0, 1]")
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(optimizer_g, gamma=lr_decay)
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(optimizer_d, gamma=lr_decay)
+    scheduler_refinement = torch.optim.lr_scheduler.ExponentialLR(
+        optimizer_refinement, gamma=refinement_config["lr_decay"],
+    )
     start_epoch = 1
     global_step = 0
+    refinement_active = layout.initialization_mode == "refine_text_prior"
+    refinement_steps = 0
+    refinement_activated_at_step = 0 if refinement_active else None
+    refinement_activated_at_epoch = 1 if refinement_active else None
     if layout.initialization_mode == "resume":
         restored = load_training_checkpoint(
             layout.initialization_checkpoint, generator=generator, discriminator=discriminator,
             optimizer_g=optimizer_g, optimizer_d=optimizer_d,
             scheduler_g=scheduler_g, scheduler_d=scheduler_d,
+            optimizer_refinement=optimizer_refinement,
+            scheduler_refinement=scheduler_refinement,
         )
         start_epoch = int(restored["epoch"]) + 1
         global_step = int(restored["global_step"])
-        _optimizer_to(optimizer_g, device); _optimizer_to(optimizer_d, device)
-    elif layout.initialization_mode == "warm_start":
+        restored_phase = restored.get("training_phase") or {}
+        refinement_active = (
+            restored_phase.get("stage") == "text_prior_refinement"
+        )
+        if refinement_active:
+            # Checkpoint stage is authoritative: silently returning to full GAN
+            # training would unfreeze the acoustic path that refinement was
+            # deliberately protecting.
+            # checkpoint 阶段优先，避免 resume 时悄悄解冻并破坏声学主链。
+            refinement_config["enabled"] = True
+        refinement_steps = int(restored_phase.get("refinement_steps", 0))
+        refinement_activated_at_step = restored_phase.get("activated_at_step")
+        refinement_activated_at_epoch = restored_phase.get("activated_at_epoch")
+        for optimizer in (optimizer_g, optimizer_d, optimizer_refinement):
+            _optimizer_to(optimizer, device)
+    elif layout.initialization_mode in {"warm_start", "refine_text_prior"}:
         warm_start_report = _load_warm_start_generator(
             generator, layout.initialization_checkpoint,
-            layout.initialization_exclude, discriminator=discriminator,
+            (
+                layout.initialization_exclude
+                if layout.initialization_mode == "warm_start" else ()
+            ),
+            discriminator=discriminator,
         )
         logger.info(
-            "WARM START | checkpoint=%s | format=%d | loaded_tensors=%d | "
+            "%s | checkpoint=%s | format=%d | loaded_tensors=%d | "
             "skipped_tensors=%d | discriminator_loaded=%s | excluded=%s | "
             "epoch_reset=1 | step_reset=0",
+            (
+                "TEXT PRIOR REFINEMENT START"
+                if layout.initialization_mode == "refine_text_prior"
+                else "WARM START"
+            ),
             layout.initialization_checkpoint,
             warm_start_report["checkpoint_format"],
             warm_start_report["loaded_tensors"],
@@ -625,6 +755,28 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         )
     elif layout.initialization_mode == "expand_speakers":
         _load_expanded_generator(generator, layout.initialization_checkpoint)
+    training_stage = (
+        "text_prior_refinement" if refinement_active else "standard"
+    )
+    if (
+        refinement_config["enabled"]
+        and not refinement_active
+        and refinement_config["posterior_mel_threshold"] is not None
+        and validation_loader is None
+    ):
+        raise ValueError(
+            "automatic text-prior refinement needs validation.enabled=true; "
+            "enable validation or set posterior_mel_threshold=null explicitly"
+        )
+    configure_training_stage(generator, discriminator, training_stage)
+    logger.info(
+        "TRAINING STAGE | stage=%s | refinement_enabled=%s | "
+        "start_steps=%d | posterior_mel_threshold=%s | refinement_steps=%d",
+        training_stage, refinement_config["enabled"],
+        refinement_config["start_steps"],
+        refinement_config["posterior_mel_threshold"], refinement_steps,
+        extra={"tts_style": "section"},
+    )
     mel_transform = torchaudio.transforms.MelSpectrogram(
         sample_rate=audio_config.sample_rate, n_fft=audio_config.n_fft,
         win_length=audio_config.win_length, hop_length=audio_config.hop_length,
@@ -721,6 +873,15 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         )
     live_progress.update(0, "warming up first batches")
 
+    def training_phase_snapshot() -> dict:
+        return {
+            "stage": training_stage,
+            "refinement_steps": refinement_steps,
+            "activated_at_step": refinement_activated_at_step,
+            "activated_at_epoch": refinement_activated_at_epoch,
+            "config": refinement_config,
+        }
+
     for epoch in range(start_epoch, raw["training"]["epochs"] + 1):
         live_progress.clear()
         logger.info(
@@ -729,38 +890,111 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         )
         epoch_totals = Counter()
         epoch_steps = 0
+        epoch_standard_steps = 0
+        epoch_refinement_steps = 0
         for batch_index, batch in enumerate(loader, 1):
             step_started = time.monotonic()
             batch = {key: value.to(device) for key, value in batch.items()}
-            output = generator(
-                batch["tokens"], batch["text_lengths"], batch["spectrograms"],
-                batch["spec_lengths"], batch["language_ids"], batch["speaker_ids"],
-            )
-            real_audio = slice_waveforms(batch["waveforms"], output.slice_starts,
-                                         config.segment_frames, audio_config.hop_length)
+            if training_stage == "standard":
+                output = generator(
+                    batch["tokens"], batch["text_lengths"],
+                    batch["spectrograms"], batch["spec_lengths"],
+                    batch["language_ids"], batch["speaker_ids"],
+                )
+                real_audio = slice_waveforms(
+                    batch["waveforms"], output.slice_starts,
+                    config.segment_frames, audio_config.hop_length,
+                )
+                optimizer_d.zero_grad(set_to_none=True)
+                real_d = discriminator(real_audio)
+                fake_d = discriminator(output.audio.detach())
+                loss_d = discriminator_loss(real_d, fake_d)
+                loss_d.backward()
+                optimizer_d.step()
 
-            optimizer_d.zero_grad(set_to_none=True)
-            real_d = discriminator(real_audio)
-            fake_d = discriminator(output.audio.detach())
-            loss_d = discriminator_loss(real_d, fake_d)
-            loss_d.backward(); optimizer_d.step()
-
-            optimizer_g.zero_grad(set_to_none=True)
-            for parameter in discriminator.parameters(): parameter.requires_grad_(False)
-            with torch.no_grad(): real_features = discriminator(real_audio)
-            fake_features = discriminator(output.audio)
-            mel_real = torch.log(mel_transform(real_audio.squeeze(1)).clamp_min(1e-5))
-            mel_fake = torch.log(mel_transform(output.audio.squeeze(1)).clamp_min(1e-5))
-            loss_mel = F.l1_loss(mel_fake, mel_real)
-            loss_kl = kl_loss(output.latent_prior, output.posterior_log_scale,
-                              output.prior_mean, output.prior_log_scale, output.audio_mask)
-            loss_g = (
-                45.0 * loss_mel + output.duration_loss + loss_kl
-                + generator_adversarial_loss(fake_features)
-                + 2.0 * feature_matching_loss(real_features, fake_features)
-            )
-            loss_g.backward(); torch.nn.utils.clip_grad_norm_(generator.parameters(), 5.0); optimizer_g.step()
-            for parameter in discriminator.parameters(): parameter.requires_grad_(True)
+                optimizer_g.zero_grad(set_to_none=True)
+                for parameter in discriminator.parameters():
+                    parameter.requires_grad_(False)
+                with torch.no_grad():
+                    real_features = discriminator(real_audio)
+                fake_features = discriminator(output.audio)
+                mel_real = torch.log(
+                    mel_transform(real_audio.squeeze(1)).clamp_min(1e-5)
+                )
+                mel_fake = torch.log(
+                    mel_transform(output.audio.squeeze(1)).clamp_min(1e-5)
+                )
+                loss_mel = F.l1_loss(mel_fake, mel_real)
+                loss_kl = kl_loss(
+                    output.latent_prior, output.posterior_log_scale,
+                    output.prior_mean, output.prior_log_scale,
+                    output.audio_mask,
+                )
+                loss_duration = output.duration_loss
+                loss_duration_mean = loss_mel.new_zeros(())
+                effective_prior_weight = 0.0
+                loss_g = (
+                    45.0 * loss_mel + loss_duration + loss_kl
+                    + generator_adversarial_loss(fake_features)
+                    + 2.0 * feature_matching_loss(
+                        real_features, fake_features,
+                    )
+                )
+                loss_g.backward()
+                torch.nn.utils.clip_grad_norm_(generator.parameters(), 5.0)
+                optimizer_g.step()
+                for parameter in discriminator.parameters():
+                    parameter.requires_grad_(True)
+                posterior_scale = output.posterior_log_scale.exp().mean()
+                current_lr = optimizer_g.param_groups[0]["lr"]
+                epoch_standard_steps += 1
+            else:
+                generator.zero_grad(set_to_none=True)
+                optimizer_refinement.zero_grad(set_to_none=True)
+                output = generator.forward_text_refinement(
+                    batch["tokens"], batch["text_lengths"],
+                    batch["spectrograms"], batch["spec_lengths"],
+                    batch["language_ids"], batch["speaker_ids"],
+                )
+                real_audio = slice_waveforms(
+                    batch["waveforms"], output.slice_starts,
+                    config.segment_frames, audio_config.hop_length,
+                )
+                mel_real = torch.log(
+                    mel_transform(real_audio.squeeze(1)).clamp_min(1e-5)
+                )
+                mel_fake = torch.log(
+                    mel_transform(output.audio.squeeze(1)).clamp_min(1e-5)
+                )
+                loss_mel = F.l1_loss(mel_fake, mel_real)
+                loss_kl = kl_loss(
+                    output.latent_prior, output.posterior_log_scale,
+                    output.prior_mean, output.prior_log_scale,
+                    output.audio_mask,
+                )
+                loss_duration = output.duration_loss
+                loss_duration_mean = output.duration_mean_loss
+                effective_prior_weight = refinement_mel_weight(
+                    refinement_config, refinement_steps + 1,
+                )
+                loss_g = (
+                    effective_prior_weight * loss_mel
+                    + refinement_config["kl_weight"] * loss_kl
+                    + refinement_config["duration_nll_weight"]
+                    * loss_duration
+                    + refinement_config["duration_mean_weight"]
+                    * loss_duration_mean
+                )
+                loss_g.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    refinement_parameters, 5.0,
+                )
+                optimizer_refinement.step()
+                loss_d = loss_g.new_zeros(())
+                posterior_scale = output.posterior_log_scale.exp().mean()
+                current_lr = optimizer_refinement.param_groups[0]["lr"]
+                refinement_steps += 1
+                epoch_refinement_steps += 1
             global_step += 1
             run_step = global_step - run_start_step
             epoch_steps += 1
@@ -769,7 +1003,8 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 "generator": float(loss_g.item()),
                 "discriminator": float(loss_d.item()),
                 "mel": float(loss_mel.item()),
-                "duration": float(output.duration_loss.item()),
+                "duration": float(loss_duration.item()),
+                "duration_mean": float(loss_duration_mean.item()),
                 "kl": float(loss_kl.item()),
             })
             rolling_step_time = median(recent_step_times)
@@ -780,7 +1015,8 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             )
             live_detail = (
                 f"epoch={epoch}/{raw['training']['epochs']} "
-                f"batch={batch_index}/{len(loader)} ETA={eta} mel={loss_mel.item():.4f}"
+                f"stage={training_stage} batch={batch_index}/{len(loader)} "
+                f"ETA={eta} mel={loss_mel.item():.4f}"
             )
             live_progress.update(run_step, live_detail)
             if run_step == 1 or global_step % effective_log_every == 0:
@@ -793,20 +1029,23 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 )
                 logger.info(
                     "TRAIN %s %6.2f%% | epoch=%d/%d | batch=%d/%d | "
+                    "stage=%s | "
                     "run_step=%d/%d | global_step=%d/%d | "
                     "step_time=%.2fs | rolling=%.2fs | speed=%.2f steps/min | ETA=%s | "
                     "generator=%.4f | discriminator=%.4f | mel=%.4f | "
                     "posterior_scale=%.3f | "
-                    "duration=%.4f | kl=%.4f | lr=%.8f",
+                    "duration=%.4f | duration_mean=%.4f | kl=%.4f | "
+                    "prior_weight=%.4f | lr=%.8f",
                     progress_bar(run_step, planned_run_steps), overall_progress,
                     epoch, raw["training"]["epochs"],
-                    batch_index, len(loader), run_step, planned_run_steps,
+                    batch_index, len(loader), training_stage,
+                    run_step, planned_run_steps,
                     global_step, target_global_step,
                     seconds_per_step, rolling_step_time, 60.0 / max(rolling_step_time, 1e-9),
                     eta, loss_g.item(), loss_d.item(), loss_mel.item(),
-                    output.posterior_log_scale.exp().mean().item(),
-                    output.duration_loss.item(), loss_kl.item(),
-                    optimizer_g.param_groups[0]["lr"],
+                    posterior_scale.item(), loss_duration.item(),
+                    loss_duration_mean.item(), loss_kl.item(),
+                    effective_prior_weight, current_lr,
                     extra={"tts_style": "progress"},
                 )
                 last_log_time = now
@@ -832,7 +1071,19 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     quality_summary=quality_summary,
                     audio=audio_config,
                     scheduler_g=scheduler_g, scheduler_d=scheduler_d,
-                    metrics={"generator": loss_g.item(), "discriminator": loss_d.item(), "mel": loss_mel.item()},
+                    optimizer_refinement=optimizer_refinement,
+                    scheduler_refinement=scheduler_refinement,
+                    training_phase=training_phase_snapshot(),
+                    metrics={
+                        "stage": training_stage,
+                        "generator": loss_g.item(),
+                        "discriminator": loss_d.item(),
+                        "mel": loss_mel.item(),
+                        "duration": loss_duration.item(),
+                        "duration_mean": loss_duration_mean.item(),
+                        "kl": loss_kl.item(),
+                        "prior_weight": effective_prior_weight,
+                    },
                 )
                 logger.info(
                     "CHECKPOINT SAVED | step=%d | path=%s",
@@ -845,11 +1096,17 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         train_metrics = {
             key: value / max(epoch_steps, 1) for key, value in epoch_totals.items()
         }
-        scheduler_g.step()
-        scheduler_d.step()
+        if epoch_standard_steps:
+            scheduler_g.step()
+            scheduler_d.step()
+        if epoch_refinement_steps:
+            scheduler_refinement.step()
         logger.info(
-            "LEARNING RATE | epoch=%d | generator=%.8f | discriminator=%.8f | decay=%.8f",
-            epoch, scheduler_g.get_last_lr()[0], scheduler_d.get_last_lr()[0], lr_decay,
+            "LEARNING RATE | epoch=%d | stage=%s | generator=%.8f | "
+            "discriminator=%.8f | refinement=%.8f",
+            epoch, training_stage, scheduler_g.get_last_lr()[0],
+            scheduler_d.get_last_lr()[0],
+            scheduler_refinement.get_last_lr()[0],
         )
         validation_metrics = None
         should_evaluate = validation_loader is not None and (
@@ -915,12 +1172,55 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     quality_summary=quality_summary,
                     audio=audio_config,
                     scheduler_g=scheduler_g, scheduler_d=scheduler_d,
+                    optimizer_refinement=optimizer_refinement,
+                    scheduler_refinement=scheduler_refinement,
+                    training_phase=training_phase_snapshot(),
                     metrics={"train": train_metrics, "validation": validation_metrics},
                 )
                 logger.info(
                     "BEST CHECKPOINT | epoch=%d | metric=%s | value=%.6f | path=%s",
                     epoch, selection_metric, best_value, destination / "best",
                     extra={"tts_style": "success"},
+                )
+        if (
+            training_stage == "standard"
+            and refinement_config["enabled"]
+            and global_step >= refinement_config["start_steps"]
+        ):
+            threshold = refinement_config["posterior_mel_threshold"]
+            posterior_ready = (
+                threshold is None
+                or (
+                    validation_metrics is not None
+                    and float(validation_metrics["mel"]) <= threshold
+                )
+            )
+            if posterior_ready:
+                training_stage = "text_prior_refinement"
+                refinement_active = True
+                refinement_activated_at_step = global_step
+                refinement_activated_at_epoch = epoch
+                configure_training_stage(
+                    generator, discriminator, training_stage,
+                )
+                logger.info(
+                    "TEXT PRIOR REFINEMENT ACTIVATED | epoch=%d | step=%d | "
+                    "posterior_mel=%s | threshold=%s | frozen="
+                    "conditioning,posterior_encoder,decoder,discriminator | "
+                    "trainable=text_encoder,flow,duration_predictor",
+                    epoch, global_step,
+                    (
+                        f"{validation_metrics['mel']:.6f}"
+                        if validation_metrics is not None else "not-required"
+                    ),
+                    threshold,
+                    extra={"tts_style": "success"},
+                )
+            elif validation_metrics is not None:
+                logger.info(
+                    "TEXT PRIOR REFINEMENT WAIT | epoch=%d | step=%d | "
+                    "posterior_mel=%.6f | required<=%.6f",
+                    epoch, global_step, validation_metrics["mel"], threshold,
                 )
         selection = {
             "metric": selection_metric,
@@ -951,6 +1251,9 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 quality_summary=quality_summary,
                 audio=audio_config,
                 scheduler_g=scheduler_g, scheduler_d=scheduler_d,
+                optimizer_refinement=optimizer_refinement,
+                scheduler_refinement=scheduler_refinement,
+                training_phase=training_phase_snapshot(),
                 metrics={"train": train_metrics, "validation": validation_metrics},
             )
             logger.info(
@@ -975,8 +1278,10 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         if reached_max_steps: break
     live_progress.close()
     logger.info(
-        "TRAINING DONE | steps=%d | elapsed=%s | checkpoint=%s",
-        global_step, format_duration(time.monotonic() - training_started),
+        "TRAINING DONE | steps=%d | stage=%s | refinement_steps=%d | "
+        "elapsed=%s | checkpoint=%s",
+        global_step, training_stage, refinement_steps,
+        format_duration(time.monotonic() - training_started),
         destination / "last",
         extra={"tts_style": "success"},
     )
