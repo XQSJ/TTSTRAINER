@@ -8,7 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tts_trainer.frontend import (FrontendContract, frontend_contract_from_config,
+from tts_trainer.frontend import (FrontendContract, chunk_text,
+                                  frontend_contract_from_config,
                                   frontend_from_config,
                                   build_frontend_conformance,
                                   frontend_lock_path, load_frontend_contract,
@@ -41,6 +42,41 @@ class FakeFrontend:
 
 
 class FrontendTests(unittest.TestCase):
+    def test_text_chunking_uses_punctuation_and_phoneme_budget(self):
+        def phonemize(text, language):
+            del language
+            return tuple(character for character in text if not character.isspace())
+
+        chunks = chunk_text(
+            "今天早上出门的时候，天空还是晴朗的，没想到下午突然下起了大雨。",
+            "zh", phonemize, max_phoneme_tokens=12,
+        )
+        self.assertEqual("".join(chunk.text for chunk in chunks),
+                         "今天早上出门的时候，天空还是晴朗的，没想到下午突然下起了大雨。")
+        self.assertTrue(all(len(chunk.units) <= 12 for chunk in chunks))
+        self.assertTrue(all(any(character.isalnum() for character in chunk.text)
+                            for chunk in chunks))
+        self.assertEqual(chunks[-1].pause_kind, "sentence")
+
+    def test_text_chunking_does_not_split_decimal_period(self):
+        def phonemize(text, language):
+            del language
+            return tuple(text)
+
+        chunks = chunk_text(
+            "The temperature is 25.5 degrees. Continue testing.",
+            "en", phonemize, max_phoneme_tokens=40,
+        )
+        self.assertEqual(len(chunks), 2)
+        self.assertIn("25.5", chunks[0].text)
+
+    def test_text_chunking_rejects_empty_text_and_tiny_budget(self):
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            chunk_text("  ", "en", lambda text, language: tuple(text))
+        with self.assertRaisesRegex(ValueError, "at least 8"):
+            chunk_text("hello", "en", lambda text, language: tuple(text),
+                       max_phoneme_tokens=7)
+
     def test_parses_phone_word_and_break_boundaries(self):
         self.assertEqual(parse_espeak_ipa("h|ə|l|ˈoʊ w|ˈɜː|l|d\nnext"),
                          tuple("həlˈoʊ wˈɜːld next"))

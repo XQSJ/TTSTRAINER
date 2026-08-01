@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 
-from ..frontend import FrontendContract, FrontendRouter, frontend_from_contract
+from ..frontend import (FrontendContract, FrontendRouter, chunk_text,
+                        frontend_from_contract)
 from ..frontend.contract import (LEGACY_PIPER_TOKEN_ENCODING,
                                  PIPER_TOKEN_ENCODING)
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class OnnxTTS:
@@ -86,6 +91,11 @@ class OnnxTTS:
     def synthesize_text(self, text: str, *, language: str, speaker: str,
                         frontend: FrontendRouter | None = None,
                         allow_frontend_version_mismatch: bool = False,
+                        auto_chunk: bool = True,
+                        max_phoneme_tokens: int = 90,
+                        sentence_pause_ms: int = 180,
+                        clause_pause_ms: int = 100,
+                        chunk_pause_ms: int = 60,
                         **scales) -> np.ndarray:
         if frontend is None:
             if not self.frontend_contract:
@@ -102,8 +112,44 @@ class OnnxTTS:
                     f"frontend version mismatch: model expects {expected!r}, runtime has {actual!r}; "
                     "use the matching eSpeak-ng build or explicitly allow the mismatch"
                 )
-        return self.synthesize_units(frontend.phonemize(text, language), language=language,
-                                     speaker=speaker, **scales)
+        if sentence_pause_ms < 0 or clause_pause_ms < 0 or chunk_pause_ms < 0:
+            raise ValueError("pause durations must not be negative")
+        if not auto_chunk:
+            return self.synthesize_units(
+                frontend.phonemize(text, language), language=language,
+                speaker=speaker, **scales,
+            )
+
+        chunks = chunk_text(
+            text, language, frontend.phonemize,
+            max_phoneme_tokens=max_phoneme_tokens,
+        )
+        LOGGER.info(
+            "TEXT CHUNKS | language=%s | chunks=%d | max_phoneme_tokens=%d | tokens=%s",
+            language, len(chunks), max_phoneme_tokens,
+            ",".join(str(len(chunk.units)) for chunk in chunks),
+        )
+        rendered: list[np.ndarray] = []
+        for index, chunk in enumerate(chunks, start=1):
+            LOGGER.info(
+                "TEXT CHUNK %d/%d | phoneme_tokens=%d | text=%s",
+                index, len(chunks), len(chunk.units), chunk.text,
+            )
+            rendered.append(self.synthesize_units(
+                chunk.units, language=language, speaker=speaker, **scales,
+            ))
+            if index == len(chunks):
+                continue
+            if chunk.pause_kind == "sentence":
+                pause_ms = sentence_pause_ms
+            elif chunk.pause_kind == "clause":
+                pause_ms = clause_pause_ms
+            else:
+                pause_ms = chunk_pause_ms
+            pause_samples = round(self.sample_rate * pause_ms / 1000.0)
+            if pause_samples:
+                rendered.append(np.zeros(pause_samples, dtype=np.float32))
+        return np.concatenate(rendered).astype(np.float32, copy=False)
 
 
 def write_wav(path: str | Path, samples: np.ndarray, sample_rate: int) -> Path:

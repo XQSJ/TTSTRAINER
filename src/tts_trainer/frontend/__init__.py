@@ -1,6 +1,7 @@
 from .contract import (FrontendContract, frontend_contract_from_config,
                        frontend_lock_path, load_frontend_contract,
                        save_frontend_contract)
+from .chunking import TextChunk, chunk_text
 from .conformance import (build_frontend_conformance,
                           load_frontend_conformance,
                           save_frontend_conformance,
@@ -17,6 +18,7 @@ from .resources import (ensure_korean_cmudict, ensure_openjtalk_dictionary,
 
 __all__ = [
     "ESPEAK_VOICES", "EspeakFrontend", "FrontendContract", "FrontendRouter",
+    "TextChunk", "chunk_text",
     "OpenJTalkFrontend", "PiperPlusFrontend", "frontend_from_config", "frontend_from_contract",
     "build_frontend_conformance", "load_frontend_conformance",
     "save_frontend_conformance", "verify_frontend_conformance",

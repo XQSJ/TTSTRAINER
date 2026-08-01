@@ -804,6 +804,29 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer synthesize-onnx \
   --output output.wav
 ```
 
+普通文本推理默认启用自动分句。运行时先按各语言标点寻找边界，再用模型实际使用的
+G2P 计算音素数量；超过 90 个音素 token 的句子会继续拆分，分别合成后自动加入停顿。
+因此长段落不会再作为一个超长序列直接送进 ONNX。日志中的 `TEXT CHUNKS` 会显示
+分段数量及每段 token 数。
+
+通常不需要调整；如果模型只在更短的训练句上稳定，可降低上限：
+
+```bash
+PYTHONPATH=src .venv/bin/python -m tts_trainer synthesize-onnx \
+  --model-dir artifacts/my_model \
+  --text "今天早上出门的时候，天空还是晴朗的。下班以后请帮我拿一下雨伞。" \
+  --language zh \
+  --speaker xiaoling \
+  --output output.wav \
+  --max-phoneme-tokens 70 \
+  --sentence-pause-ms 180 \
+  --clause-pause-ms 100 \
+  --chunk-pause-ms 60
+```
+
+`--no-auto-chunk` 仅用于排错和对比，不建议用于长文本。自动分句解决的是长序列失稳；
+如果拆分后的短句仍不自然，需要继续检查 G2P、数据和韵律建模。
+
 验证移动端前端一致性：
 
 ```bash

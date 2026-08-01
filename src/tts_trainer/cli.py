@@ -101,6 +101,26 @@ def _dispatch(argv=None) -> int:
     synthesize.add_argument("--noise-scale", type=float, default=0.667)
     synthesize.add_argument("--length-scale", type=float, default=1.0)
     synthesize.add_argument("--duration-noise-scale", type=float, default=0.35)
+    synthesize.add_argument(
+        "--max-phoneme-tokens", type=int, default=90,
+        help="maximum frontend phoneme units per automatic text chunk",
+    )
+    synthesize.add_argument(
+        "--sentence-pause-ms", type=int, default=180,
+        help="silence inserted after sentence-ending chunks",
+    )
+    synthesize.add_argument(
+        "--clause-pause-ms", type=int, default=100,
+        help="silence inserted after comma/colon chunks",
+    )
+    synthesize.add_argument(
+        "--chunk-pause-ms", type=int, default=60,
+        help="silence inserted at token-budget splits without punctuation",
+    )
+    synthesize.add_argument(
+        "--no-auto-chunk", action="store_true",
+        help="send the entire text to ONNX in one request (diagnostics only)",
+    )
     models = sub.add_parser("models", help="manage project-local Qwen models")
     model_sub = models.add_subparsers(dest="model_command", required=True)
     status = model_sub.add_parser("status"); status.add_argument("key", nargs="?", choices=MODEL_SPECS)
@@ -225,6 +245,11 @@ def _dispatch(argv=None) -> int:
             noise_scale=args.noise_scale,
             length_scale=args.length_scale,
             duration_noise_scale=args.duration_noise_scale,
+            auto_chunk=not args.no_auto_chunk,
+            max_phoneme_tokens=args.max_phoneme_tokens,
+            sentence_pause_ms=args.sentence_pause_ms,
+            clause_pause_ms=args.clause_pause_ms,
+            chunk_pause_ms=args.chunk_pause_ms,
         )
         print(write_wav(args.output, samples, runtime.sample_rate))
     elif args.command == "qwen-runtime":

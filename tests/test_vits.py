@@ -8,6 +8,7 @@ import wave
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import torch
 
 from tts_trainer.checkpoints import (load_training_checkpoint,
@@ -53,6 +54,43 @@ def tiny_config():
         decoder_initial_channels=32, upsample_rates=(2, 2),
         upsample_kernel_sizes=(4, 4), segment_frames=6,
     )
+
+
+class RuntimeFrontend:
+    def phonemize(self, text, language):
+        del language
+        return tuple(character for character in text if not character.isspace())
+
+
+class RuntimeChunkingTests(unittest.TestCase):
+    def test_text_runtime_synthesizes_chunks_and_inserts_clause_pause(self):
+        runtime = OnnxTTS.__new__(OnnxTTS)
+        runtime.frontend_contract = None
+        runtime.sample_rate = 1000
+        with patch.object(
+            runtime, "synthesize_units",
+            side_effect=lambda units, **kwargs: np.ones(len(units), dtype=np.float32),
+        ) as synthesize:
+            audio = runtime.synthesize_text(
+                "abcd, efgh.", language="en", speaker="voice_01",
+                frontend=RuntimeFrontend(), max_phoneme_tokens=8,
+                clause_pause_ms=100, sentence_pause_ms=180,
+            )
+        self.assertEqual(synthesize.call_count, 2)
+        self.assertEqual(audio.shape, (110,))
+        np.testing.assert_array_equal(audio[5:105], np.zeros(100, dtype=np.float32))
+
+    def test_text_runtime_can_disable_automatic_chunking(self):
+        runtime = OnnxTTS.__new__(OnnxTTS)
+        runtime.frontend_contract = None
+        with patch.object(
+            runtime, "synthesize_units", return_value=np.ones(3, dtype=np.float32),
+        ) as synthesize:
+            runtime.synthesize_text(
+                "abcd, efgh.", language="en", speaker="voice_01",
+                frontend=RuntimeFrontend(), auto_chunk=False,
+            )
+        self.assertEqual(synthesize.call_count, 1)
 
 
 class VitsTests(unittest.TestCase):
