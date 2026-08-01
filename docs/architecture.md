@@ -72,6 +72,15 @@ ASR 回识别和 speaker embedding 相似度属于可选重型门禁，不会默
 Waveform Decoder、Multi-Period/Scale Discriminator。损失包括 Mel、KL、Duration、
 Adversarial 和 Feature Matching。
 
+Duration Predictor 有三种兼容实现：旧 checkpoint 使用独立对数正态分布；新
+`mobile` 使用两层条件仿射 Normalizing Flow；新 `quality` 使用六层 Flow。Flow
+训练时将真实对数时长和辅助随机变量变换到标准高斯并优化精确变换的 log-determinant，
+推理时从高斯噪声逆变换得到时长。`duration_noise_scale=0` 从全零基变量逆推，因而
+同一文本仍能稳定复现；大于零时产生模型学到的非线性节奏变化。
+
+旧 format-4 metadata 没有时长类型字段，解释为 `stochastic_lognormal`。resume、
+文本先验强化和扩音色从 checkpoint 恢复类型；只有 warm start 可以有意替换时长模块。
+
 Posterior Encoder + Decoder 的重建是基础主链。标准阶段中，
 `aligned-text-prior.wav` 只是隔离 Text Encoder/Flow/MAS 的验证信号，不把随机文本
 先验的 Mel 梯度写入共享 Decoder。声学主链达到门槛后，训练器进入

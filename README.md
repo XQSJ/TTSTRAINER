@@ -636,6 +636,17 @@ metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程
 
 `resume` 要求语言及顺序、speaker 集合和模型结构与 checkpoint 一致。
 
+时长预测器也遵循 checkpoint 兼容规则：本次升级前训练的 format-4 模型没有
+`duration_predictor_type` 字段，系统会将其识别为原有的
+`stochastic_lognormal`。即使最新 preset 默认值已经升级，`resume`、
+`refine_text_prior` 和 `expand_speakers` 仍会自动使用 checkpoint 中的旧结构，
+不会因更新代码而突然无法继续训练。
+
+要把旧模型主干迁移到新的 Flow SDP，复制
+[sdp-warm-start.example.json](training_configs/sdp-warm-start.example.json)，使用新的
+实验名称和 `initialization.mode: "warm_start"`。Text Encoder、音色/语言 embedding、
+声学 Flow 和 Decoder 会复用，`duration_predictor` 会重新初始化；这不是普通 resume。
+
 ### 声音已学会，但文字推理仍不稳定
 
 `quality` 和 `mobile` 预设会在同一次训练中自动执行两个阶段：
@@ -957,12 +968,26 @@ configs/models.json
 
 可用 preset：
 
-- `quality`：默认推荐，约 39M Generator，质量优先；
+- `quality`：默认推荐，约 39M Generator，质量优先；使用 128 channels、6 层
+  Flow SDP，时长模块 FP32 约 4.4 MB；
 - `compact`：小模型和流程验证，音质上限较低。
 - `mobile`：独立的移动部署链路。模型尺寸仍采用质量架构，但文本前端改为统一
   eSpeak。训练核心使用 `BOS,(phoneme)*,EOS`，导出图通过
   `strip-piper-pads-v1` 将 sherpa/Piper 传输序列规范化后再进入 VITS，可在
-  Android 直接接收普通文本。必须从头训练。
+  Android 直接接收普通文本；使用 64 channels、2 层轻量 Flow SDP，时长模块
+  FP32 约 0.54 MB。必须从头训练。
+
+三个时长模式都保留在 `model.duration_predictor_type`，这是专家参数，普通配置不用写：
+
+| 类型 | 用途 | preset 默认值 |
+|---|---|---|
+| `stochastic_lognormal` | 本次升级前的兼容实现，最简单 | `compact` 与旧 checkpoint |
+| `stochastic_mobile` | 轻量条件 Normalizing Flow | `mobile` |
+| `stochastic_quality` | 更深的条件 Normalizing Flow | `quality` |
+
+Flow SDP 训练的是音素时长分布，只增加节奏表达能力，不会改变 speaker/language
+embedding、G2P 或 Decoder。最终仍导出单个 ONNX；`duration_noise_scale=0` 为确定性
+节奏，推荐试听范围为 `0.15～0.45`。
 
 `quality` 和 `mobile` 的前端契约彼此隔离：选择 `mobile` 不会修改
 `quality` 的中文 Piper Plus、日语 Open JTalk、韩语 Piper Plus 路由。

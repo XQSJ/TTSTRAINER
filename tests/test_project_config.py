@@ -249,6 +249,22 @@ class ProjectConfigTests(unittest.TestCase):
             "xiaoling_b": "voice_xiaoling_b",
         })
         self.assertEqual(load_vits_config("training_configs/train1.json").hop_length, 256)
+        self.assertEqual(
+            load_project_config("training_configs/train1.json")["model"]
+            ["duration_predictor_type"],
+            "stochastic_quality",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            mobile_source = Path(directory) / "mobile-duration-test.json"
+            mobile_source.write_text(json.dumps({
+                "_comment": "测试 / Test", "preset": "mobile",
+                "experiment": {"name": "mobile", "languages": ["zh"]},
+            }), encoding="utf-8")
+            mobile = load_project_config(mobile_source)
+        self.assertEqual(
+            mobile["model"]["duration_predictor_type"],
+            "stochastic_mobile",
+        )
 
     def test_public_configs_keep_valid_bilingual_json_comments(self):
         config_paths = sorted(Path("training_configs").glob("*.json"))

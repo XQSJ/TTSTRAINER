@@ -20,6 +20,11 @@ class VitsConfig:
     text_encoder_layers: int = 4
     text_encoder_heads: int = 4
     flow_layers: int = 4
+    # Missing in format-4 checkpoints means the original log-normal predictor.
+    # format-4 未包含该字段时，自动使用原有的对数正态时长预测器。
+    duration_predictor_type: str = "stochastic_lognormal"
+    duration_predictor_channels: int = 64
+    duration_predictor_flow_layers: int = 2
     decoder_initial_channels: int = 256
     decoder_resblock_kernel_sizes: tuple[int, ...] = (3,)
     upsample_rates: tuple[int, ...] = (8, 8, 2, 2)
@@ -27,6 +32,18 @@ class VitsConfig:
     segment_frames: int = 32
 
     def __post_init__(self):
+        duration_types = {
+            "stochastic_lognormal", "stochastic_mobile", "stochastic_quality",
+        }
+        if self.duration_predictor_type not in duration_types:
+            raise ValueError(
+                "duration_predictor_type must be stochastic_lognormal, "
+                "stochastic_mobile, or stochastic_quality"
+            )
+        if self.duration_predictor_channels <= 0:
+            raise ValueError("duration_predictor_channels must be positive")
+        if self.duration_predictor_flow_layers < 2:
+            raise ValueError("duration_predictor_flow_layers must be at least 2")
         if self.hidden_channels % self.text_encoder_heads:
             raise ValueError("hidden_channels must be divisible by text_encoder_heads")
         if len(self.upsample_rates) != len(self.upsample_kernel_sizes):

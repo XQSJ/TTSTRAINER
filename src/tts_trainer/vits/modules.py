@@ -199,6 +199,143 @@ class StochasticDurationPredictor(nn.Module):
         return (mean + noise) * mask
 
 
+class DurationAffineCoupling(nn.Module):
+    """Conditional affine coupling for an ONNX-exportable duration flow."""
+
+    def __init__(self, context_channels: int, hidden_channels: int):
+        super().__init__()
+        self.value = nn.Conv1d(1, hidden_channels, 1)
+        self.context = nn.Conv1d(context_channels, hidden_channels, 1)
+        self.convs = nn.ModuleList((
+            nn.Conv1d(hidden_channels, hidden_channels, 3, padding=1),
+            nn.Conv1d(hidden_channels, hidden_channels, 3, padding=1),
+            nn.Conv1d(hidden_channels, hidden_channels, 3, padding=1),
+        ))
+        self.output = nn.Conv1d(hidden_channels, 2, 1)
+        nn.init.zeros_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
+
+    def statistics(
+        self, value: torch.Tensor, context: torch.Tensor, mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden = self.value(value * mask) + self.context(context * mask)
+        for conv in self.convs:
+            hidden = hidden + F.silu(conv(hidden * mask))
+        shift, raw_log_scale = self.output(hidden * mask).chunk(2, dim=1)
+        # Bounded scales keep early training and mobile inference numerically
+        # stable while still allowing a strongly non-Gaussian distribution.
+        log_scale = torch.tanh(raw_log_scale) * 2.0
+        return shift * mask, log_scale * mask
+
+    def forward(
+        self, z: torch.Tensor, context: torch.Tensor, mask: torch.Tensor,
+        *, reverse: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        first, second = z.chunk(2, dim=1)
+        shift, log_scale = self.statistics(first, context, mask)
+        if reverse:
+            second = ((second - shift) * torch.exp(-log_scale)) * mask
+            logdet = None
+        else:
+            second = (second * torch.exp(log_scale) + shift) * mask
+            logdet = (log_scale * mask).sum((1, 2))
+        return torch.cat((first * mask, second), dim=1), logdet
+
+
+class FlowStochasticDurationPredictor(nn.Module):
+    """Conditional normalizing-flow model of log phoneme duration.
+
+    The first flow channel represents log duration and the second is an
+    auxiliary variable sampled during likelihood training. Alternating affine
+    couplings transform the joint distribution to a standard Gaussian. At
+    inference the flow is inverted from Gaussian noise; zero noise gives a
+    deterministic timing path. This is substantially more expressive than the
+    legacy independent log-normal head while remaining ONNX-friendly.
+
+    第一通道表示音素对数时长，第二通道是训练辅助变量。交替仿射 Flow 学习非高斯
+    联合分布；推理时从高斯噪声逆变换，noise=0 时保持确定性。
+    """
+
+    def __init__(
+        self, input_channels: int, condition_channels: int,
+        hidden_channels: int, flow_layers: int,
+    ):
+        super().__init__()
+        self.input = nn.Conv1d(input_channels, hidden_channels, 1)
+        self.condition = nn.Conv1d(condition_channels, hidden_channels, 1)
+        self.context_convs = nn.ModuleList((
+            nn.Conv1d(hidden_channels, hidden_channels, 3, padding=1),
+            nn.Conv1d(hidden_channels, hidden_channels, 3, padding=1),
+        ))
+        self.flows = nn.ModuleList(
+            DurationAffineCoupling(hidden_channels, hidden_channels)
+            for _ in range(flow_layers)
+        )
+        self.flow_layers = flow_layers
+
+    def _context(
+        self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor,
+    ) -> torch.Tensor:
+        hidden = self.input(x.detach()) + self.condition(g.detach())
+        for conv in self.context_convs:
+            hidden = hidden + F.silu(conv(hidden * mask))
+        return hidden * mask
+
+    def _flow(
+        self, z: torch.Tensor, context: torch.Tensor, mask: torch.Tensor,
+        *, reverse: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if reverse:
+            for flow in reversed(self.flows):
+                z = torch.flip(z, (1,))
+                z, _ = flow(z, context, mask, reverse=True)
+            return z * mask, None
+        logdet = z.new_zeros(z.shape[0])
+        for flow in self.flows:
+            z, current = flow(z, context, mask)
+            logdet = logdet + current
+            z = torch.flip(z, (1,))
+        return z * mask, logdet
+
+    def loss(
+        self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor,
+        durations: torch.Tensor,
+    ) -> torch.Tensor:
+        context = self._context(x, mask, g)
+        target = torch.log(durations.clamp_min(1.0)) * mask
+        auxiliary = (
+            torch.randn_like(target) if self.training else torch.zeros_like(target)
+        ) * mask
+        base, logdet = self._flow(
+            torch.cat((target, auxiliary), dim=1), context, mask,
+            reverse=False,
+        )
+        base_nll = 0.5 * (base.square() + math.log(2.0 * math.pi))
+        denominator = (mask.sum() * base.shape[1]).clamp_min(1.0)
+        return ((base_nll * mask).sum() - logdet.sum()) / denominator
+
+    def mean_loss(
+        self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor,
+        durations: torch.Tensor,
+    ) -> torch.Tensor:
+        prediction = self.sample(x, mask, g, 0.0)
+        target = torch.log(durations.clamp_min(1.0)) * mask
+        return (torch.abs(prediction - target) * mask).sum() \
+            / mask.sum().clamp_min(1.0)
+
+    def sample(
+        self, x: torch.Tensor, mask: torch.Tensor, g: torch.Tensor,
+        noise_scale: float | torch.Tensor,
+    ) -> torch.Tensor:
+        context = self._context(x, mask, g)
+        base = torch.randn(
+            context.shape[0], 2, context.shape[2],
+            device=context.device, dtype=context.dtype,
+        ) * noise_scale
+        value, _ = self._flow(base * mask, context, mask, reverse=True)
+        return value[:, :1].clamp(-3.0, 6.0) * mask
+
+
 def sinusoidal_position_encoding(length: int, channels: int, *, device, dtype) -> torch.Tensor:
     """Return an ONNX-friendly absolute position signal [length, channels]."""
     positions = torch.arange(length, device=device, dtype=torch.float32).unsqueeze(1)

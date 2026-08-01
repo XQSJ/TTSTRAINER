@@ -1,5 +1,6 @@
 {
   "_comment": "高质量训练基线；约 39M Generator，训练和显存成本显著高于默认紧凑预设 / Higher-quality training baseline; about 39M generator parameters with substantially higher training and memory cost",
+  "_comment_duration_predictor": "质量档使用 6 层 Flow SDP；旧 checkpoint 在 resume 时仍自动使用原时长结构 / Quality uses a 6-layer flow SDP; resume automatically preserves a legacy checkpoint's duration architecture",
   "extends": "pipeline_defaults.json",
   "model": {
     "hidden_channels": 256,
@@ -10,6 +11,9 @@
     "text_encoder_layers": 8,
     "text_encoder_heads": 8,
     "flow_layers": 8,
+    "duration_predictor_type": "stochastic_quality",
+    "duration_predictor_channels": 128,
+    "duration_predictor_flow_layers": 6,
     "decoder_initial_channels": 512,
     "decoder_resblock_kernel_sizes": [3, 7, 11]
   },

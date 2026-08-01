@@ -397,7 +397,16 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         "scales_default": [0.667, 1.0, 0.35],
         "scales": ["noise_scale", "length_scale", "duration_noise_scale"],
         "duration_predictor": {
-            "type": "stochastic-log-normal",
+            "type": config.duration_predictor_type.replace("_", "-"),
+            "channels": (
+                config.hidden_channels
+                if config.duration_predictor_type == "stochastic_lognormal"
+                else config.duration_predictor_channels
+            ),
+            "flow_layers": (
+                0 if config.duration_predictor_type == "stochastic_lognormal"
+                else config.duration_predictor_flow_layers
+            ),
             "deterministic_value": 0.0,
             "recommended_range": [0.0, 0.6],
         },

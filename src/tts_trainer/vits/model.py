@@ -7,7 +7,8 @@ from torch import nn
 
 from .config import VitsConfig
 from .modules import (GlobalConditioning, PosteriorEncoder,
-                      ResidualCouplingFlow, StochasticDurationPredictor,
+                      FlowStochasticDurationPredictor, ResidualCouplingFlow,
+                      StochasticDurationPredictor,
                       TextEncoder, WaveformDecoder, duration_path,
                       maximum_path, slice_latent, slice_latent_at)
 
@@ -81,9 +82,16 @@ class MultilingualVITS(nn.Module):
             config.spec_channels, config.hidden_channels, config.latent_channels,
             config.conditioning_channels,
         )
-        self.duration_predictor = StochasticDurationPredictor(
-            config.hidden_channels, config.conditioning_channels,
-        )
+        if config.duration_predictor_type == "stochastic_lognormal":
+            self.duration_predictor = StochasticDurationPredictor(
+                config.hidden_channels, config.conditioning_channels,
+            )
+        else:
+            self.duration_predictor = FlowStochasticDurationPredictor(
+                config.hidden_channels, config.conditioning_channels,
+                config.duration_predictor_channels,
+                config.duration_predictor_flow_layers,
+            )
         self.flow = ResidualCouplingFlow(
             config.latent_channels, config.hidden_channels, config.conditioning_channels, config.flow_layers,
         )

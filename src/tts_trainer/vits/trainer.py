@@ -44,6 +44,46 @@ from .validation import (evaluate_validation, save_split_artifacts,
 logger = logging.getLogger(__name__)
 
 
+def duration_predictor_settings(config: dict | object) -> dict:
+    """Resolve duration architecture, including format-4 legacy defaults."""
+    if not isinstance(config, dict):
+        config = config.to_dict()
+    return {
+        "duration_predictor_type": config.get(
+            "duration_predictor_type", "stochastic_lognormal",
+        ),
+        "duration_predictor_channels": int(config.get(
+            "duration_predictor_channels", 64,
+        )),
+        "duration_predictor_flow_layers": int(config.get(
+            "duration_predictor_flow_layers", 2,
+        )),
+    }
+
+
+def preserve_checkpoint_duration_architecture(config, previous: dict | None, mode: str):
+    """Resume with the checkpoint predictor even if preset defaults evolved.
+
+    preset defaults may safely improve new experiments. Resume/refinement and
+    speaker expansion must nevertheless reproduce the exact saved graph. Use
+    warm_start to deliberately replace the predictor.
+    """
+    if previous is None or mode not in {
+        "resume", "refine_text_prior", "expand_speakers",
+    }:
+        return config
+    checkpoint_settings = duration_predictor_settings(previous.get("config", {}))
+    current_settings = duration_predictor_settings(config)
+    if checkpoint_settings != current_settings:
+        logger.warning(
+            "DURATION COMPATIBILITY | mode=%s | configured=%s | checkpoint=%s | "
+            "action=use-checkpoint-architecture | use warm_start to upgrade",
+            mode, current_settings["duration_predictor_type"],
+            checkpoint_settings["duration_predictor_type"],
+        )
+    return replace(config, **checkpoint_settings)
+
+
 def profile_balancing_weights(items) -> list[float]:
     """让每个语言×音色组合获得相同采样质量。 / Balance every lang×voice pair."""
     counts = Counter((item.language, item.speaker) for item in items)
@@ -219,7 +259,15 @@ def _load_warm_start_generator(
     )
     checkpoint_format = int(state_file["format"])
     require_warm_start_checkpoint_format(checkpoint_format)
-    forced = ("duration_predictor",) if checkpoint_format == 3 else ()
+    metadata = json.loads(
+        (checkpoint / "metadata.json").read_text(encoding="utf-8"),
+    )
+    old_duration = duration_predictor_settings(metadata.get("config", {}))
+    new_duration = duration_predictor_settings(generator.config)
+    forced = (
+        ("duration_predictor",)
+        if checkpoint_format == 3 or old_duration != new_duration else ()
+    )
     prefixes = tuple(dict.fromkeys((*forced, *excludes)))
 
     def excluded(name: str) -> bool:
@@ -270,6 +318,8 @@ def _load_warm_start_generator(
         "skipped_tensors": len(skipped),
         "excluded_modules": list(prefixes),
         "discriminator_loaded": discriminator_loaded,
+        "duration_predictor_from": old_duration["duration_predictor_type"],
+        "duration_predictor_to": new_duration["duration_predictor_type"],
     }
 
 
@@ -592,6 +642,9 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     config = load_vits_config(config_path, vocab_size=len(vocabulary.tokens))
     config = replace(config, num_languages=len(language_map), num_speakers=len(speaker_map),
                      spec_channels=audio_config.n_fft // 2 + 1)
+    config = preserve_checkpoint_duration_architecture(
+        config, previous, layout.initialization_mode,
+    )
     logger.info(
         "dataset samples=%d speakers=%d vocabulary=%d device=%s",
         len(items), len(speaker_map), len(vocabulary.tokens), layout.device,
@@ -637,11 +690,23 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     discriminator = VitsDiscriminator().to(device)
     generator_parameters = sum(parameter.numel() for parameter in generator.parameters())
     discriminator_parameters = sum(parameter.numel() for parameter in discriminator.parameters())
+    duration_channels = (
+        config.hidden_channels
+        if config.duration_predictor_type == "stochastic_lognormal"
+        else config.duration_predictor_channels
+    )
+    duration_flow_layers = (
+        0 if config.duration_predictor_type == "stochastic_lognormal"
+        else config.duration_predictor_flow_layers
+    )
     logger.info(
         "model initialized generator_parameters=%d discriminator_parameters=%d "
-        "duration_predictor=stochastic-log-normal train_batches_per_epoch=%d "
+        "duration_predictor=%s duration_channels=%d duration_flow_layers=%d "
+        "train_batches_per_epoch=%d "
         "validation_batches=%d",
-        generator_parameters, discriminator_parameters, len(loader),
+        generator_parameters, discriminator_parameters,
+        config.duration_predictor_type, duration_channels,
+        duration_flow_layers, len(loader),
         len(validation_loader) if validation_loader is not None else 0,
     )
     if generator_parameters < 10_000_000:
@@ -739,7 +804,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         logger.info(
             "%s | checkpoint=%s | format=%d | loaded_tensors=%d | "
             "skipped_tensors=%d | discriminator_loaded=%s | excluded=%s | "
-            "epoch_reset=1 | step_reset=0",
+            "duration=%s->%s | epoch_reset=1 | step_reset=0",
             (
                 "TEXT PRIOR REFINEMENT START"
                 if layout.initialization_mode == "refine_text_prior"
@@ -751,6 +816,8 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             warm_start_report["skipped_tensors"],
             warm_start_report["discriminator_loaded"],
             ",".join(warm_start_report["excluded_modules"]) or "none",
+            warm_start_report["duration_predictor_from"],
+            warm_start_report["duration_predictor_to"],
             extra={"tts_style": "success"},
         )
     elif layout.initialization_mode == "expand_speakers":

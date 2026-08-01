@@ -1,5 +1,5 @@
 {
-  "_comment": "把 format 3 模型迁移到随机时长模型；高级用法 / Migrate a format-3 model to stochastic duration; advanced use",
+  "_comment": "把旧时长预测器迁移到 preset 对应的 Flow SDP；高级用法 / Migrate a legacy duration predictor to the preset's flow SDP; advanced use",
   "task": "train",
   "preset": "quality",
   "experiment": {

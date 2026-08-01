@@ -24,6 +24,8 @@ from tts_trainer.vits.losses import (discriminator_loss,
 from tts_trainer.vits.modules import maximum_path, sinusoidal_position_encoding
 from tts_trainer.vits.trainer import (_semantic_reference_root,
                                       configure_training_stage,
+                                      duration_predictor_settings,
+                                      preserve_checkpoint_duration_architecture,
                                       profile_balancing_weights,
                                       refinement_mel_weight,
                                       reject_removed_prior_options,
@@ -260,6 +262,26 @@ class VitsTests(unittest.TestCase):
         self.assertEqual(output.attention.shape, (2, 8, 4))
         (output.audio.abs().mean() + output.duration_loss).backward()
         self.assertIsNotNone(self.model.conditioning.speaker_embedding.weight.grad)
+
+    def test_flow_duration_training_forward_and_backward(self):
+        config = VitsConfig(**{
+            **self.config.to_dict(),
+            "duration_predictor_type": "stochastic_mobile",
+            "duration_predictor_channels": 16,
+            "duration_predictor_flow_layers": 2,
+        })
+        model = MultilingualVITS(config)
+        output = model(
+            torch.tensor([[2, 4, 5, 3], [2, 7, 3, 0]]),
+            torch.tensor([4, 3]), torch.randn(2, 9, 8),
+            torch.tensor([8, 7]), torch.tensor([0, 1]),
+            torch.tensor([0, 2]),
+        )
+        (output.audio.abs().mean() + output.duration_loss).backward()
+        self.assertTrue(torch.isfinite(output.duration_loss))
+        gradient = model.duration_predictor.flows[0].output.weight.grad
+        self.assertIsNotNone(gradient)
+        self.assertGreater(float(gradient.abs().sum()), 0.0)
 
     def test_text_embedding_scale_and_positions_are_well_conditioned(self):
         embedding = self.model.text_encoder.embedding.weight.detach()
@@ -527,6 +549,77 @@ class VitsTests(unittest.TestCase):
         self.assertGreater(float(gradient[0].abs().sum()), 0.0)
         self.assertGreater(float(gradient[1].abs().sum()), 0.0)
 
+    def test_flow_duration_predictor_is_invertible_and_stochastic(self):
+        config = VitsConfig(**{
+            **self.config.to_dict(),
+            "duration_predictor_type": "stochastic_mobile",
+            "duration_predictor_channels": 16,
+            "duration_predictor_flow_layers": 2,
+        })
+        model = MultilingualVITS(config)
+        tokens = torch.tensor([[2, 4, 5, 3]])
+        lengths = torch.tensor([4])
+        condition = model.conditioning(torch.tensor([0]), torch.tensor([0]))
+        hidden, _, _, mask = model.text_encoder(tokens, lengths, condition)
+        predictor = model.duration_predictor
+        context = predictor._context(hidden, mask, condition)
+        original = torch.randn(1, 2, 4) * mask
+        base, logdet = predictor._flow(
+            original, context, mask, reverse=False,
+        )
+        restored, _ = predictor._flow(base, context, mask, reverse=True)
+        self.assertTrue(torch.allclose(original, restored, atol=1e-5))
+        self.assertEqual(logdet.shape, (1,))
+        deterministic_a = predictor.sample(hidden, mask, condition, 0.0)
+        deterministic_b = predictor.sample(hidden, mask, condition, 0.0)
+        stochastic = predictor.sample(hidden, mask, condition, 0.6)
+        self.assertTrue(torch.equal(deterministic_a, deterministic_b))
+        self.assertFalse(torch.equal(deterministic_a, stochastic))
+
+    def test_flow_duration_likelihood_trains_couplings(self):
+        config = VitsConfig(**{
+            **self.config.to_dict(),
+            "duration_predictor_type": "stochastic_quality",
+            "duration_predictor_channels": 16,
+            "duration_predictor_flow_layers": 4,
+        })
+        model = MultilingualVITS(config)
+        tokens = torch.tensor([[2, 4, 5, 3]])
+        lengths = torch.tensor([4])
+        condition = model.conditioning(torch.tensor([0]), torch.tensor([0]))
+        hidden, _, _, mask = model.text_encoder(tokens, lengths, condition)
+        loss = model.duration_predictor.loss(
+            hidden, mask, condition,
+            torch.tensor([[[1.0, 2.0, 4.0, 1.0]]]),
+        )
+        loss.backward()
+        gradients = [
+            flow.output.weight.grad
+            for flow in model.duration_predictor.flows
+        ]
+        self.assertTrue(all(gradient is not None for gradient in gradients))
+        self.assertTrue(any(float(gradient.abs().sum()) > 0.0
+                            for gradient in gradients))
+
+    def test_legacy_duration_config_defaults_and_resume_preservation(self):
+        legacy = VitsConfig(vocab_size=10)
+        self.assertEqual(
+            duration_predictor_settings({})["duration_predictor_type"],
+            "stochastic_lognormal",
+        )
+        configured = VitsConfig(**{
+            **legacy.to_dict(),
+            "duration_predictor_type": "stochastic_quality",
+            "duration_predictor_channels": 128,
+            "duration_predictor_flow_layers": 6,
+        })
+        restored = preserve_checkpoint_duration_architecture(
+            configured, {"config": {"vocab_size": 10}}, "resume",
+        )
+        self.assertEqual(restored.duration_predictor_type, "stochastic_lognormal")
+        self.assertEqual(restored.duration_predictor_channels, 64)
+        self.assertEqual(restored.duration_predictor_flow_layers, 2)
+
     def test_integer_durations_do_not_double_one_frame_tokens(self):
         log_duration = torch.log(torch.tensor([[[1.01, 1.49, 1.51, 2.49]]]))
         mask = torch.tensor([[[1.0, 1.0, 1.0, 0.0]]])
@@ -732,6 +825,39 @@ class VitsTests(unittest.TestCase):
                 target.duration_predictor.projection.weight, duration_before,
             ))
 
+    def test_warm_start_automatically_replaces_different_duration_architecture(self):
+        discriminator = VitsDiscriminator(periods=(2,))
+        optimizer_g = torch.optim.AdamW(self.model.parameters())
+        optimizer_d = torch.optim.AdamW(discriminator.parameters())
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "legacy"
+            save_training_checkpoint(
+                checkpoint, generator=self.model, discriminator=discriminator,
+                optimizer_g=optimizer_g, optimizer_d=optimizer_d,
+                epoch=10, global_step=100, config=self.config,
+                language_map={"zh": 0}, speaker_map={"voice_01": 0},
+                tokens=["_", "^", "$", " ", "<unk>"],
+            )
+            flow_config = VitsConfig(**{
+                **self.config.to_dict(),
+                "duration_predictor_type": "stochastic_mobile",
+                "duration_predictor_channels": 16,
+                "duration_predictor_flow_layers": 2,
+            })
+            target = MultilingualVITS(flow_config)
+            report = _load_warm_start_generator(target, checkpoint, ())
+            self.assertIn("duration_predictor", report["excluded_modules"])
+            self.assertEqual(
+                report["duration_predictor_from"], "stochastic_lognormal",
+            )
+            self.assertEqual(
+                report["duration_predictor_to"], "stochastic_mobile",
+            )
+            self.assertTrue(torch.equal(
+                target.text_encoder.embedding.weight,
+                self.model.text_encoder.embedding.weight,
+            ))
+
     def test_resume_uses_checkpoint_frontend_when_lock_was_not_copied(self):
         previous_contract = frontend_contract_from_config({}, ("en",)).to_dict()
         previous_contract["languages"]["en"]["engine_version"] = "eSpeak NG frozen"
@@ -829,6 +955,9 @@ class VitsTests(unittest.TestCase):
     def test_mobile_onnx_strips_sherpa_wire_pads_before_direct_model(self):
         mobile_config = VitsConfig(**{
             **self.config.to_dict(), "num_languages": 1, "num_speakers": 1,
+            "duration_predictor_type": "stochastic_mobile",
+            "duration_predictor_channels": 16,
+            "duration_predictor_flow_layers": 2,
         })
         mobile_model = MultilingualVITS(mobile_config)
         discriminator = VitsDiscriminator(periods=(2,))
@@ -889,6 +1018,13 @@ class VitsTests(unittest.TestCase):
             )
             self.assertEqual(
                 deployment["input_adapter"], "strip-piper-pads-v1",
+            )
+            self.assertEqual(
+                deployment["duration_predictor"]["type"],
+                "stochastic-mobile",
+            )
+            self.assertEqual(
+                deployment["duration_predictor"]["flow_layers"], 2,
             )
             runtime = OnnxTTS(target.parent)
             # Match sherpa-onnx 1.13.4's historical wire sequence. The ONNX
