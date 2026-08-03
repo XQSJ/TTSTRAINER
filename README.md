@@ -636,6 +636,11 @@ metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程
 
 `resume` 要求语言及顺序、speaker 集合和模型结构与 checkpoint 一致。
 
+`last` 和 `best` 都是可续训的完整 checkpoint。续训到新的 `experiment.name` 时，
+系统会把来源实验的历史 `best` 一并复制到新目录；即使后续指标没有刷新，也不会再出现
+新目录只有 `last`、没有 `best` 的情况。中断后无缝继续通常选择 `last`；希望从验证指标
+最优的一轮重新训练则选择 `best`。
+
 时长预测器也遵循 checkpoint 兼容规则：本次升级前训练的 format-4 模型没有
 `duration_predictor_type` 字段，系统会将其识别为原有的
 `stochastic_lognormal`。即使最新 preset 默认值已经升级，`resume`、

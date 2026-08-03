@@ -15,7 +15,8 @@ import torch
 import torchaudio
 from torch.nn import functional as F
 
-from ..checkpoints import (load_training_checkpoint, require_checkpoint_format,
+from ..checkpoints import (inherit_resume_best_checkpoint,
+                           load_training_checkpoint, require_checkpoint_format,
                            require_warm_start_checkpoint_format,
                            save_training_checkpoint)
 from ..experiments import prepare_experiment, resolve_experiment
@@ -875,6 +876,28 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         previous.get("selection")
         if previous and layout.initialization_mode == "resume" else None
     )
+    if previous_selection:
+        inherited_best = inherit_resume_best_checkpoint(
+            layout.initialization_checkpoint,
+            destination / "best",
+            previous_selection,
+        )
+        if inherited_best is not None:
+            logger.info(
+                "BEST CHECKPOINT INHERITED | epoch=%s | metric=%s | "
+                "value=%s | path=%s",
+                previous_selection.get("best_epoch"),
+                previous_selection.get("metric"),
+                previous_selection.get("best_value"), inherited_best,
+                extra={"tts_style": "success"},
+            )
+        else:
+            logger.warning(
+                "BEST CHECKPOINT NOT FOUND | checkpoint=%s | best_epoch=%s | "
+                "the resumed run will create best after validation improves",
+                layout.initialization_checkpoint,
+                previous_selection.get("best_epoch"),
+            )
     best_value = float("inf")
     best_epoch = None
     if previous_selection and previous_selection.get("metric") == selection_metric:

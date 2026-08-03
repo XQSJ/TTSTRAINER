@@ -11,7 +11,8 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from tts_trainer.checkpoints import (load_training_checkpoint,
+from tts_trainer.checkpoints import (inherit_resume_best_checkpoint,
+                                     load_training_checkpoint,
                                      require_checkpoint_format,
                                      require_warm_start_checkpoint_format,
                                      save_training_checkpoint)
@@ -96,6 +97,44 @@ class RuntimeChunkingTests(unittest.TestCase):
 
 
 class VitsTests(unittest.TestCase):
+    def test_resume_inherits_historical_best_into_new_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoints = root / "source" / "checkpoints"
+            best = checkpoints / "best"
+            last = checkpoints / "last"
+            best.mkdir(parents=True)
+            last.mkdir(parents=True)
+            selection = {
+                "metric": "combined_mel",
+                "best_epoch": 20,
+                "best_value": 0.9,
+                "mode": "min",
+            }
+            (best / "metadata.json").write_text(
+                json.dumps({"epoch": 20, "selection": selection}),
+                encoding="utf-8",
+            )
+            (best / "training-state.pt").write_bytes(b"best-state")
+            (last / "metadata.json").write_text(
+                json.dumps({"epoch": 50, "selection": selection}),
+                encoding="utf-8",
+            )
+            (last / "training-state.pt").write_bytes(b"last-state")
+
+            inherited = inherit_resume_best_checkpoint(
+                last, root / "resumed" / "checkpoints" / "best", selection,
+            )
+
+            self.assertIsNotNone(inherited)
+            self.assertEqual(
+                (inherited / "training-state.pt").read_bytes(), b"best-state",
+            )
+            metadata = json.loads(
+                (inherited / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["epoch"], 20)
+
     def test_refinement_config_and_mel_warmup(self):
         config = resolve_refinement_config({
             "lr_decay": 0.9,

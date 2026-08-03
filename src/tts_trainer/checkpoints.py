@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
@@ -12,6 +13,46 @@ from pathlib import Path
 CHECKPOINT_FORMAT = 4
 WARM_START_FORMATS = frozenset((3, CHECKPOINT_FORMAT))
 TRAINING_OBJECTIVE = "standard-vits-mel-kl-duration-gan-feature-v1"
+
+
+def inherit_resume_best_checkpoint(
+    checkpoint: str | Path,
+    destination: str | Path,
+    selection: dict | None,
+) -> Path | None:
+    """把续训来源的历史 best 带到新实验。 / Carry resume best into a new run."""
+    if not selection or selection.get("best_epoch") is None:
+        return None
+    source = Path(checkpoint)
+    target = Path(destination)
+    if target.exists():
+        return target
+    best_epoch = int(selection["best_epoch"])
+    candidates = (source, source.parent / "best")
+    source_best = None
+    for candidate in candidates:
+        metadata_path = candidate / "metadata.json"
+        state_path = candidate / "training-state.pt"
+        if not metadata_path.is_file() or not state_path.is_file():
+            continue
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if int(metadata.get("epoch", -1)) == best_epoch:
+            source_best = candidate
+            break
+    if source_best is None:
+        return None
+    if source_best.resolve() == target.resolve():
+        return target
+
+    # 先完整复制到临时目录，防止中断后留下半个 best。
+    # Copy atomically so an interrupted run cannot leave a partial best.
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.inherit-tmp")
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    shutil.copytree(source_best, temporary)
+    temporary.replace(target)
+    return target
 
 
 def require_checkpoint_format(value: int) -> None:
