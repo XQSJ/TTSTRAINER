@@ -228,6 +228,8 @@ class ProjectConfigTests(unittest.TestCase):
         expand = load_project_config("training_configs/add-speaker.example.json")
         multi = load_project_config("training_configs/multi-speaker.example.json")
         self.assertEqual(clone["generation"]["voices"]["my_voice"]["mode"], "clone")
+        self.assertEqual(clone["training"]["mixed_precision"], "fp32")
+        self.assertEqual(clone["training"]["stage"], "auto")
         self.assertEqual(prepare["task"], "prepare")
         self.assertEqual(
             set(prepare["generation"]["voices"]),

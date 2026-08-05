@@ -114,10 +114,23 @@ def reject_removed_prior_options(training: dict) -> None:
 def resolve_refinement_config(training: dict) -> dict:
     """校验文本先验强化参数。 / Validate text-prior refinement settings."""
     raw = dict(training.get("text_prior_refinement") or {})
+    stage = str(training.get("stage", "auto")).lower()
+    if stage not in {"auto", "standard"}:
+        raise ValueError(
+            "training.stage must be auto or standard; use "
+            "experiment.initialization.mode=refine_text_prior to explicitly "
+            "start text-prior refinement"
+        )
     config = {
-        "enabled": bool(raw.get("enabled", False)),
+        "stage": stage,
+        "enabled": bool(raw.get("enabled", False)) and stage == "auto",
         "start_steps": int(raw.get("start_steps", 10_000)),
         "posterior_mel_threshold": raw.get("posterior_mel_threshold", 0.5),
+        "full_posterior_mel_threshold": raw.get(
+            "full_posterior_mel_threshold", None,
+        ),
+        "require_all_profiles": bool(raw.get("require_all_profiles", True)),
+        "consecutive_passes": int(raw.get("consecutive_passes", 1)),
         "learning_rate": float(raw.get("learning_rate", 1e-4)),
         "lr_decay": float(raw.get("lr_decay", training.get("lr_decay", 0.999875))),
         "mel_weight": float(raw.get("mel_weight", 1.0)),
@@ -135,12 +148,25 @@ def resolve_refinement_config(training: dict) -> dict:
                 "must be positive or null"
             )
         config["posterior_mel_threshold"] = threshold
+    full_threshold = config["full_posterior_mel_threshold"]
+    if full_threshold is not None:
+        full_threshold = float(full_threshold)
+        if full_threshold <= 0.0:
+            raise ValueError(
+                "training.text_prior_refinement.full_posterior_mel_threshold "
+                "must be positive or null"
+            )
+        config["full_posterior_mel_threshold"] = full_threshold
     if config["start_steps"] < 0 or config["mel_warmup_steps"] < 0:
         raise ValueError(
             "text-prior refinement step counts must not be negative"
         )
     if config["learning_rate"] <= 0.0:
         raise ValueError("text-prior refinement learning_rate must be positive")
+    if config["consecutive_passes"] < 1:
+        raise ValueError(
+            "text-prior refinement consecutive_passes must be at least 1"
+        )
     if not 0.0 < config["lr_decay"] <= 1.0:
         raise ValueError("text-prior refinement lr_decay must be in (0, 1]")
     for key in (
@@ -155,6 +181,47 @@ def resolve_refinement_config(training: dict) -> dict:
     )):
         raise ValueError("text-prior refinement must enable at least one loss")
     return config
+
+
+def acoustic_refinement_gate(
+    metrics: dict | None,
+    config: dict,
+) -> tuple[bool, list[str]]:
+    """要求所有语言×音色声学指标达标。 / Gate on every language×voice."""
+    threshold = config.get("posterior_mel_threshold")
+    full_threshold = config.get("full_posterior_mel_threshold")
+    if threshold is None and full_threshold is None:
+        return True, []
+    if metrics is None:
+        return False, ["validation metrics unavailable"]
+
+    failures: list[str] = []
+    profiles = metrics.get("profiles") or {}
+    if config.get("require_all_profiles", True):
+        if not profiles:
+            return False, ["per-profile validation metrics unavailable"]
+        for name, profile in sorted(profiles.items()):
+            if threshold is not None and float(profile["mel"]) > threshold:
+                failures.append(
+                    f"{name}:mel={float(profile['mel']):.4f}>{threshold:.4f}"
+                )
+            for key in (
+                "posterior_mean_full_mel", "posterior_sampled_full_mel",
+            ):
+                value = profile.get(key)
+                if (
+                    full_threshold is not None
+                    and (value is None or float(value) > full_threshold)
+                ):
+                    rendered = "missing" if value is None else f"{float(value):.4f}"
+                    failures.append(
+                        f"{name}:{key}={rendered}>{full_threshold:.4f}"
+                    )
+    elif threshold is not None and float(metrics["mel"]) > threshold:
+        failures.append(
+            f"overall:mel={float(metrics['mel']):.4f}>{threshold:.4f}"
+        )
+    return not failures, failures
 
 
 def configure_training_stage(generator, discriminator, stage: str) -> None:
@@ -191,6 +258,38 @@ def select_device(requested: str = "auto") -> torch.device:
     if torch.cuda.is_available(): return torch.device("cuda")
     if torch.backends.mps.is_available(): return torch.device("mps")
     return torch.device("cpu")
+
+
+def resolve_mixed_precision(training: dict, device: torch.device) -> tuple[str, torch.dtype | None]:
+    """Select CUDA AMP without changing checkpoint parameter precision."""
+    requested = str(training.get("mixed_precision", "auto")).lower()
+    if requested not in {"auto", "bf16", "fp16", "fp32"}:
+        raise ValueError(
+            "training.mixed_precision must be auto, bf16, fp16, or fp32"
+        )
+    if device.type != "cuda":
+        if requested in {"bf16", "fp16"}:
+            logger.warning(
+                "MIXED PRECISION DISABLED | requested=%s | device=%s | using=fp32",
+                requested, device,
+            )
+        return "fp32", None
+    if requested == "fp32":
+        return "fp32", None
+    bf16_supported = bool(torch.cuda.is_bf16_supported())
+    if requested == "bf16" and not bf16_supported:
+        raise ValueError(
+            "training.mixed_precision=bf16 requires a CUDA device with BF16 support; "
+            "use auto or fp16"
+        )
+    if requested == "bf16" or (requested == "auto" and bf16_supported):
+        return "bf16", torch.bfloat16
+    if requested == "fp16":
+        return "fp16", torch.float16
+    # 自动模式宁可回退 FP32，也不在不支持 BF16 的设备上悄悄启用
+    # 数值范围更窄的 FP16。 / Auto prefers a safe FP32 fallback over
+    # silently selecting the narrower FP16 format.
+    return "fp32", None
 
 
 def _checkpoint_metadata(path: Path, *, warm_start: bool = False) -> dict:
@@ -657,6 +756,19 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     random.seed(seed); torch.manual_seed(seed)
     device = select_device(layout.device)
     logger.info("selected device=%s", device)
+    precision_name, autocast_dtype = resolve_mixed_precision(raw["training"], device)
+    amp_enabled = autocast_dtype is not None
+    # FP16 needs dynamic loss scaling. BF16 has FP32-like exponent range and
+    # should not be scaled. Model/optimizer master weights remain FP32 in both.
+    scaler = torch.amp.GradScaler(
+        "cuda", enabled=precision_name == "fp16",
+    )
+    logger.info(
+        "MIXED PRECISION | configured=%s | active=%s | loss_scaler=%s | "
+        "checkpoint_weights=fp32",
+        raw["training"].get("mixed_precision", "auto"), precision_name,
+        "dynamic" if scaler.is_enabled() else "disabled",
+    )
     dataset = VitsDataset(
         train_items, vocabulary, speaker_map, language_map, audio_config,
         piper_compatible=piper_compatible,
@@ -740,6 +852,11 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     )
     refinement_config = resolve_refinement_config(raw["training"])
     if layout.initialization_mode == "refine_text_prior":
+        if refinement_config["stage"] == "standard":
+            raise ValueError(
+                "training.stage=standard conflicts with "
+                "initialization.mode=refine_text_prior"
+            )
         refinement_config["enabled"] = True
     refinement_parameters = [
         parameter
@@ -766,6 +883,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     global_step = 0
     refinement_active = layout.initialization_mode == "refine_text_prior"
     refinement_steps = 0
+    refinement_ready_streak = 0
     refinement_activated_at_step = 0 if refinement_active else None
     refinement_activated_at_epoch = 1 if refinement_active else None
     if layout.initialization_mode == "resume":
@@ -775,6 +893,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             scheduler_g=scheduler_g, scheduler_d=scheduler_d,
             optimizer_refinement=optimizer_refinement,
             scheduler_refinement=scheduler_refinement,
+            scaler=scaler,
         )
         start_epoch = int(restored["epoch"]) + 1
         global_step = int(restored["global_step"])
@@ -783,12 +902,21 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             restored_phase.get("stage") == "text_prior_refinement"
         )
         if refinement_active:
+            if refinement_config["stage"] == "standard":
+                raise ValueError(
+                    "cannot resume a text_prior_refinement checkpoint with "
+                    "training.stage=standard; use warm_start to unfreeze the "
+                    "complete acoustic model"
+                )
             # Checkpoint stage is authoritative: silently returning to full GAN
             # training would unfreeze the acoustic path that refinement was
             # deliberately protecting.
             # checkpoint 阶段优先，避免 resume 时悄悄解冻并破坏声学主链。
             refinement_config["enabled"] = True
         refinement_steps = int(restored_phase.get("refinement_steps", 0))
+        refinement_ready_streak = int(
+            restored_phase.get("acoustic_ready_streak", 0)
+        )
         refinement_activated_at_step = restored_phase.get("activated_at_step")
         refinement_activated_at_epoch = restored_phase.get("activated_at_epoch")
         for optimizer in (optimizer_g, optimizer_d, optimizer_refinement):
@@ -838,11 +966,17 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         )
     configure_training_stage(generator, discriminator, training_stage)
     logger.info(
-        "TRAINING STAGE | stage=%s | refinement_enabled=%s | "
-        "start_steps=%d | posterior_mel_threshold=%s | refinement_steps=%d",
-        training_stage, refinement_config["enabled"],
+        "TRAINING STAGE | stage=%s | policy=%s | refinement_enabled=%s | "
+        "start_steps=%d | posterior_mel_threshold=%s | "
+        "full_posterior_mel_threshold=%s | require_all_profiles=%s | "
+        "consecutive_passes=%d | acoustic_passes=%d | refinement_steps=%d",
+        training_stage, refinement_config["stage"], refinement_config["enabled"],
         refinement_config["start_steps"],
-        refinement_config["posterior_mel_threshold"], refinement_steps,
+        refinement_config["posterior_mel_threshold"],
+        refinement_config["full_posterior_mel_threshold"],
+        refinement_config["require_all_profiles"],
+        refinement_config["consecutive_passes"], refinement_ready_streak,
+        refinement_steps,
         extra={"tts_style": "section"},
     )
     mel_transform = torchaudio.transforms.MelSpectrogram(
@@ -966,7 +1100,9 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     def training_phase_snapshot() -> dict:
         return {
             "stage": training_stage,
+            "mixed_precision": precision_name,
             "refinement_steps": refinement_steps,
+            "acoustic_ready_streak": refinement_ready_streak,
             "activated_at_step": refinement_activated_at_step,
             "activated_at_epoch": refinement_activated_at_epoch,
             "config": refinement_config,
@@ -986,53 +1122,72 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             step_started = time.monotonic()
             batch = {key: value.to(device) for key, value in batch.items()}
             if training_stage == "standard":
-                output = generator(
-                    batch["tokens"], batch["text_lengths"],
-                    batch["spectrograms"], batch["spec_lengths"],
-                    batch["language_ids"], batch["speaker_ids"],
-                )
+                with torch.autocast(
+                    device_type=device.type, dtype=autocast_dtype,
+                    enabled=amp_enabled,
+                ):
+                    output = generator(
+                        batch["tokens"], batch["text_lengths"],
+                        batch["spectrograms"], batch["spec_lengths"],
+                        batch["language_ids"], batch["speaker_ids"],
+                    )
                 real_audio = slice_waveforms(
                     batch["waveforms"], output.slice_starts,
                     config.segment_frames, audio_config.hop_length,
                 )
                 optimizer_d.zero_grad(set_to_none=True)
-                real_d = discriminator(real_audio)
-                fake_d = discriminator(output.audio.detach())
-                loss_d = discriminator_loss(real_d, fake_d)
-                loss_d.backward()
-                optimizer_d.step()
+                with torch.autocast(
+                    device_type=device.type, dtype=autocast_dtype,
+                    enabled=amp_enabled,
+                ):
+                    real_d = discriminator(real_audio)
+                    fake_d = discriminator(output.audio.detach())
+                    loss_d = discriminator_loss(real_d, fake_d)
+                scaler.scale(loss_d).backward()
+                scaler.step(optimizer_d)
 
                 optimizer_g.zero_grad(set_to_none=True)
                 for parameter in discriminator.parameters():
                     parameter.requires_grad_(False)
-                with torch.no_grad():
-                    real_features = discriminator(real_audio)
-                fake_features = discriminator(output.audio)
-                mel_real = torch.log(
-                    mel_transform(real_audio.squeeze(1)).clamp_min(1e-5)
-                )
-                mel_fake = torch.log(
-                    mel_transform(output.audio.squeeze(1)).clamp_min(1e-5)
-                )
-                loss_mel = F.l1_loss(mel_fake, mel_real)
-                loss_kl = kl_loss(
-                    output.latent_prior, output.posterior_log_scale,
-                    output.prior_mean, output.prior_log_scale,
-                    output.audio_mask,
-                )
-                loss_duration = output.duration_loss
-                loss_duration_mean = loss_mel.new_zeros(())
-                effective_prior_weight = 0.0
-                loss_g = (
-                    45.0 * loss_mel + loss_duration + loss_kl
-                    + generator_adversarial_loss(fake_features)
-                    + 2.0 * feature_matching_loss(
+                with torch.autocast(
+                    device_type=device.type, dtype=autocast_dtype,
+                    enabled=amp_enabled,
+                ):
+                    with torch.no_grad():
+                        real_features = discriminator(real_audio)
+                    fake_features = discriminator(output.audio)
+                    adversarial = generator_adversarial_loss(fake_features)
+                    feature_matching = feature_matching_loss(
                         real_features, fake_features,
                     )
-                )
-                loss_g.backward()
+                # Spectral/log/probability reductions stay FP32 even when the
+                # convolution-heavy networks use BF16/FP16 Tensor Cores.
+                with torch.autocast(device_type=device.type, enabled=False):
+                    mel_real = torch.log(
+                        mel_transform(real_audio.squeeze(1).float()).clamp_min(1e-5)
+                    )
+                    mel_fake = torch.log(
+                        mel_transform(output.audio.squeeze(1).float()).clamp_min(1e-5)
+                    )
+                    loss_mel = F.l1_loss(mel_fake, mel_real)
+                    loss_kl = kl_loss(
+                        output.latent_prior.float(),
+                        output.posterior_log_scale.float(),
+                        output.prior_mean.float(), output.prior_log_scale.float(),
+                        output.audio_mask.float(),
+                    )
+                    loss_duration = output.duration_loss.float()
+                    loss_duration_mean = loss_mel.new_zeros(())
+                    effective_prior_weight = 0.0
+                    loss_g = (
+                        45.0 * loss_mel + loss_duration + loss_kl
+                        + adversarial.float() + 2.0 * feature_matching.float()
+                    )
+                scaler.scale(loss_g).backward()
+                scaler.unscale_(optimizer_g)
                 torch.nn.utils.clip_grad_norm_(generator.parameters(), 5.0)
-                optimizer_g.step()
+                scaler.step(optimizer_g)
+                scaler.update()
                 for parameter in discriminator.parameters():
                     parameter.requires_grad_(True)
                 posterior_scale = output.posterior_log_scale.exp().mean()
@@ -1041,45 +1196,53 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             else:
                 generator.zero_grad(set_to_none=True)
                 optimizer_refinement.zero_grad(set_to_none=True)
-                output = generator.forward_text_refinement(
-                    batch["tokens"], batch["text_lengths"],
-                    batch["spectrograms"], batch["spec_lengths"],
-                    batch["language_ids"], batch["speaker_ids"],
-                )
+                with torch.autocast(
+                    device_type=device.type, dtype=autocast_dtype,
+                    enabled=amp_enabled,
+                ):
+                    output = generator.forward_text_refinement(
+                        batch["tokens"], batch["text_lengths"],
+                        batch["spectrograms"], batch["spec_lengths"],
+                        batch["language_ids"], batch["speaker_ids"],
+                    )
                 real_audio = slice_waveforms(
                     batch["waveforms"], output.slice_starts,
                     config.segment_frames, audio_config.hop_length,
                 )
-                mel_real = torch.log(
-                    mel_transform(real_audio.squeeze(1)).clamp_min(1e-5)
-                )
-                mel_fake = torch.log(
-                    mel_transform(output.audio.squeeze(1)).clamp_min(1e-5)
-                )
-                loss_mel = F.l1_loss(mel_fake, mel_real)
-                loss_kl = kl_loss(
-                    output.latent_prior, output.posterior_log_scale,
-                    output.prior_mean, output.prior_log_scale,
-                    output.audio_mask,
-                )
-                loss_duration = output.duration_loss
-                loss_duration_mean = output.duration_mean_loss
-                effective_prior_weight = refinement_mel_weight(
-                    refinement_config, refinement_steps + 1,
-                )
-                loss_g = (
-                    effective_prior_weight * loss_mel
-                    + refinement_config["kl_weight"] * loss_kl
-                    + refinement_config["duration_nll_weight"]
-                    * loss_duration
-                    + refinement_config["duration_mean_weight"]
-                    * loss_duration_mean
-                )
-                loss_g.backward()
+                with torch.autocast(device_type=device.type, enabled=False):
+                    mel_real = torch.log(
+                        mel_transform(real_audio.squeeze(1).float()).clamp_min(1e-5)
+                    )
+                    mel_fake = torch.log(
+                        mel_transform(output.audio.squeeze(1).float()).clamp_min(1e-5)
+                    )
+                    loss_mel = F.l1_loss(mel_fake, mel_real)
+                    loss_kl = kl_loss(
+                        output.latent_prior.float(),
+                        output.posterior_log_scale.float(),
+                        output.prior_mean.float(), output.prior_log_scale.float(),
+                        output.audio_mask.float(),
+                    )
+                    loss_duration = output.duration_loss.float()
+                    loss_duration_mean = output.duration_mean_loss.float()
+                    effective_prior_weight = refinement_mel_weight(
+                        refinement_config, refinement_steps + 1,
+                    )
+                    loss_g = (
+                        effective_prior_weight * loss_mel
+                        + refinement_config["kl_weight"] * loss_kl
+                        + refinement_config["duration_nll_weight"]
+                        * loss_duration
+                        + refinement_config["duration_mean_weight"]
+                        * loss_duration_mean
+                    )
+                scaler.scale(loss_g).backward()
+                scaler.unscale_(optimizer_refinement)
                 torch.nn.utils.clip_grad_norm_(
                     refinement_parameters, 5.0,
                 )
-                optimizer_refinement.step()
+                scaler.step(optimizer_refinement)
+                scaler.update()
                 loss_d = loss_g.new_zeros(())
                 posterior_scale = output.posterior_log_scale.exp().mean()
                 current_lr = optimizer_refinement.param_groups[0]["lr"]
@@ -1161,6 +1324,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     quality_summary=quality_summary,
                     audio=audio_config,
                     scheduler_g=scheduler_g, scheduler_d=scheduler_d,
+                    scaler=scaler,
                     optimizer_refinement=optimizer_refinement,
                     scheduler_refinement=scheduler_refinement,
                     training_phase=training_phase_snapshot(),
@@ -1228,6 +1392,8 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 generator, validation_loader, mel_transform, audio_config, config, device,
                 seed=int(validation_config.get("seed", seed)),
                 preview_dir=preview_dir,
+                language_map=language_map,
+                speaker_map=speaker_map,
             )
             current_value = float(validation_metrics[selection_metric])
             logger.info(
@@ -1262,6 +1428,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     quality_summary=quality_summary,
                     audio=audio_config,
                     scheduler_g=scheduler_g, scheduler_d=scheduler_d,
+                    scaler=scaler,
                     optimizer_refinement=optimizer_refinement,
                     scheduler_refinement=scheduler_refinement,
                     training_phase=training_phase_snapshot(),
@@ -1277,15 +1444,15 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             and refinement_config["enabled"]
             and global_step >= refinement_config["start_steps"]
         ):
-            threshold = refinement_config["posterior_mel_threshold"]
-            posterior_ready = (
-                threshold is None
-                or (
-                    validation_metrics is not None
-                    and float(validation_metrics["mel"]) <= threshold
-                )
+            posterior_ready, gate_failures = acoustic_refinement_gate(
+                validation_metrics, refinement_config,
             )
             if posterior_ready:
+                refinement_ready_streak += 1
+            elif validation_metrics is not None:
+                refinement_ready_streak = 0
+            required_passes = refinement_config["consecutive_passes"]
+            if posterior_ready and refinement_ready_streak >= required_passes:
                 training_stage = "text_prior_refinement"
                 refinement_active = True
                 refinement_activated_at_step = global_step
@@ -1295,22 +1462,21 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 )
                 logger.info(
                     "TEXT PRIOR REFINEMENT ACTIVATED | epoch=%d | step=%d | "
-                    "posterior_mel=%s | threshold=%s | frozen="
+                    "acoustic_passes=%d/%d | profiles=%d | frozen="
                     "conditioning,posterior_encoder,decoder,discriminator | "
                     "trainable=text_encoder,flow,duration_predictor",
-                    epoch, global_step,
-                    (
-                        f"{validation_metrics['mel']:.6f}"
-                        if validation_metrics is not None else "not-required"
-                    ),
-                    threshold,
+                    epoch, global_step, refinement_ready_streak,
+                    required_passes,
+                    len((validation_metrics or {}).get("profiles") or {}),
                     extra={"tts_style": "success"},
                 )
             elif validation_metrics is not None:
                 logger.info(
                     "TEXT PRIOR REFINEMENT WAIT | epoch=%d | step=%d | "
-                    "posterior_mel=%.6f | required<=%.6f",
-                    epoch, global_step, validation_metrics["mel"], threshold,
+                    "acoustic_passes=%d/%d | failures=%s",
+                    epoch, global_step, refinement_ready_streak,
+                    required_passes,
+                    "; ".join(gate_failures[:8]) or "waiting for stable passes",
                 )
         selection = {
             "metric": selection_metric,
@@ -1341,6 +1507,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 quality_summary=quality_summary,
                 audio=audio_config,
                 scheduler_g=scheduler_g, scheduler_d=scheduler_d,
+                scaler=scaler,
                 optimizer_refinement=optimizer_refinement,
                 scheduler_refinement=scheduler_refinement,
                 training_phase=training_phase_snapshot(),

@@ -309,6 +309,8 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 | `dataset.voices.<id>.reference_strategy` | `cascade`（推荐）、`shared` 或 `per_language` |
 | `training.batch_size` | 显存不足时优先调小 |
 | `training.epochs` | 总训练轮数 |
+| `training.stage` | `auto` 自动两阶段；`standard` 始终训练完整声学主链 |
+| `training.mixed_precision` | 默认 `fp32`；显式设为 `bf16` 才启用省显存训练 |
 
 ## 数据复用规则
 
@@ -657,12 +659,31 @@ metadata，然后继续训练。如果 checkpoint 原本包含多个音色，程
 `quality` 和 `mobile` 预设会在同一次训练中自动执行两个阶段：
 
 1. 标准阶段训练完整 VITS，先把音色、声码器和 posterior 重建学稳定；
-2. 验证集 posterior Mel 达标且达到最低 step 后，自动冻结音色条件、Posterior
-   Encoder、Decoder 和判别器，只强化 Text Encoder、Flow 与 Duration Predictor。
+2. 至少完成 30,000 step，并且每个“语言×音色”的分段 Posterior Mel、完整均值
+   Posterior Mel 和完整采样 Posterior Mel 连续三次验证全部达标后，才冻结音色条件、
+   Posterior Encoder、Decoder 和判别器，只强化 Text Encoder、Flow 与 Duration
+   Predictor。总体平均值不会再掩盖某一种语言的电音。
 
 日志出现 `TEXT PRIOR REFINEMENT ACTIVATED` 表示已经安全进入第二阶段。阶段和独立
 优化器都保存在 checkpoint 中，`resume` 后会从同一阶段继续。最终仍只有一个
 checkpoint 和一个 ONNX，不会产生需要组合的两个模型。
+
+需要修复声学主链或不希望自动冻结时，在普通配置中写：
+
+```json
+"training": {
+  "stage": "standard"
+}
+```
+
+`standard` 会忽略自动 refinement 开关。已经处于 `text_prior_refinement` 的 checkpoint
+不能靠普通 `resume` 解冻；必须使用 `warm_start` 创建新实验。显式开始文本先验强化仍使用
+`initialization.mode: "refine_text_prior"`，避免误把从零训练的模型直接冻结。
+
+混合精度默认保持 `fp32`，因此升级项目不会悄悄改变已有音质基线。4090 等支持 BF16 的
+CUDA 显卡可显式设置 `"mixed_precision": "bf16"`，模型权重、优化器主权重以及
+Mel/KL 汇总仍保持 FP32；但数值不可能与纯 FP32 逐位一致，正式长训前应先做短程 A/B。
+FP16 只在显式配置时启用，并将 GradScaler 状态随 checkpoint 保存和恢复。
 
 如果已有 **format 4** checkpoint 的 posterior 音频正常，但
 `aligned-text-prior.wav`、`text-only-*.wav` 较差，可复制
@@ -761,7 +782,9 @@ runs/<model_name>/
 │       ├── aligned-text-prior.wav
 │       ├── text-only-inference.wav
 │       ├── text-only-deterministic.wav
-│       └── diagnostics.json
+│       ├── diagnostics.json
+│       └── profiles/<language>/<speaker>/
+│           └── 同一套六个 WAV 与 diagnostics.json
 └── checkpoints/
     ├── best/
     └── last/
@@ -794,8 +817,14 @@ artifacts/<model_name>/
 4. `aligned-text-prior.wav` 加入文本编码和 MAS 真值对齐，但不测试时长预测。
 5. 两个 `text-only-*` 才是完整 TTS 推理链路。
 
-`aligned-text-prior.wav` 只用于验证，不会作为额外 Mel 损失反向更新共享 Decoder；
-文本先验继续由标准 VITS 的 KL 和 Duration 目标训练，避免破坏 posterior 主重建。
+标准阶段的 `aligned-text-prior.wav` 只用于验证；进入 text-prior refinement 后，固定
+Decoder 并使用对应的 aligned Mel、KL 和 Duration 目标更新 Text Encoder、Flow 与
+Duration Predictor，因此不会反向改变已经通过声学门槛的 Decoder。
+
+每次验证的 `metrics.validation.profiles` 会分别记录每个语言×音色的指标。自动阶段切换
+要求所有 profile 连续通过，不再只看总体 `posterior_mel`。试听文件同时写入
+`validation-audio/epoch-XXXX/profiles/<language>/<speaker>/`；顶层文件继续保留，兼容
+已有排错脚本。
 
 从零训练的 `epoch-0001` 是冷启动诊断，不是可发布音质。以单音色、单语言、
 2,000 条样本、`batch_size=4` 为例，扣除 5% 验证集后第一轮约只有 475 step；

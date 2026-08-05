@@ -24,12 +24,14 @@ from tts_trainer.vits.losses import (discriminator_loss,
                                      generator_adversarial_loss, kl_loss)
 from tts_trainer.vits.modules import maximum_path, sinusoidal_position_encoding
 from tts_trainer.vits.trainer import (_semantic_reference_root,
+                                      acoustic_refinement_gate,
                                       configure_training_stage,
                                       duration_predictor_settings,
                                       preserve_checkpoint_duration_architecture,
                                       profile_balancing_weights,
                                       refinement_mel_weight,
                                       reject_removed_prior_options,
+                                      resolve_mixed_precision,
                                       resolve_refinement_config, train_vits)
 from tts_trainer.vits.trainer import (_load_expanded_generator,
                                       _load_warm_start_generator,
@@ -97,6 +99,72 @@ class RuntimeChunkingTests(unittest.TestCase):
 
 
 class VitsTests(unittest.TestCase):
+    def test_acoustic_refinement_gate_requires_every_profile(self):
+        config = {
+            "posterior_mel_threshold": 0.45,
+            "full_posterior_mel_threshold": 0.45,
+            "require_all_profiles": True,
+        }
+        metrics = {
+            "mel": 0.40,
+            "profiles": {
+                "en/voice": {
+                    "mel": 0.42,
+                    "posterior_mean_full_mel": 0.41,
+                    "posterior_sampled_full_mel": 0.43,
+                },
+                "zh/voice": {
+                    "mel": 0.39,
+                    "posterior_mean_full_mel": 0.40,
+                    "posterior_sampled_full_mel": 0.48,
+                },
+            },
+        }
+        ready, failures = acoustic_refinement_gate(metrics, config)
+        self.assertFalse(ready)
+        self.assertTrue(any("zh/voice" in failure for failure in failures))
+        metrics["profiles"]["zh/voice"]["posterior_sampled_full_mel"] = 0.44
+        self.assertEqual(acoustic_refinement_gate(metrics, config), (True, []))
+
+    def test_standard_stage_disables_automatic_refinement(self):
+        config = resolve_refinement_config({
+            "stage": "standard",
+            "text_prior_refinement": {"enabled": True},
+        })
+        self.assertEqual(config["stage"], "standard")
+        self.assertFalse(config["enabled"])
+
+    def test_mixed_precision_is_disabled_off_cuda(self):
+        self.assertEqual(
+            resolve_mixed_precision({"mixed_precision": "auto"}, torch.device("cpu")),
+            ("fp32", None),
+        )
+
+    def test_mixed_precision_auto_prefers_bf16_and_falls_back_to_fp32(self):
+        with patch("torch.cuda.is_bf16_supported", return_value=True):
+            self.assertEqual(
+                resolve_mixed_precision({}, torch.device("cuda")),
+                ("bf16", torch.bfloat16),
+            )
+        with patch("torch.cuda.is_bf16_supported", return_value=False):
+            self.assertEqual(
+                resolve_mixed_precision({}, torch.device("cuda")),
+                ("fp32", None),
+            )
+            self.assertEqual(
+                resolve_mixed_precision(
+                    {"mixed_precision": "fp16"}, torch.device("cuda"),
+                ),
+                ("fp16", torch.float16),
+            )
+
+    def test_explicit_unsupported_bf16_is_rejected(self):
+        with patch("torch.cuda.is_bf16_supported", return_value=False):
+            with self.assertRaisesRegex(ValueError, "BF16 support"):
+                resolve_mixed_precision(
+                    {"mixed_precision": "bf16"}, torch.device("cuda"),
+                )
+
     def test_resume_inherits_historical_best_into_new_run(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1276,6 +1344,12 @@ class VitsTests(unittest.TestCase):
             self.assertIn("posterior_mean_full_mel", diagnostics)
             self.assertIn("posterior_sampled_full_mel", diagnostics)
             self.assertIn("posterior_scale_mean", diagnostics)
+            self.assertEqual(diagnostics["format"], 3)
+            self.assertIn("en/voice_01", last_metadata["metrics"]["validation"]["profiles"])
+            profile_preview = (
+                preview / "profiles" / "en" / "voice_01" / "diagnostics.json"
+            )
+            self.assertTrue(profile_preview.is_file())
             with wave.open(
                 str(preview / "posterior-reconstruction.wav"), "rb",
             ) as posterior:
