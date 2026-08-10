@@ -134,6 +134,7 @@
     "stage": "auto",
     "batch_size": 8,
     "mixed_precision": "fp32",
+    "length_bucket_pool_batches": 20,
     "learning_rate_generator": 0.0002,
     "learning_rate_discriminator": 0.0002,
     "lr_decay": 0.999875,

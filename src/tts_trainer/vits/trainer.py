@@ -32,7 +32,8 @@ from ..quality import run_audio_quality_gate
 from ..semantic_quality import run_semantic_quality_gate
 from ..text import Vocabulary
 from .config import load_vits_config
-from .data import (AudioConfig, VitsDataset, collate_vits,
+from .data import (AudioConfig, LengthBucketBatchSampler, VitsDataset,
+                   audio_sample_lengths, collate_vits,
                    inspect_alignment_item, slice_waveforms)
 from .discriminators import VitsDiscriminator
 from .losses import (discriminator_loss, feature_matching_loss,
@@ -783,10 +784,19 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         len(profile_counts), min(profile_counts.values()),
         max(profile_counts.values()),
     )
-    sampler = torch.utils.data.WeightedRandomSampler(weights, len(train_items), replacement=True)
+    batch_size = int(raw["training"]["batch_size"])
+    pool_batches = int(raw["training"].get("length_bucket_pool_batches", 20))
+    batch_sampler = LengthBucketBatchSampler(
+        weights, audio_sample_lengths(train_items), batch_size,
+        pool_batches=pool_batches,
+    )
     loader = torch.utils.data.DataLoader(
-        dataset, batch_size=raw["training"]["batch_size"], sampler=sampler,
+        dataset, batch_sampler=batch_sampler,
         num_workers=raw["training"].get("num_workers", 0), collate_fn=collate_vits,
+    )
+    logger.info(
+        "length bucketing enabled pool_batches=%d batch_size=%d",
+        pool_batches, batch_size,
     )
     validation_loader = None
     if validation_items:
@@ -1120,6 +1130,9 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         epoch_refinement_steps = 0
         for batch_index, batch in enumerate(loader, 1):
             step_started = time.monotonic()
+            # Keep the full padded waveform in host memory. Only the fixed-size
+            # segment selected after posterior alignment belongs on the GPU.
+            cpu_waveforms = batch.pop("waveforms")
             batch = {key: value.to(device) for key, value in batch.items()}
             if training_stage == "standard":
                 with torch.autocast(
@@ -1132,9 +1145,9 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                         batch["language_ids"], batch["speaker_ids"],
                     )
                 real_audio = slice_waveforms(
-                    batch["waveforms"], output.slice_starts,
+                    cpu_waveforms, output.slice_starts.detach().cpu(),
                     config.segment_frames, audio_config.hop_length,
-                )
+                ).to(device)
                 optimizer_d.zero_grad(set_to_none=True)
                 with torch.autocast(
                     device_type=device.type, dtype=autocast_dtype,
@@ -1206,9 +1219,9 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                         batch["language_ids"], batch["speaker_ids"],
                     )
                 real_audio = slice_waveforms(
-                    batch["waveforms"], output.slice_starts,
+                    cpu_waveforms, output.slice_starts.detach().cpu(),
                     config.segment_frames, audio_config.hop_length,
-                )
+                ).to(device)
                 with torch.autocast(device_type=device.type, enabled=False):
                     mel_real = torch.log(
                         mel_transform(real_audio.squeeze(1).float()).clamp_min(1e-5)

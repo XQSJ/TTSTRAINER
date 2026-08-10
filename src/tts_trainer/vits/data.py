@@ -22,6 +22,48 @@ class AudioConfig:
     mel_power: float = 2.0
 
 
+class LengthBucketBatchSampler(torch.utils.data.Sampler[list[int]]):
+    """Keep weighted sampling while grouping similarly sized audio."""
+
+    def __init__(self, weights, lengths, batch_size: int, *, pool_batches: int = 20):
+        self.weights = torch.as_tensor(weights, dtype=torch.double)
+        self.lengths = tuple(int(length) for length in lengths)
+        self.batch_size = int(batch_size)
+        self.pool_batches = int(pool_batches)
+        if len(self.weights) != len(self.lengths) or not self.lengths:
+            raise ValueError("weights and lengths must have the same non-zero length")
+        if self.batch_size <= 0 or self.pool_batches <= 0:
+            raise ValueError("batch_size and pool_batches must be positive")
+
+    def __len__(self):
+        return (len(self.lengths) + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self):
+        # Sampling first preserves the existing language/speaker probability
+        # mass. Local sorting reduces padding without globally ordering epochs.
+        sampled = torch.multinomial(
+            self.weights, len(self.lengths), replacement=True,
+        ).tolist()
+        pool_size = self.batch_size * self.pool_batches
+        batches = []
+        for start in range(0, len(sampled), pool_size):
+            pool = sampled[start:start + pool_size]
+            pool.sort(key=self.lengths.__getitem__)
+            batches.extend(
+                pool[offset:offset + self.batch_size]
+                for offset in range(0, len(pool), self.batch_size)
+            )
+        if len(batches) > 1:
+            order = torch.randperm(len(batches)).tolist()
+            batches = [batches[index] for index in order]
+        yield from batches
+
+
+def audio_sample_lengths(items: list[Item]) -> list[int]:
+    """Read inexpensive audio headers for length-aware batching."""
+    return [int(sf.info(str(item.audio)).frames) for item in items]
+
+
 def inspect_alignment_item(
     item: Item, vocabulary: Vocabulary, audio_config: AudioConfig,
     *, piper_compatible: bool = False,

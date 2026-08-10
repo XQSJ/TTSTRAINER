@@ -18,8 +18,8 @@ from tts_trainer.checkpoints import (inherit_resume_best_checkpoint,
                                      save_training_checkpoint)
 from tts_trainer.vits import MultilingualVITS, VitsConfig, VitsDiscriminator
 from tts_trainer.vits.model import integer_durations
-from tts_trainer.vits.data import (AudioConfig, inspect_alignment_item,
-                                   slice_waveforms)
+from tts_trainer.vits.data import (AudioConfig, LengthBucketBatchSampler,
+                                   inspect_alignment_item, slice_waveforms)
 from tts_trainer.vits.losses import (discriminator_loss,
                                      generator_adversarial_loss, kl_loss)
 from tts_trainer.vits.modules import maximum_path, sinusoidal_position_encoding
@@ -248,6 +248,30 @@ class VitsTests(unittest.TestCase):
             ("en", "b"): 1.0,
             ("fr", "a"): 1.0,
         })
+
+    def test_length_bucket_sampler_reduces_batch_spread(self):
+        torch.manual_seed(7)
+        lengths = list(range(1, 65))
+        batches = list(LengthBucketBatchSampler(
+            [1.0] * len(lengths), lengths, batch_size=4, pool_batches=16,
+        ))
+        self.assertEqual(len(batches), 16)
+        self.assertEqual(sum(map(len, batches)), len(lengths))
+        spreads = [
+            max(lengths[index] for index in batch)
+            - min(lengths[index] for index in batch)
+            for batch in batches
+        ]
+        self.assertLess(sum(spreads) / len(spreads), 10)
+
+    def test_length_bucket_sampler_retains_weighted_replacement(self):
+        torch.manual_seed(11)
+        sampler = LengthBucketBatchSampler(
+            [0.0, 0.0, 1.0], [100, 200, 300], batch_size=2,
+        )
+        self.assertEqual(
+            [index for batch in sampler for index in batch], [2, 2, 2],
+        )
 
     def test_alignment_gate_detects_piper_token_overflow(self):
         with tempfile.TemporaryDirectory() as directory:
