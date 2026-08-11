@@ -15,7 +15,7 @@ import torch
 from torch import nn
 
 from ..checkpoints import require_checkpoint_format
-from ..frontend import frontend_contract_from_config
+from ..frontend import export_frontend_packs, frontend_contract_from_config
 from ..frontend.contract import (DIRECT_TOKEN_ENCODING,
                                  LEGACY_PIPER_TOKEN_ENCODING,
                                  MOBILE_DIRECT_TOKEN_ENCODING,
@@ -383,6 +383,24 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     with target.open("rb") as stream:
         model_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
     profiles = voice_profiles(metadata["speaker_map"], metadata["language_map"])
+    conformance = metadata.get("frontend_conformance")
+    espeak_data_dir = None
+    if any(
+        profile.get("provider") == "espeak-ng"
+        for profile in frontend.get("languages", {}).values()
+    ):
+        try:
+            espeak_data_dir = _find_espeak_data_dir()
+        except FileNotFoundError:
+            logger.warning(
+                "FRONTEND PACK | eSpeak data unavailable | "
+                "descriptors exported without bundled runtime data"
+            )
+    frontend_packs = export_frontend_packs(
+        output_dir, frontend, conformance, metadata["language_map"],
+        model_sha256=model_sha256,
+        espeak_data_dir=espeak_data_dir,
+    )
     text_input = _export_sherpa_android_text_package(
         onnx, model, output_dir, frontend, profiles, sample_rate=sample_rate,
         tokens=metadata["tokens"],
@@ -429,6 +447,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         ),
         "frontend_note": "application supplies matching phoneme ids; stock sherpa multilingual switching requires an adapter",
         "text_input": text_input,
+        "frontend_packs": frontend_packs,
         "num_languages": config.num_languages,
         "num_speakers": config.num_speakers,
         "voice_profiles": profiles,
@@ -443,7 +462,6 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     (output_dir / "tokens.json").write_text(json.dumps({"tokens": metadata["tokens"]}, ensure_ascii=False, indent=2), encoding="utf-8")
     tokens_text = "".join(f"{token} {index}\n" for index, token in enumerate(metadata["tokens"]))
     (output_dir / "tokens.txt").write_text(tokens_text, encoding="utf-8")
-    conformance = metadata.get("frontend_conformance")
     if conformance:
         save_frontend_conformance(conformance, output_dir / "frontend.conformance.json")
     logger.info(

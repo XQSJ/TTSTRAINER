@@ -1067,6 +1067,18 @@ class VitsTests(unittest.TestCase):
             )
             self.assertEqual(list(target.parent.glob("*.onnx")), [target])
             self.assertTrue((target.parent / "frontend.conformance.json").is_file())
+            pack_index = json.loads(
+                (target.parent / "frontend-packs/manifest.json").read_text(
+                    encoding="utf-8",
+                ),
+            )
+            self.assertEqual(
+                pack_index["languages"]["ja"]["provider"], "openjtalk",
+            )
+            self.assertEqual(
+                deployment["frontend_packs"]["manifest"],
+                "frontend-packs/manifest.json",
+            )
             shape = validate_onnx_runtime(target)
             self.assertEqual(shape[0:2], (1, 1))
             runtime = OnnxTTS(target.parent)

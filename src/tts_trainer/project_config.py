@@ -8,6 +8,7 @@ PRESET_FILES = {
     "compact": "configs/internal/pipeline_defaults.json",
     "quality": "configs/internal/quality_pipeline_defaults.json",
     "mobile": "configs/internal/mobile_pipeline_defaults.json",
+    "mobile_routed": "configs/internal/mobile_routed_pipeline_defaults.json",
 }
 
 

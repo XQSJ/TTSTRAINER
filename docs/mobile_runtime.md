@@ -27,7 +27,7 @@ output:        float [B, 1, N]
 `experiment.languages` 决定。Python 参考实现位于
 `tts_trainer.vits.runtime.OnnxTTS`。
 
-## mobile 与 quality 相互独立
+## 声学尺寸与前端策略分离
 
 `quality` 保留逐语言专用前端：
 
@@ -38,9 +38,15 @@ ko -> Piper Plus
 en/fr/es/pt/... -> eSpeak NG
 ```
 
+`mobile_routed` 使用相同的逐语言专用前端，但采用 mobile 的 2 层轻量 Flow SDP。
+这是包含中日韩的移动产品默认选择。
+
 `mobile` 单独使用 eSpeak/Piper，以便 stock sherpa-onnx 在 Android 上直接接收
 普通文本。两者不会共享或覆盖 frontend contract。训练数据 WAV 可以复用，
 checkpoint 不可以跨 preset 续训。
+
+eSpeak 日语遇到汉字可能输出 `Chinese letter`/`Japanese letter`。预检会把这种合法
+IPA 形式的错误回退识别为失败，不能再用增加 epoch 掩盖前端信息丢失。
 
 mobile v3 训练核心使用紧凑序列：
 
@@ -72,6 +78,20 @@ eSpeak 数据目录。
 
 quality 导出仍采用“一个 ONNX 核心 + App/native 专用前端路由”，不强制经过
 上述 mobile wrapper。
+
+所有导出现在还会生成：
+
+```text
+frontend-packs/
+├── manifest.json
+├── _shared/espeak-ng/          # 可选共享运行时数据
+└── <language>/
+    ├── manifest.json           # provider + 资源要求 + core hash
+    └── conformance.json        # 单语言一致性向量
+```
+
+语言包不复制模型权重。App 安装语言包后必须先执行 conformance，再启用该语言；缺少
+OpenJTalk/Piper Plus 原生运行时的语言保持不可用，不允许回退到 eSpeak。
 
 ## 前端一致性
 
@@ -120,8 +140,9 @@ pinyin→IPA 与声调规则；韩语使用 g2pk2/MeCab 音韵规则再转 IPA�
 只证明训练端可生成一致 token；移动端
 仍必须包含相同 provider 版本以及对应 voice/词典数据。
 
-eSpeak-ng 使用 GPL-3.0-or-later。TTSTRAINER 不复制或打包它；移动 App 如果分发
-eSpeak-ng native 库，需要单独完成许可证和发布方式评估。
+eSpeak-ng 使用 GPL-3.0-or-later。导出机能找到 eSpeak 数据目录时，语言包会把共享
+数据放入 `_shared/espeak-ng/`；移动 App 分发 native 库或数据前，需要单独完成许可证
+和发布方式评估。
 
 训练端的 pyopenjtalk 是 Open JTalk 的 Python wrapper，不直接部署到手机。Android/
 iOS 需要集成兼容的 Open JTalk/MeCab 原生前端及相同词典，或者由业务层传入已经

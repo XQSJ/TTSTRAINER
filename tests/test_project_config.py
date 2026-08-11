@@ -67,6 +67,29 @@ class ProjectConfigTests(unittest.TestCase):
             self.assertTrue(mobile["frontend"]["mobile_direct"])
             self.assertFalse(mobile["frontend"].get("piper_compatible", False))
 
+    def test_mobile_routed_keeps_mobile_model_and_quality_frontends(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mobile-routed.json"
+            path.write_text(json.dumps({
+                "preset": "mobile_routed",
+                "experiment": {
+                    "name": "mobile-routed",
+                    "languages": ["zh", "en", "ja", "ko"],
+                },
+            }), encoding="utf-8")
+            resolved = load_project_config(path)
+            self.assertEqual(
+                resolved["model"]["duration_predictor_type"],
+                "stochastic_mobile",
+            )
+            self.assertEqual(
+                resolved["model"]["duration_predictor_flow_layers"], 2,
+            )
+            self.assertEqual(
+                resolved["frontend"]["provider"], "language-router",
+            )
+            self.assertFalse(resolved["frontend"]["mobile_direct"])
+
     def test_rejects_unknown_public_preset(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "invalid.json"

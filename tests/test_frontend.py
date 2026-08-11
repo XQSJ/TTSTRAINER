@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import json
 import shutil
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tts_trainer.frontend import (FrontendContract, chunk_text,
+                                  export_frontend_packs,
                                   frontend_contract_from_config,
                                   frontend_from_config,
                                   build_frontend_conformance,
@@ -42,6 +44,60 @@ class FakeFrontend:
 
 
 class FrontendTests(unittest.TestCase):
+    def test_exports_independent_frontend_pack_descriptors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            frontend = frontend_contract_from_config(
+                {}, ("zh", "en", "ja"),
+            ).to_dict()
+            conformance = {
+                "format": 1,
+                "cases_per_language": 1,
+                "languages": ["zh", "en", "ja"],
+                "piper_compatible": False,
+                "cases": [
+                    {
+                        "language": language,
+                        "language_id": index,
+                        "text": language,
+                        "phonemes": ["a"],
+                        "token_ids": [1, 5, 2],
+                    }
+                    for index, language in enumerate(("zh", "en", "ja"))
+                ],
+            }
+            result = export_frontend_packs(
+                root, frontend, conformance,
+                {"zh": 0, "en": 1, "ja": 2},
+                model_sha256="a" * 64,
+            )
+            self.assertEqual(
+                result["layout"], "shared-core-language-frontends-v1",
+            )
+            ja = json.loads(
+                (root / "frontend-packs/ja/manifest.json").read_text(
+                    encoding="utf-8",
+                ),
+            )
+            self.assertEqual(ja["provider"], "openjtalk")
+            self.assertEqual(
+                {row["kind"] for row in ja["requirements"]},
+                {"runtime", "dictionary"},
+            )
+            en = json.loads(
+                (root / "frontend-packs/en/manifest.json").read_text(
+                    encoding="utf-8",
+                ),
+            )
+            self.assertEqual(en["requirements"][0]["shared_group"], "espeak-ng")
+            ja_cases = json.loads(
+                (root / "frontend-packs/ja/conformance.json").read_text(
+                    encoding="utf-8",
+                ),
+            )
+            self.assertEqual(ja_cases["languages"], ["ja"])
+            self.assertEqual(len(ja_cases["cases"]), 1)
+
     def test_text_chunking_uses_punctuation_and_phoneme_budget(self):
         def phonemize(text, language):
             del language

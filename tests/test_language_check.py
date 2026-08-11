@@ -5,7 +5,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tts_trainer.experiments import resolve_experiment
-from tts_trainer.language_check import check_language_support, format_language_statuses
+from tts_trainer.language_check import (check_language_support,
+                                        detect_unicode_name_fallback,
+                                        format_language_statuses)
 
 
 class FakeFrontend:
@@ -62,6 +64,20 @@ class LanguageCheckTests(unittest.TestCase):
             self.assertEqual(status.teacher, "external-data")
             self.assertFalse(status.ready)
             self.assertIn("missing voice data", status.error)
+
+    def test_detects_espeak_unicode_name_fallback_for_japanese(self):
+        fallback = (
+            "t", "ʃ", "ˈ", "a", "ɪ", "n", "i", "ː", "z", "l",
+            "ˈ", "e", "̞", "t", "ə",
+        )
+        self.assertEqual(
+            detect_unicode_name_fallback("ja", fallback),
+            "chinese-letter",
+        )
+        self.assertIsNone(detect_unicode_name_fallback("en", fallback))
+        self.assertIsNone(
+            detect_unicode_name_fallback("ja", ("k", "o", "N", "n", "i")),
+        )
 
 
 if __name__ == "__main__":

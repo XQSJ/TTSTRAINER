@@ -1,0 +1,14 @@
+{
+  "_comment": "移动声学结构 + 逐语言专用前端；适合按语言交付 G2P 资源 / Mobile acoustic graph with language-specific frontends for on-demand G2P packs",
+  "extends": "quality_pipeline_defaults.json",
+  "model": {
+    "duration_predictor_type": "stochastic_mobile",
+    "duration_predictor_channels": 64,
+    "duration_predictor_flow_layers": 2
+  },
+  "frontend": {
+    "provider": "language-router",
+    "mobile_direct": false,
+    "strict_language_switches": true
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "_comment": "轻量移动模型 + 逐语言专用前端 / Lightweight mobile model with language-specific frontends",
+  "task": "train",
+  "preset": "mobile_routed",
+  "experiment": {
+    "name": "mobile_routed_model",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "cuda:0"
+  },
+  "dataset": {
+    "sentences_per_language": 2000,
+    "speakers": {
+      "voice_01": "voice_01"
+    }
+  },
+  "training": {
+    "stage": "auto",
+    "batch_size": 4,
+    "epochs": 200,
+    "mixed_precision": "fp32"
+  }
+}

@@ -312,6 +312,10 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 | `training.stage` | `auto` 自动两阶段；`standard` 始终训练完整声学主链 |
 | `training.mixed_precision` | 默认 `fp32`；显式设为 `bf16` 才启用省显存训练 |
 
+移动端需要中日韩正确发音时选择 `preset: "mobile_routed"`：它使用 mobile 的轻量
+时长模型，但按语言路由 Piper Plus、OpenJTalk 和 eSpeak。不要再用统一 eSpeak
+直接处理日语汉字；预检检测到 `Chinese letter`/`Japanese letter` 回退读法会立即失败。
+
 ## 数据复用规则
 
 每个公开 `voice_id` 只有一个目录：
@@ -796,6 +800,12 @@ artifacts/<model_name>/
 ├── tokens.json
 ├── frontend.json
 ├── frontend.conformance.json
+├── frontend-packs/
+│   ├── manifest.json           # 共享核心与语言包索引
+│   ├── _shared/espeak-ng/      # 多个拉丁语言共享，存在时只保存一份
+│   └── <language>/
+│       ├── manifest.json       # provider、版本和运行时资源要求
+│       └── conformance.json    # 该语言的文本→音素→token 校验向量
 └── android_text/               # 仅 preset=mobile
     ├── espeak-ng-data/
     ├── model.weights            # 所有语言共享的一份权重
@@ -884,12 +894,13 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer verify-frontend \
 
 ### Android 直接输入普通文本
 
-最小配置与普通训练相同，只需选择 `mobile`：
+只需要 eSpeak 可正确覆盖的语言时可以选择 `mobile`。包含中文、日文或韩文的产品模型
+推荐选择 `mobile_routed`：
 
 ```json
 {
   "task": "train",
-  "preset": "mobile",
+  "preset": "mobile_routed",
   "experiment": {
     "name": "my_mobile_tts",
     "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
@@ -908,15 +919,19 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer verify-frontend \
 }
 ```
 
-导出时会自动检查前端契约。`mobile` 使用统一 eSpeak，但 VITS 训练核心采用更容易
+导出时会自动检查前端契约。`mobile_routed` 保留 mobile 的 2 层轻量 Flow SDP，
+但中文走 Piper Plus、日文走 OpenJTalk、韩文走 Piper Plus，拉丁语言走 eSpeak。
+导出目录的 `frontend-packs/` 可按语言独立交付，所有语言仍共享一份 `model.onnx`。
+
+原有 `mobile` 使用统一 eSpeak，VITS 训练核心采用更容易
 稳定对齐的紧凑序列 `BOS,(phoneme)*,EOS`。sherpa 传入的 Piper PAD 只属于部署传输
 格式，会由 ONNX 输入适配器删除。`model.onnx.json` 中会出现
 `"text_input": {"supported": true}`，并生成 `android_text/`。Java Demo 会检查
 这个字段，不会把不兼容模型静默读错。
 
-`mobile` 的中日韩 G2P 与 `quality` 不同，因此应分别做母语试听。若产品必须保留
-OpenJTalk、pypinyin/g2pk2 的专用发音质量，就需要在 App 内接入对应原生前端，
-不能只复制一个 ONNX 文件解决。
+`mobile` 不再推荐用于日语汉字。若 eSpeak 输出 Unicode 字符名称，训练预检会拒绝
+继续。`mobile_routed` 的 Android/iOS App 仍需安装语言包声明的原生前端；不能只复制
+一个 ONNX 文件解决文本规范化和 G2P。
 
 ## 模型和前端资源
 
@@ -1010,22 +1025,25 @@ configs/models.json
   `strip-piper-pads-v1` 将 sherpa/Piper 传输序列规范化后再进入 VITS，可在
   Android 直接接收普通文本；使用 64 channels、2 层轻量 Flow SDP，时长模块
   FP32 约 0.54 MB。必须从头训练。
+- `mobile_routed`：同样使用 64 channels、2 层轻量 Flow SDP，但恢复逐语言专用
+  前端。导出共享核心和 `frontend-packs/<language>`，适合语言包按需安装。包含
+  中日韩的移动产品优先选择它。
 
 三个时长模式都保留在 `model.duration_predictor_type`，这是专家参数，普通配置不用写：
 
 | 类型 | 用途 | preset 默认值 |
 |---|---|---|
 | `stochastic_lognormal` | 本次升级前的兼容实现，最简单 | `compact` 与旧 checkpoint |
-| `stochastic_mobile` | 轻量条件 Normalizing Flow | `mobile` |
+| `stochastic_mobile` | 轻量条件 Normalizing Flow | `mobile`、`mobile_routed` |
 | `stochastic_quality` | 更深的条件 Normalizing Flow | `quality` |
 
 Flow SDP 训练的是音素时长分布，只增加节奏表达能力，不会改变 speaker/language
 embedding、G2P 或 Decoder。最终仍导出单个 ONNX；`duration_noise_scale=0` 为确定性
 节奏，推荐试听范围为 `0.15～0.45`。
 
-`quality` 和 `mobile` 的前端契约彼此隔离：选择 `mobile` 不会修改
+`quality`、`mobile_routed` 和 `mobile` 的前端契约彼此隔离：选择 `mobile` 不会修改
 `quality` 的中文 Piper Plus、日语 Open JTalk、韩语 Piper Plus 路由。
-不要在两个 preset 之间 `resume` 或 `warm_start`，音频数据可以复用，但模型必须
+不要在不同前端契约之间 `resume` 或 `warm_start`，音频数据可以复用，但模型必须
 分别训练。
 
 不要只因为训练能运行就使用 `compact` 发布产品模型。
