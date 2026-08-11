@@ -666,6 +666,16 @@ class VitsTests(unittest.TestCase):
         self.assertTrue(torch.equal(deterministic_a, deterministic_b))
         self.assertFalse(torch.equal(deterministic_a, stochastic))
 
+    def test_external_language_and_speaker_vectors_match_id_conditioning(self):
+        language_ids = torch.tensor([2])
+        speaker_ids = torch.tensor([1])
+        by_id = self.model.conditioning(language_ids, speaker_ids)
+        by_pack = self.model.conditioning.from_embeddings(
+            self.model.conditioning.language_embedding(language_ids),
+            self.model.conditioning.speaker_embedding(speaker_ids),
+        )
+        self.assertTrue(torch.equal(by_id, by_pack))
+
     def test_stochastic_duration_likelihood_trains_mean_and_scale(self):
         tokens = torch.tensor([[2, 4, 5, 3]])
         lengths = torch.tensor([4])
@@ -1078,6 +1088,49 @@ class VitsTests(unittest.TestCase):
             self.assertEqual(
                 deployment["frontend_packs"]["manifest"],
                 "frontend-packs/manifest.json",
+            )
+            composable = target.parent / "composable"
+            catalog = json.loads(
+                (composable / "catalog.json").read_text(encoding="utf-8"),
+            )
+            self.assertEqual(catalog["layout"], "composable-vits-v1")
+            self.assertEqual(len(catalog["languages"]), 7)
+            self.assertEqual(len(catalog["voices"]), 3)
+            self.assertTrue((composable / "core/model.onnx").is_file())
+            self.assertTrue(
+                (composable / "packages/language-ja.zip").is_file()
+            )
+            self.assertTrue(
+                (composable / "packages/voice-voice_02.zip").is_file()
+            )
+            core_manifest = json.loads(
+                (composable / "core/manifest.json").read_text(
+                    encoding="utf-8",
+                ),
+            )
+            self.assertEqual(core_manifest["speaker_embedding_dim"], 4)
+            self.assertEqual(core_manifest["language_embedding_dim"], 4)
+            self.assertEqual(
+                core_manifest["inputs"][-2:],
+                ["language_embedding", "speaker_embedding"],
+            )
+            language_manifest = json.loads(
+                (composable / "languages/ja/manifest.json").read_text(
+                    encoding="utf-8",
+                ),
+            )
+            voice_manifest = json.loads(
+                (composable / "voices/voice_02/manifest.json").read_text(
+                    encoding="utf-8",
+                ),
+            )
+            self.assertEqual(
+                language_manifest["compatible_core_sha256"],
+                core_manifest["core_id"],
+            )
+            self.assertEqual(
+                voice_manifest["compatible_core_sha256"],
+                core_manifest["core_id"],
             )
             shape = validate_onnx_runtime(target)
             self.assertEqual(shape[0:2], (1, 1))

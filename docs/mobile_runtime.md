@@ -93,6 +93,22 @@ frontend-packs/
 语言包不复制模型权重。App 安装语言包后必须先执行 conformance，再启用该语言；缺少
 OpenJTalk/Piper Plus 原生运行时的语言保持不可用，不允许回退到 eSpeak。
 
+另外，`composable/` 是面向“APK 内置主模型、语言/音色按需下载”的部署产物：
+
+```text
+composable/
+├── core/model.onnx             # 外部 language/speaker embedding 输入
+├── core/manifest.json
+├── languages/<code>/           # 语言向量 + 专用前端契约
+├── voices/<speaker>/           # 音色向量
+├── packages/*.zip              # CDN/对象存储发布文件
+└── catalog.json                # 包大小、SHA256、core ID
+```
+
+该核心保留 conditioning projection，但移除了两个 embedding lookup 表。下载包中的
+float32 向量经过同一 projection 后与原始 `sid` 推理严格等价，导出阶段会自动执行
+PyTorch/ONNX parity 检查。包只兼容声明的精确 core hash，不能跨模型静默混用。
+
 ## 前端一致性
 
 `frontend.json` 是训练和移动端之间的硬契约，包含：

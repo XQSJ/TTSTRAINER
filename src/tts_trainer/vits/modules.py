@@ -54,7 +54,25 @@ class GlobalConditioning(nn.Module):
         )
 
     def forward(self, language_ids: torch.Tensor, speaker_ids: torch.Tensor) -> torch.Tensor:
-        condition = torch.cat((self.language_embedding(language_ids), self.speaker_embedding(speaker_ids)), dim=-1)
+        return self.from_embeddings(
+            self.language_embedding(language_ids),
+            self.speaker_embedding(speaker_ids),
+        )
+
+    def from_embeddings(
+        self,
+        language_embeddings: torch.Tensor,
+        speaker_embeddings: torch.Tensor,
+    ) -> torch.Tensor:
+        """组合可外置的语言和音色向量。 / Combine external pack vectors.
+
+        Keeping the projection in the acoustic core lets a deployment remove
+        the embedding tables from ONNX while reproducing the checkpoint's
+        original conditioning exactly.
+        """
+        condition = torch.cat(
+            (language_embeddings, speaker_embeddings), dim=-1,
+        )
         return self.projection(condition).unsqueeze(-1)
 
 

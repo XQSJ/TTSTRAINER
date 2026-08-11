@@ -3,10 +3,9 @@
 用 Qwen3-TTS 生成训练数据，训练多语言、多音色 VITS，并导出移动端可用的
 ONNX 资源。
 
-> 要在 Android 上直接输入普通文本，请把训练配置的
-> `"preset": "quality"` 改为 `"preset": "mobile"`。`quality` 使用中日韩
-> 专用 G2P，音质/发音上限更高，但导出的 ONNX 不能单独在手机上处理普通文本；
-> `mobile` 使用可随包部署的统一 eSpeak 前端。两者 token 结构不同，不能训练后再切换。
+> 移动端包含中日韩时推荐 `"preset": "mobile_routed"`：声学核心保持 mobile
+> 尺寸，但训练和部署按语言路由到专用 G2P。只需要 eSpeak 覆盖语言时可用
+> `"preset": "mobile"`。前端契约不同的 checkpoint 不能直接互相 resume。
 
 ## 三个配置概念
 
@@ -806,6 +805,22 @@ artifacts/<model_name>/
 │   └── <language>/
 │       ├── manifest.json       # provider、版本和运行时资源要求
 │       └── conformance.json    # 该语言的文本→音素→token 校验向量
+├── composable/
+│   ├── catalog.json            # 可托管包目录和 SHA256
+│   ├── core/
+│   │   ├── model.onnx          # 不含 language/speaker embedding 表
+│   │   ├── manifest.json
+│   │   └── tokens.json
+│   ├── languages/<language>/
+│   │   ├── embedding.f32       # 模型专属语言向量
+│   │   ├── manifest.json       # 前端契约及兼容 core hash
+│   │   └── conformance.json
+│   ├── voices/<speaker>/
+│   │   ├── embedding.f32       # 模型专属音色向量
+│   │   └── manifest.json
+│   └── packages/               # Android/iOS 按需下载的 ZIP
+│       ├── language-zh.zip
+│       └── voice-voice_01.zip
 └── android_text/               # 仅 preset=mobile
     ├── espeak-ng-data/
     ├── model.weights            # 所有语言共享的一份权重
@@ -816,6 +831,23 @@ artifacts/<model_name>/
 
 务必保留 `runs/<model_name>/checkpoints/`。ONNX 用于推理，checkpoint 用于续训、增加
 音色、迁移结构和后续压缩。
+
+### 主模型内置、语言和音色按需下载
+
+`composable/core/model.onnx` 接收 `language_embedding` 和
+`speaker_embedding` 两个外部输入。语言包与音色包可以任意组合，但两个包的
+`compatible_core_sha256` 必须和 App 内置核心完全一致：
+
+```text
+APK 内置：composable/core + catalog.json
+运行时下载：language-<code>.zip + voice-<id>.zip
+最终组合：core + 一个语言包 + 一个音色包
+```
+
+向量空间会随核心训练变化，所以一个模型导出的音色包不能默认用于另一个模型。增加
+新音色时应从保留的 checkpoint 训练/扩展后重新导出核心和目录；若以后实现“冻结核心、
+只训练新 speaker embedding”的模式，才可以保持旧 core ID 不变。新增语言还受核心
+词表和训练覆盖限制，不能只上传一个语言向量就让没学过的语言自动可用。
 
 验证音频按链路逐级排错：
 

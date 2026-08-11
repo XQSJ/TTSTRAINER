@@ -21,6 +21,7 @@ from ..frontend.contract import (DIRECT_TOKEN_ENCODING,
                                  MOBILE_DIRECT_TOKEN_ENCODING,
                                  PIPER_TOKEN_ENCODING)
 from ..frontend.conformance import save_frontend_conformance
+from .composable import export_composable_bundle
 from .config import VitsConfig
 from .model import MultilingualVITS
 
@@ -401,6 +402,20 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         model_sha256=model_sha256,
         espeak_data_dir=espeak_data_dir,
     )
+    composable = export_composable_bundle(
+        output_dir,
+        generator,
+        metadata,
+        frontend,
+        conformance,
+        tokens,
+        lengths,
+        scales,
+        sample_rate=sample_rate,
+        opset=opset,
+        insert_pad_after_bos=mobile_piper,
+        strip_piper_pads=mobile_direct,
+    )
     text_input = _export_sherpa_android_text_package(
         onnx, model, output_dir, frontend, profiles, sample_rate=sample_rate,
         tokens=metadata["tokens"],
@@ -448,6 +463,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         "frontend_note": "application supplies matching phoneme ids; stock sherpa multilingual switching requires an adapter",
         "text_input": text_input,
         "frontend_packs": frontend_packs,
+        "composable": composable,
         "num_languages": config.num_languages,
         "num_speakers": config.num_speakers,
         "voice_profiles": profiles,

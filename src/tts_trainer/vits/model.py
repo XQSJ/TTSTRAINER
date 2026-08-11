@@ -260,6 +260,36 @@ class MultilingualVITS(nn.Module):
         0.0 is deterministic and larger values add duration variation.
         """
         g = self.conditioning(language_ids, speaker_ids)
+        return self.infer_deploy_conditioned(
+            tokens, text_lengths, g, scales, max_frames=max_frames,
+        )
+
+    def infer_deploy_embeddings(
+        self,
+        tokens: torch.Tensor,
+        text_lengths: torch.Tensor,
+        language_embeddings: torch.Tensor,
+        speaker_embeddings: torch.Tensor,
+        scales: torch.Tensor,
+        max_frames: int = 4000,
+    ):
+        """使用下载包中的外部条件向量推理。 / Infer with pack vectors."""
+        g = self.conditioning.from_embeddings(
+            language_embeddings, speaker_embeddings,
+        )
+        return self.infer_deploy_conditioned(
+            tokens, text_lengths, g, scales, max_frames=max_frames,
+        )
+
+    def infer_deploy_conditioned(
+        self,
+        tokens: torch.Tensor,
+        text_lengths: torch.Tensor,
+        g: torch.Tensor,
+        scales: torch.Tensor,
+        max_frames: int = 4000,
+    ):
+        """共享部署主链。 / Shared tensor-only deployment path."""
         text_hidden, mean, log_scale, text_mask = self.text_encoder(tokens, text_lengths, g)
         log_duration = self.duration_predictor.sample(
             text_hidden, text_mask, g, scales[2],
