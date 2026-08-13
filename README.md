@@ -3,9 +3,77 @@
 用 Qwen3-TTS 生成训练数据，训练多语言、多音色 VITS，并导出移动端可用的
 ONNX 资源。
 
-> 移动端包含中日韩时推荐 `"preset": "mobile_routed"`：声学核心保持 mobile
-> 尺寸，但训练和部署按语言路由到专用 G2P。只需要 eSpeak 覆盖语言时可用
-> `"preset": "mobile"`。前端契约不同的 checkpoint 不能直接互相 resume。
+> **推荐配置：**包含中日韩时使用 `"preset": "mobile_routed"`；只有 eSpeak
+> 覆盖语言时使用 `"preset": "mobile"`。前端契约不同的 checkpoint 不能直接
+> resume。
+
+## 五分钟开始训练
+
+### 1. 安装
+
+```bash
+git clone https://github.com/XQSJ/TTSTRAINER.git
+cd TTSTRAINER
+python3 -m venv .venv
+.venv/bin/pip install -U pip setuptools wheel
+.venv/bin/pip install -e '.[qwen,export,japanese,asian]'
+```
+
+### 2. 复制并修改配置
+
+```bash
+cp training_configs/train1.json training_configs/my_model.json
+```
+
+普通用户优先只改这些字段：
+
+```json
+{
+  "task": "train",
+  "preset": "mobile_routed",
+  "experiment": {
+    "name": "my_model",
+    "languages": ["zh", "en", "ja", "ko"],
+    "device": "cuda:0"
+  },
+  "dataset": {
+    "sentences_per_language": 2000
+  },
+  "training": {
+    "batch_size": 4,
+    "epochs": 200
+  }
+}
+```
+
+音色和文本来源的完整写法见下方“生成音色并直接训练”。
+
+### 3. 预检并运行
+
+```bash
+PYTHONPATH=src .venv/bin/python -m tts_trainer language-check \
+  --config training_configs/my_model.json
+
+PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
+  --config training_configs/my_model.json
+```
+
+同一命令中断后可以重新执行：文本和音频按 `voice_id` 复用，已有内容不会重复生成。
+训练输出位于 `runs/my_model/`，移动部署资源位于 `artifacts/my_model/`。
+
+## 完整流程
+
+```text
+文本生成/导入 → Qwen 生成或克隆公共音色 WAV → 多语言 G2P
+       → VITS 训练与验证 → ONNX 导出 → Android 可组合部署包
+```
+
+| 阶段 | 主要目录 |
+|---|---|
+| 公共音色与训练 WAV | `datasets/voices/<voice_id>/` |
+| 当前模型 metadata | `datasets/<model_name>/` |
+| checkpoint 与训练日志 | `runs/<model_name>/` |
+| ONNX 与移动部署资源 | `artifacts/<model_name>/` |
 
 ## 三个配置概念
 
@@ -52,7 +120,7 @@ datasets/voices/voice_xiaoling_a/       # 公共音色与 WAV
 | 一次只准备一个或多个公共音色 | 用法二 |
 | 使用已有音色训练模型 | 用法三 |
 
-## 安装
+## 安装详解
 
 ```bash
 git clone https://github.com/XQSJ/TTSTRAINER.git
@@ -964,6 +1032,35 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer verify-frontend \
 `mobile` 不再推荐用于日语汉字。若 eSpeak 输出 Unicode 字符名称，训练预检会拒绝
 继续。`mobile_routed` 的 Android/iOS App 仍需安装语言包声明的原生前端；不能只复制
 一个 ONNX 文件解决文本规范化和 G2P。
+
+### 接入 Android Demo
+
+配套 Java Demo 位于 [XQSJ/TTS-demo-android](https://github.com/XQSJ/TTS-demo-android)。
+训练与导出完成后，在 Demo 仓库执行：
+
+```bash
+git clone https://github.com/XQSJ/TTS-demo-android.git
+cd TTS-demo-android
+
+./scripts/install_composable_model.sh \
+  /path/to/TTSTRAINER/artifacts/my_mobile_tts \
+  --language zh \
+  --voice xiaoling
+
+./gradlew clean :app:assembleDebug
+```
+
+如果需要语言包和音色包在 App 中按需下载，把
+`artifacts/my_mobile_tts/composable/` 原样上传到 HTTPS 静态服务器，并在安装脚本中
+增加：
+
+```bash
+--base-url https://cdn.example.com/tts/my_mobile_tts/composable/
+```
+
+Demo 会校验 core、语言 embedding、音色 embedding、前端 provider、token 和冻结
+conformance 数据，防止把不属于同一个模型的资源组合起来。日语还需要按 Demo README
+安装共享 OpenJTalk 词典；中文和韩文使用 Piper Plus Android G2P。
 
 ## 模型和前端资源
 
