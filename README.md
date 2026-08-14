@@ -4,8 +4,7 @@
 ONNX 资源。
 
 > **闭源商业 App 推荐：**使用 `"preset": "mobile_commercial"`，七语全部走
-> MIT Piper Plus G2P，不把 GPL eSpeak 带入部署链路。旧模型继续使用原来的
-> `quality`、`mobile_routed` 或 `mobile`；前端契约不同的 checkpoint 不能 resume。
+> MIT Piper Plus G2P，不把 GPL eSpeak 带入部署链路。
 
 ## 五分钟开始训练
 
@@ -50,7 +49,7 @@ cp training_configs/train1.json training_configs/my_model.json
 
 `mobile_commercial` 支持 `zh/en/ja/ko/fr/es/pt`，不会调用 eSpeak。日语由
 Piper Plus 内部的 OpenJTalk 后端处理，导出语言包会携带对应字典。若更重视质量而
-不在意模型尺寸，将 preset 改为 `quality_commercial`。
+不在意时长预测器的计算量，将 preset 改为 `quality_commercial`。
 
 已有 eSpeak/OpenJTalk 路由模型不能只改 preset 后续训。请使用新的
 `experiment.name` 从头训练；已生成的 WAV 数据仍可通过公共 voice ID 复用。
@@ -135,7 +134,7 @@ cd TTSTRAINER
 
 python3 -m venv .venv
 .venv/bin/pip install -U pip setuptools wheel
-.venv/bin/pip install -e '.[qwen,export,japanese,asian]'
+.venv/bin/pip install -e '.[qwen,export,commercial]'
 ```
 
 不需要执行 `.venv/bin/activate`。如果希望激活虚拟环境，应使用：
@@ -148,7 +147,7 @@ source .venv/bin/activate
 
 ```bash
 .venv/bin/pip install -i https://mirrors.aliyun.com/pypi/simple \
-  -e '.[qwen,export,japanese,asian]'
+  -e '.[qwen,export,commercial]'
 ```
 
 `flash-attn` 不是必需依赖。没有安装时会自动使用 PyTorch SDPA。
@@ -164,7 +163,7 @@ cp training_configs/train1.json training_configs/my_model.json
 ```json
 {
   "task": "train",
-  "preset": "quality",
+  "preset": "quality_commercial",
   "experiment": {
     "name": "my_model",
     "languages": ["zh", "en"],
@@ -227,7 +226,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 {
   "_comment": "一次准备多个公共音色 / Prepare multiple shared voices",
   "task": "prepare",
-  "preset": "quality",
+  "preset": "quality_commercial",
   "experiment": {
     "name": "prepare_xiaoling_a",
     "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
@@ -306,7 +305,7 @@ cp training_configs/multi-speaker.example.json \
 ```json
 {
   "task": "train",
-  "preset": "quality",
+  "preset": "quality_commercial",
   "experiment": {
     "name": "my_multi_voice_model",
     "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
@@ -386,9 +385,9 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 | `training.stage` | `auto` 自动两阶段；`standard` 始终训练完整声学主链 |
 | `training.mixed_precision` | 默认 `fp32`；显式设为 `bf16` 才启用省显存训练 |
 
-移动端需要中日韩正确发音时选择 `preset: "mobile_routed"`：它使用 mobile 的轻量
-时长模型，但按语言路由 Piper Plus、OpenJTalk 和 eSpeak。不要再用统一 eSpeak
-直接处理日语汉字；预检检测到 `Chinese letter`/`Japanese letter` 回退读法会立即失败。
+商业模型优先选择 `preset: "mobile_commercial"` 或
+`preset: "quality_commercial"`。两者使用完全相同的七语 Piper Plus 前端，区别仅为
+模型规模；训练端与移动端必须使用导出清单锁定的同一前端版本。
 
 ## 数据复用规则
 
@@ -657,20 +656,17 @@ mps
 
 ## 支持的语言
 
-内置 Qwen Teacher 与 G2P 路由：
+商业 preset 内置 Qwen Teacher 与 G2P 路由：
 
 | 代码 | 语言 | 文本前端 |
 |---|---|---|
-| `zh` | 中文 | Piper-plus Mandarin IPA |
-| `en` | 英语 | eSpeak NG |
-| `ja` | 日语 | Open JTalk |
-| `ko` | 韩语 | Piper-plus Korean IPA |
-| `de` | 德语 | eSpeak NG |
-| `fr` | 法语 | eSpeak NG |
-| `ru` | 俄语 | eSpeak NG |
-| `es` | 西班牙语 | eSpeak NG |
-| `pt` | 葡萄牙语 | eSpeak NG |
-| `it` | 意大利语 | eSpeak NG |
+| `zh` | 中文 | Piper Plus Mandarin IPA |
+| `en` | 英语 | Piper Plus English |
+| `ja` | 日语 | Piper Plus + OpenJTalk |
+| `ko` | 韩语 | Piper Plus Korean IPA |
+| `fr` | 法语 | Piper Plus French |
+| `es` | 西班牙语 | Piper Plus Spanish |
+| `pt` | 葡萄牙语 | Piper Plus Portuguese |
 
 查看全部语言状态：
 
@@ -876,7 +872,6 @@ artifacts/<model_name>/
 ├── frontend.conformance.json
 ├── frontend-packs/
 │   ├── manifest.json           # 共享核心与语言包索引
-│   ├── _shared/espeak-ng/      # 多个拉丁语言共享，存在时只保存一份
 │   └── <language>/
 │       ├── manifest.json       # provider、版本和运行时资源要求
 │       └── conformance.json    # 该语言的文本→音素→token 校验向量
@@ -897,12 +892,6 @@ artifacts/<model_name>/
 │   └── packages/               # Android/iOS 按需下载的 ZIP
 │       ├── language-zh.zip
 │       └── voice-voice_01.zip
-└── android_text/               # 仅 preset=mobile
-    ├── espeak-ng-data/
-    ├── model.weights            # 所有语言共享的一份权重
-    ├── model-zh.onnx
-    ├── model-en.onnx
-    └── ...
 ```
 
 务必保留 `runs/<model_name>/checkpoints/`。ONNX 用于推理，checkpoint 用于续训、增加
@@ -910,8 +899,8 @@ artifacts/<model_name>/
 
 ### 主模型内置、语言和音色按需下载
 
-`composable/` 是完整的移动部署目录。App 使用者无需知道每种语言采用 eSpeak、
-OpenJTalk 还是 Piper Plus：语言包的 `manifest.json` 已声明 provider，所需可分发数据也
+`composable/` 是完整的移动部署目录。App 使用者无需手工判断各语言的 Piper Plus
+后端和字典：语言包的 `manifest.json` 已声明 provider，所需可分发数据也
 已放入该语言包的 `runtime/`。Android Demo 会读取目录自行选择并安装。
 
 最简单的本地集成方式就是把整个目录复制到 Demo：
@@ -1016,13 +1005,12 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer verify-frontend \
 
 ### Android 直接输入普通文本
 
-只需要 eSpeak 可正确覆盖的语言时可以选择 `mobile`。包含中文、日文或韩文的产品模型
-推荐选择 `mobile_routed`：
+闭源商业 Android 模型使用 `mobile_commercial`：
 
 ```json
 {
   "task": "train",
-  "preset": "mobile_routed",
+  "preset": "mobile_commercial",
   "experiment": {
     "name": "my_mobile_tts",
     "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
@@ -1041,19 +1029,9 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer verify-frontend \
 }
 ```
 
-导出时会自动检查前端契约。`mobile_routed` 保留 mobile 的 2 层轻量 Flow SDP，
-但中文走 Piper Plus、日文走 OpenJTalk、韩文走 Piper Plus，拉丁语言走 eSpeak。
-导出目录的 `frontend-packs/` 可按语言独立交付，所有语言仍共享一份 `model.onnx`。
-
-原有 `mobile` 使用统一 eSpeak，VITS 训练核心采用更容易
-稳定对齐的紧凑序列 `BOS,(phoneme)*,EOS`。sherpa 传入的 Piper PAD 只属于部署传输
-格式，会由 ONNX 输入适配器删除。`model.onnx.json` 中会出现
-`"text_input": {"supported": true}`，并生成 `android_text/`。Java Demo 会检查
-这个字段，不会把不兼容模型静默读错。
-
-`mobile` 不再推荐用于日语汉字。若 eSpeak 输出 Unicode 字符名称，训练预检会拒绝
-继续。`mobile_routed` 的 Android/iOS App 仍需安装语言包声明的原生前端；不能只复制
-一个 ONNX 文件解决文本规范化和 G2P。
+导出时会自动检查前端契约。七种语言全部使用 Piper Plus G2P；日语由其 OpenJTalk
+后端处理。`frontend-packs/` 可按语言独立交付，所有语言仍共享一份 `model.onnx`。
+Android/iOS App 仍需安装语言包声明的前端和字典，不能只复制 ONNX 文件。
 
 ### 接入 Android Demo
 
@@ -1166,41 +1144,34 @@ configs/models.json
 用户配置 > quality/compact preset > 系统架构默认值
 ```
 
-可用 preset：
+新项目只需选择：
 
-- `quality_commercial`：闭源商业应用的质量优先模式。`zh/en/ja/ko/fr/es/pt`
-  全部使用 MIT `piper-plus-g2p`，不包含 eSpeak；必须安装 `.[commercial]`。
-- `mobile_commercial`：闭源商业应用的移动轻量模式；前端与
-  `quality_commercial` 相同，使用 64 channels、2 层 Flow SDP。
-- `quality`：默认推荐，约 39M Generator，质量优先；使用 128 channels、6 层
-  Flow SDP，时长模块 FP32 约 4.4 MB；
-- `compact`：小模型和流程验证，音质上限较低。
-- `mobile`：独立的移动部署链路。模型尺寸仍采用质量架构，但文本前端改为统一
-  eSpeak。训练核心使用 `BOS,(phoneme)*,EOS`，导出图通过
-  `strip-piper-pads-v1` 将 sherpa/Piper 传输序列规范化后再进入 VITS，可在
-  Android 直接接收普通文本；使用 64 channels、2 层轻量 Flow SDP，时长模块
-  FP32 约 0.54 MB。必须从头训练。
-- `mobile_routed`：同样使用 64 channels、2 层轻量 Flow SDP，但恢复逐语言专用
-  前端。导出共享核心和 `frontend-packs/<language>`，适合语言包按需安装。包含
-  中日韩的移动产品优先选择它。
+| preset | 主干 | Duration Predictor | 预计差异 | 适合 |
+|---|---|---|---|---|
+| `quality_commercial` | 256 channels、8 层 Text Encoder/Flow | 128 channels、6 层 Flow | 更强时长分布容量 | 质量和韵律优先 |
+| `mobile_commercial` | 与 quality 相同 | 64 channels、2 层 Flow | FP32 约少 3.9 MB，时长计算更轻 | 手机优先 |
+| `compact` | 紧凑小主干 | 简化版 | 最小 | 流程验证，不建议产品发布 |
+
+两个 commercial preset 的 G2P、音素空间和许可证路线完全相同，均使用 MIT
+Piper Plus，不包含 eSpeak。两者的 Text Encoder、Flow 和 Decoder 主干相同，区别仅在
+时长预测器；所以 `mobile_commercial` 只是略小、略快，不是完整 Mobile Student。
+若要明显缩小模型，还需要另做小型主干、蒸馏和 INT8。
 
 三个时长模式都保留在 `model.duration_predictor_type`，这是专家参数，普通配置不用写：
 
 | 类型 | 用途 | preset 默认值 |
 |---|---|---|
 | `stochastic_lognormal` | 本次升级前的兼容实现，最简单 | `compact` 与旧 checkpoint |
-| `stochastic_mobile` | 轻量条件 Normalizing Flow | `mobile`、`mobile_routed` |
-| `stochastic_quality` | 更深的条件 Normalizing Flow | `quality` |
+| `stochastic_mobile` | 轻量条件 Normalizing Flow | `mobile_commercial` |
+| `stochastic_quality` | 更深的条件 Normalizing Flow | `quality_commercial` |
 
 Flow SDP 训练的是音素时长分布，只增加节奏表达能力，不会改变 speaker/language
 embedding、G2P 或 Decoder。最终仍导出单个 ONNX；`duration_noise_scale=0` 为确定性
 节奏，推荐试听范围为 `0.15～0.45`。
 
-`quality_commercial`、`mobile_commercial`、`quality`、`mobile_routed` 和
-`mobile` 的前端契约彼此隔离：选择 `mobile` 不会修改
-`quality` 的中文 Piper Plus、日语 Open JTalk、韩语 Piper Plus 路由。
-不要在不同前端契约之间 `resume` 或 `warm_start`，音频数据可以复用，但模型必须
-分别训练。
+历史 preset `quality`、`mobile_routed` 和 `mobile` 仅为读取已有配置及 checkpoint
+保留，不再推荐新项目使用。不同前端契约之间不能 `resume` 或 `warm_start`；公共 WAV
+可以复用，但 commercial 模型必须使用新的 `experiment.name` 从头训练。
 
 不要只因为训练能运行就使用 `compact` 发布产品模型。
 
@@ -1236,10 +1207,6 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer export-vits \
   `best` 默认按 `combined_mel = posterior_mel + prior_mel` 保存，用来同时约束声学
   重建和文本先验，但仍不能代替可懂度试听或 ASR。流水线默认导出 `last`；
   `prior_mel` 和时长比用于观察文字先验及韵律是否继续改善。
-- 旧版 `preset=mobile` 曾直接使用带 blank 的 Piper v1/v2 序列训练。当前 v3 将
-  Piper wire PAD 与 VITS 训练序列解耦；请保留原始 WAV/文本并使用新的
-  `experiment.name` 从零训练。公共音频会复用，`quality` checkpoint 和专用 G2P
-  数据不受影响。
 - 新增语言需要新前端和重新训练。
 - 结构变化通常不能直接 `resume`；高级迁移参考
   [sdp-warm-start.example.json](training_configs/sdp-warm-start.example.json)。

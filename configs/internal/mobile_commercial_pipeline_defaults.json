@@ -1,5 +1,5 @@
 {
-  "_comment": "商业闭源友好的移动训练模式：轻量声学结构 + MIT Piper Plus 七语前端 / Commercial-friendly mobile mode: lightweight acoustics and MIT Piper Plus frontends",
+  "_comment": "商业闭源友好的移动训练模式：质量主干 + 轻量时长预测器 + MIT Piper Plus 七语前端 / Commercial-friendly mobile mode: quality backbone, lightweight duration predictor, and MIT Piper Plus frontends",
   "extends": "mobile_routed_pipeline_defaults.json",
   "language_registry": {
     "zh": {
