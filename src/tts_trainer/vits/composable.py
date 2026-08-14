@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import shutil
 import warnings
 import zipfile
 from pathlib import Path
@@ -72,6 +73,21 @@ def _sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def _tree_identity(path: Path) -> tuple[str, int]:
+    """Hash relative names and file contents for a deployable resource tree."""
+    digest = hashlib.sha256()
+    total = 0
+    for source in sorted(item for item in path.rglob("*") if item.is_file()):
+        relative = source.relative_to(path).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(4, "little"))
+        digest.update(relative)
+        with source.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                total += len(chunk)
+                digest.update(chunk)
+    return digest.hexdigest(), total
+
+
 def _write_vector(path: Path, vector: torch.Tensor) -> dict:
     values = vector.detach().cpu().numpy().astype("<f4", copy=False)
     path.write_bytes(values.tobytes(order="C"))
@@ -106,6 +122,7 @@ def export_composable_bundle(
     opset: int,
     insert_pad_after_bos: bool,
     strip_piper_pads: bool,
+    frontend_resources: dict[str, Path] | None = None,
 ) -> dict:
     """Export core + independently installable language and voice packs.
 
@@ -254,11 +271,13 @@ def export_composable_bundle(
     )
 
     cases = list((conformance or {}).get("cases") or [])
+    frontend_resources = frontend_resources or {}
     language_entries = []
     for language, language_id in sorted(
         metadata["language_map"].items(), key=lambda item: item[1],
     ):
         pack_dir = language_root / language
+        shutil.rmtree(pack_dir, ignore_errors=True)
         pack_dir.mkdir(parents=True, exist_ok=True)
         embedding = _write_vector(
             pack_dir / "embedding.f32",
@@ -276,6 +295,49 @@ def export_composable_bundle(
             }, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        frontend_profile = dict(frontend["languages"][language])
+        provider = frontend_profile["provider"]
+        runtime_resource = None
+        if provider == "espeak-ng":
+            source = frontend_resources.get(provider)
+            if source is None or not source.is_dir():
+                raise FileNotFoundError(
+                    f"language {language} requires espeak-ng-data in its "
+                    "deployable language pack"
+                )
+            relative = Path("runtime") / "espeak-ng-data"
+            shutil.copytree(source, pack_dir / relative, dirs_exist_ok=True)
+            resource_sha256, resource_bytes = _tree_identity(source)
+            runtime_resource = {
+                "id": "espeak-ng-data",
+                "delivery": "language-pack",
+                "path": relative.as_posix(),
+                "sha256": resource_sha256,
+                "bytes": resource_bytes,
+            }
+        elif provider == "openjtalk":
+            source = frontend_resources.get(provider)
+            if source is None or not source.is_dir():
+                raise FileNotFoundError(
+                    f"language {language} requires an OpenJTalk dictionary in "
+                    "its deployable language pack"
+                )
+            relative = Path("runtime") / "open_jtalk_dic"
+            shutil.copytree(source, pack_dir / relative, dirs_exist_ok=True)
+            resource_sha256, resource_bytes = _tree_identity(source)
+            runtime_resource = {
+                "id": "openjtalk-dictionary",
+                "delivery": "language-pack",
+                "path": relative.as_posix(),
+                "sha256": resource_sha256,
+                "bytes": resource_bytes,
+            }
+        elif provider == "piper-plus-g2p":
+            runtime_resource = {
+                "id": "piper-plus-g2p",
+                "delivery": "application-runtime",
+            }
+
         manifest = {
             "format": COMPOSABLE_FORMAT,
             "type": "tts-language-pack",
@@ -284,11 +346,13 @@ def export_composable_bundle(
             "source_language_id": int(language_id),
             "compatible_core_sha256": core_sha256,
             "embedding": embedding,
-            "frontend": dict(frontend["languages"][language]),
+            "frontend": frontend_profile,
             "normalization": frontend.get("normalization"),
             "token_encoding": frontend.get("token_encoding"),
             "conformance": "conformance.json",
         }
+        if runtime_resource is not None:
+            manifest["runtime_resource"] = runtime_resource
         (pack_dir / "manifest.json").write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -308,6 +372,7 @@ def export_composable_bundle(
         metadata["speaker_map"].items(), key=lambda item: item[1],
     ):
         pack_dir = voice_root / speaker
+        shutil.rmtree(pack_dir, ignore_errors=True)
         pack_dir.mkdir(parents=True, exist_ok=True)
         embedding = _write_vector(
             pack_dir / "embedding.f32",

@@ -21,6 +21,7 @@ from ..frontend.contract import (DIRECT_TOKEN_ENCODING,
                                  MOBILE_DIRECT_TOKEN_ENCODING,
                                  PIPER_TOKEN_ENCODING)
 from ..frontend.conformance import save_frontend_conformance
+from ..frontend.resources import inspect_openjtalk_dictionary
 from .composable import export_composable_bundle
 from .config import VitsConfig
 from .model import MultilingualVITS
@@ -390,18 +391,39 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         profile.get("provider") == "espeak-ng"
         for profile in frontend.get("languages", {}).values()
     ):
-        try:
-            espeak_data_dir = _find_espeak_data_dir()
-        except FileNotFoundError:
-            logger.warning(
-                "FRONTEND PACK | eSpeak data unavailable | "
-                "descriptors exported without bundled runtime data"
-            )
+        espeak_data_dir = _find_espeak_data_dir()
     frontend_packs = export_frontend_packs(
         output_dir, frontend, conformance, metadata["language_map"],
         model_sha256=model_sha256,
         espeak_data_dir=espeak_data_dir,
     )
+    frontend_resources = {}
+    if espeak_data_dir is not None:
+        frontend_resources["espeak-ng"] = espeak_data_dir
+    if any(
+        profile.get("provider") == "openjtalk"
+        for profile in frontend.get("languages", {}).values()
+    ):
+        openjtalk = inspect_openjtalk_dictionary()
+        if not openjtalk.ready:
+            raise FileNotFoundError(
+                "mobile export requires the OpenJTalk dictionary inside the "
+                "Japanese language pack; run: tts-trainer frontends ensure openjtalk"
+            )
+        android_required = (
+            "dicrc", "sys.dic", "matrix.bin", "char.bin",
+            "left-id.def", "right-id.def", "unk.dic",
+        )
+        missing = [
+            name for name in android_required
+            if not (openjtalk.path / name).is_file()
+        ]
+        if missing:
+            raise FileNotFoundError(
+                "OpenJTalk dictionary cannot be deployed to Android; missing: "
+                + ", ".join(missing)
+            )
+        frontend_resources["openjtalk"] = openjtalk.path
     composable = export_composable_bundle(
         output_dir,
         generator,
@@ -415,6 +437,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         opset=opset,
         insert_pad_after_bos=mobile_piper,
         strip_piper_pads=mobile_direct,
+        frontend_resources=frontend_resources,
     )
     text_input = _export_sherpa_android_text_package(
         onnx, model, output_dir, frontend, profiles, sample_rate=sample_rate,

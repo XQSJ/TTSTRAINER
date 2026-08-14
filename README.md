@@ -882,7 +882,8 @@ artifacts/<model_name>/
 │   ├── languages/<language>/
 │   │   ├── embedding.f32       # 模型专属语言向量
 │   │   ├── manifest.json       # 前端契约及兼容 core hash
-│   │   └── conformance.json
+│   │   ├── conformance.json
+│   │   └── runtime/             # 该语言需要的词典/前端数据（如需要）
 │   ├── voices/<speaker>/
 │   │   ├── embedding.f32       # 模型专属音色向量
 │   │   └── manifest.json
@@ -901,6 +902,20 @@ artifacts/<model_name>/
 音色、迁移结构和后续压缩。
 
 ### 主模型内置、语言和音色按需下载
+
+`composable/` 是完整的移动部署目录。App 使用者无需知道每种语言采用 eSpeak、
+OpenJTalk 还是 Piper Plus：语言包的 `manifest.json` 已声明 provider，所需可分发数据也
+已放入该语言包的 `runtime/`。Android Demo 会读取目录自行选择并安装。
+
+最简单的本地集成方式就是把整个目录复制到 Demo：
+
+```bash
+rm -rf /path/to/TTSDemo/app/src/main/assets/tts/*
+cp -R artifacts/<model_name>/composable \
+  /path/to/TTSDemo/app/src/main/assets/tts/composable
+```
+
+若只想内置部分语言/音色并在线下载其余包，再使用 Demo 提供的安装脚本。
 
 `composable/core/model.onnx` 接收 `language_embedding` 和
 `speaker_embedding` 两个外部输入。语言包与音色包可以任意组合，但两个包的

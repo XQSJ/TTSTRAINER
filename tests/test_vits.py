@@ -5,6 +5,7 @@ import struct
 import tempfile
 import unittest
 import wave
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1032,6 +1033,15 @@ class VitsTests(unittest.TestCase):
         optimizer_g = torch.optim.AdamW(self.model.parameters())
         optimizer_d = torch.optim.AdamW(discriminator.parameters())
         with tempfile.TemporaryDirectory() as directory:
+            resource_root = Path(directory) / "frontend-resources"
+            espeak_data = resource_root / "espeak-ng-data"
+            espeak_data.mkdir(parents=True)
+            (espeak_data / "phontab").write_bytes(b"test")
+            openjtalk_data = resource_root / "open_jtalk_dic"
+            openjtalk_data.mkdir(parents=True)
+            for name in ("char.bin", "matrix.bin", "sys.dic", "unk.dic",
+                         "dicrc", "left-id.def", "right-id.def"):
+                (openjtalk_data / name).write_bytes(b"test")
             checkpoint = Path(directory) / "checkpoint"
             save_training_checkpoint(
                 checkpoint, generator=self.model, discriminator=discriminator,
@@ -1055,7 +1065,17 @@ class VitsTests(unittest.TestCase):
                     }],
                 },
             )
-            target = export_vits_onnx(checkpoint, Path(directory) / "export", sample_rate=8000)
+            with patch(
+                "tts_trainer.vits.exporter._find_espeak_data_dir",
+                return_value=espeak_data,
+            ), patch(
+                "tts_trainer.vits.exporter.inspect_openjtalk_dictionary",
+            ) as inspect_openjtalk:
+                inspect_openjtalk.return_value.ready = True
+                inspect_openjtalk.return_value.path = openjtalk_data
+                target = export_vits_onnx(
+                    checkpoint, Path(directory) / "export", sample_rate=8000,
+                )
             self.assertTrue(target.is_file())
             frontend = json.loads((target.parent / "frontend.json").read_text(encoding="utf-8"))
             self.assertEqual(frontend["engine_version"], "eSpeak NG test")
@@ -1103,6 +1123,14 @@ class VitsTests(unittest.TestCase):
             self.assertTrue(
                 (composable / "packages/voice-voice_02.zip").is_file()
             )
+            self.assertTrue(
+                (composable / "languages/en/runtime/espeak-ng-data/phontab")
+                .is_file()
+            )
+            self.assertTrue(
+                (composable / "languages/ja/runtime/open_jtalk_dic/sys.dic")
+                .is_file()
+            )
             core_manifest = json.loads(
                 (composable / "core/manifest.json").read_text(
                     encoding="utf-8",
@@ -1119,6 +1147,14 @@ class VitsTests(unittest.TestCase):
                     encoding="utf-8",
                 ),
             )
+            self.assertEqual(
+                language_manifest["runtime_resource"]["id"],
+                "openjtalk-dictionary",
+            )
+            with zipfile.ZipFile(
+                composable / "packages/language-ja.zip",
+            ) as archive:
+                self.assertIn("runtime/open_jtalk_dic/sys.dic", archive.namelist())
             voice_manifest = json.loads(
                 (composable / "voices/voice_02/manifest.json").read_text(
                     encoding="utf-8",
