@@ -333,10 +333,37 @@ def export_composable_bundle(
                 "bytes": resource_bytes,
             }
         elif provider == "piper-plus-g2p":
-            runtime_resource = {
-                "id": "piper-plus-g2p",
-                "delivery": "application-runtime",
-            }
+            source = frontend_resources.get(f"{provider}:{language}")
+            if language == "zh":
+                if source is None or not source.is_dir():
+                    raise FileNotFoundError(
+                        "Chinese language pack requires pypinyin dictionaries "
+                        "for Android Piper Plus G2P"
+                    )
+                relative = Path("runtime") / "piper-plus-g2p-data"
+                destination = pack_dir / relative
+                destination.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(
+                    source / "pinyin_dict.json",
+                    destination / "pinyin_single.json",
+                )
+                shutil.copy2(
+                    source / "phrases_dict.json",
+                    destination / "pinyin_phrases.json",
+                )
+                resource_sha256, resource_bytes = _tree_identity(destination)
+                runtime_resource = {
+                    "id": "piper-plus-g2p-data",
+                    "delivery": "language-pack",
+                    "path": relative.as_posix(),
+                    "sha256": resource_sha256,
+                    "bytes": resource_bytes,
+                }
+            else:
+                runtime_resource = {
+                    "id": "piper-plus-g2p",
+                    "delivery": "application-runtime",
+                }
 
         manifest = {
             "format": COMPOSABLE_FORMAT,

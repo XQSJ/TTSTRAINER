@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import importlib.util
 import logging
 import os
 import re
@@ -177,6 +178,27 @@ def _find_espeak_data_dir() -> Path:
         "mobile text export requires espeak-ng-data; install eSpeak NG or set "
         "ESPEAK_DATA_PATH to its data directory"
     )
+
+
+def _find_pypinyin_data_dir() -> Path:
+    """Return the exact dictionaries used by the Python Mandarin frontend."""
+    spec = importlib.util.find_spec("pypinyin")
+    if spec is None or spec.origin is None:
+        raise FileNotFoundError(
+            "Chinese mobile export requires pypinyin; install the asian extra: "
+            "pip install -e '.[asian]'"
+        )
+    directory = Path(spec.origin).resolve().parent
+    missing = [
+        name for name in ("pinyin_dict.json", "phrases_dict.json")
+        if not (directory / name).is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "pypinyin data required by the Android Mandarin frontend is "
+            "missing: " + ", ".join(missing)
+        )
+    return directory
 
 
 def _export_sherpa_android_text_package(
@@ -400,6 +422,16 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     frontend_resources = {}
     if espeak_data_dir is not None:
         frontend_resources["espeak-ng"] = espeak_data_dir
+    if any(
+        language == "zh" and profile.get("provider") == "piper-plus-g2p"
+        for language, profile in frontend.get("languages", {}).items()
+    ):
+        # Export the same pypinyin database that produced the frozen training
+        # tokens. The Android native frontend accepts this JSON schema but
+        # expects Piper's filenames inside its dictionary directory.
+        # 导出训练时实际使用的 pypinyin 数据；Android 原生前端兼容该 JSON
+        # 格式，但要求目录内使用 Piper 约定的文件名。
+        frontend_resources["piper-plus-g2p:zh"] = _find_pypinyin_data_dir()
     if any(
         profile.get("provider") == "openjtalk"
         for profile in frontend.get("languages", {}).values()

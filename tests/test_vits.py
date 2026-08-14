@@ -1042,6 +1042,14 @@ class VitsTests(unittest.TestCase):
             for name in ("char.bin", "matrix.bin", "sys.dic", "unk.dic",
                          "left-id.def", "right-id.def"):
                 (openjtalk_data / name).write_bytes(b"test")
+            pypinyin_data = resource_root / "pypinyin"
+            pypinyin_data.mkdir(parents=True)
+            (pypinyin_data / "pinyin_dict.json").write_text(
+                '{"35831": "qing3"}', encoding="utf-8",
+            )
+            (pypinyin_data / "phrases_dict.json").write_text(
+                '{"\u8bf7\u5e2e": [["qing3"], ["bang1"]]}', encoding="utf-8",
+            )
             checkpoint = Path(directory) / "checkpoint"
             save_training_checkpoint(
                 checkpoint, generator=self.model, discriminator=discriminator,
@@ -1068,6 +1076,9 @@ class VitsTests(unittest.TestCase):
             with patch(
                 "tts_trainer.vits.exporter._find_espeak_data_dir",
                 return_value=espeak_data,
+            ), patch(
+                "tts_trainer.vits.exporter._find_pypinyin_data_dir",
+                return_value=pypinyin_data,
             ), patch(
                 "tts_trainer.vits.exporter.inspect_openjtalk_dictionary",
             ) as inspect_openjtalk:
@@ -1131,6 +1142,10 @@ class VitsTests(unittest.TestCase):
                 (composable / "languages/ja/runtime/open_jtalk_dic/sys.dic")
                 .is_file()
             )
+            self.assertTrue(
+                (composable / "languages/zh/runtime/piper-plus-g2p-data/"
+                 "pinyin_single.json").is_file()
+            )
             core_manifest = json.loads(
                 (composable / "core/manifest.json").read_text(
                     encoding="utf-8",
@@ -1155,6 +1170,22 @@ class VitsTests(unittest.TestCase):
                 composable / "packages/language-ja.zip",
             ) as archive:
                 self.assertIn("runtime/open_jtalk_dic/sys.dic", archive.namelist())
+            zh_manifest = json.loads(
+                (composable / "languages/zh/manifest.json").read_text(
+                    encoding="utf-8",
+                ),
+            )
+            self.assertEqual(
+                zh_manifest["runtime_resource"]["id"],
+                "piper-plus-g2p-data",
+            )
+            with zipfile.ZipFile(
+                composable / "packages/language-zh.zip",
+            ) as archive:
+                self.assertIn(
+                    "runtime/piper-plus-g2p-data/pinyin_single.json",
+                    archive.namelist(),
+                )
             voice_manifest = json.loads(
                 (composable / "voices/voice_02/manifest.json").read_text(
                     encoding="utf-8",
