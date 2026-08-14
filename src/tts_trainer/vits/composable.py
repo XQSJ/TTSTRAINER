@@ -108,6 +108,41 @@ def _write_pack_archive(pack_dir: Path, target: Path) -> None:
                 archive.write(source, source.relative_to(pack_dir))
 
 
+def _write_android_pinyin_data(source: Path, destination: Path) -> None:
+    """Convert pypinyin tone marks to the native Android TONE3 format."""
+    try:
+        from pypinyin.contrib.tone_convert import to_tone3
+    except ImportError as exc:
+        raise RuntimeError(
+            "Chinese Android export requires pypinyin tone conversion"
+        ) from exc
+
+    def convert(value):
+        if isinstance(value, dict):
+            return {key: convert(item) for key, item in value.items()}
+        if isinstance(value, str):
+            # 单字词典可能包含多个逗号分隔的读音，必须逐个转换。
+            # Single-character entries may contain comma-separated readings.
+            return ",".join(
+                to_tone3(item, neutral_tone_with_five=True)
+                for item in value.split(",")
+            )
+        if isinstance(value, list):
+            return [convert(item) for item in value]
+        return value
+
+    destination.mkdir(parents=True, exist_ok=True)
+    for source_name, target_name in (
+        ("pinyin_dict.json", "pinyin_single.json"),
+        ("phrases_dict.json", "pinyin_phrases.json"),
+    ):
+        payload = json.loads((source / source_name).read_text(encoding="utf-8"))
+        (destination / target_name).write_text(
+            json.dumps(convert(payload), ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+
 def export_composable_bundle(
     output_dir: str | Path,
     model: MultilingualVITS,
@@ -342,15 +377,7 @@ def export_composable_bundle(
                     )
                 relative = Path("runtime") / "piper-plus-g2p-data"
                 destination = pack_dir / relative
-                destination.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(
-                    source / "pinyin_dict.json",
-                    destination / "pinyin_single.json",
-                )
-                shutil.copy2(
-                    source / "phrases_dict.json",
-                    destination / "pinyin_phrases.json",
-                )
+                _write_android_pinyin_data(source, destination)
                 resource_sha256, resource_bytes = _tree_identity(destination)
                 runtime_resource = {
                     "id": "piper-plus-g2p-data",

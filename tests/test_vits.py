@@ -1045,10 +1045,10 @@ class VitsTests(unittest.TestCase):
             pypinyin_data = resource_root / "pypinyin"
             pypinyin_data.mkdir(parents=True)
             (pypinyin_data / "pinyin_dict.json").write_text(
-                '{"35831": "qing3"}', encoding="utf-8",
+                '{"35831": "qǐng,qiè"}', encoding="utf-8",
             )
             (pypinyin_data / "phrases_dict.json").write_text(
-                '{"\u8bf7\u5e2e": [["qing3"], ["bang1"]]}', encoding="utf-8",
+                '{"请帮的": [["qǐng"], ["bāng"], ["de"]]}', encoding="utf-8",
             )
             checkpoint = Path(directory) / "checkpoint"
             save_training_checkpoint(
@@ -1145,6 +1145,21 @@ class VitsTests(unittest.TestCase):
             self.assertTrue(
                 (composable / "languages/zh/runtime/piper-plus-g2p-data/"
                  "pinyin_single.json").is_file()
+            )
+            android_pinyin = composable / (
+                "languages/zh/runtime/piper-plus-g2p-data"
+            )
+            self.assertEqual(
+                json.loads((android_pinyin / "pinyin_single.json").read_text(
+                    encoding="utf-8",
+                ))["35831"],
+                "qing3,qie4",
+            )
+            self.assertEqual(
+                json.loads((android_pinyin / "pinyin_phrases.json").read_text(
+                    encoding="utf-8",
+                ))["请帮的"],
+                [["qing3"], ["bang1"], ["de5"]],
             )
             core_manifest = json.loads(
                 (composable / "core/manifest.json").read_text(
