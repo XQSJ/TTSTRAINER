@@ -1,0 +1,20 @@
+{
+  "_comment": "闭源商业 App 推荐：无 eSpeak 的七语训练 / Recommended for proprietary commercial apps: seven-language training without eSpeak",
+  "task": "train",
+  "preset": "mobile_commercial",
+  "experiment": {
+    "name": "commercial_voice",
+    "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+    "device": "auto"
+  },
+  "dataset": {
+    "sentences_per_language": 2000,
+    "speakers": {
+      "voice_01": "voice_01"
+    }
+  },
+  "training": {
+    "batch_size": 4,
+    "epochs": 200
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "_comment": "商业闭源友好的移动训练模式：轻量声学结构 + MIT Piper Plus 七语前端 / Commercial-friendly mobile mode: lightweight acoustics and MIT Piper Plus frontends",
+  "extends": "mobile_routed_pipeline_defaults.json",
+  "language_registry": {
+    "zh": {
+      "frontend": {
+        "provider": "piper-plus-g2p",
+        "profile": "mandarin-ipa-v1",
+        "resource": "pypinyin-rules-v1"
+      }
+    },
+    "en": {
+      "frontend": {
+        "provider": "piper-plus-g2p",
+        "profile": "piper-plus-en-v1",
+        "resource": "g2p-en-v1"
+      }
+    },
+    "ja": {
+      "frontend": {
+        "provider": "piper-plus-g2p",
+        "profile": "piper-plus-ja-v1",
+        "resource": "openjtalk-dictionary-v1"
+      }
+    },
+    "ko": {
+      "frontend": {
+        "provider": "piper-plus-g2p",
+        "profile": "korean-ipa-v1",
+        "resource": "nltk-cmudict-v1"
+      }
+    },
+    "fr": {
+      "frontend": {
+        "provider": "piper-plus-g2p",
+        "profile": "piper-plus-fr-v1",
+        "resource": "piper-plus-rules-v1"
+      }
+    },
+    "es": {
+      "frontend": {
+        "provider": "piper-plus-g2p",
+        "profile": "piper-plus-es-v1",
+        "resource": "piper-plus-rules-v1"
+      }
+    },
+    "pt": {
+      "frontend": {
+        "provider": "piper-plus-g2p",
+        "profile": "piper-plus-pt-v1",
+        "resource": "piper-plus-rules-v1"
+      }
+    },
+    "de": null,
+    "ru": null,
+    "it": null
+  },
+  "frontend": {
+    "provider": "language-router",
+    "mobile_direct": false,
+    "strict_language_switches": true
+  }
+}

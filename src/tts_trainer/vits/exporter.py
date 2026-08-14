@@ -432,10 +432,15 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         # 导出训练时实际使用的 pypinyin 数据；Android 原生前端兼容该 JSON
         # 格式，但要求目录内使用 Piper 约定的文件名。
         frontend_resources["piper-plus-g2p:zh"] = _find_pypinyin_data_dir()
-    if any(
+    needs_openjtalk_dictionary = any(
         profile.get("provider") == "openjtalk"
-        for profile in frontend.get("languages", {}).values()
-    ):
+        or (
+            language == "ja"
+            and profile.get("provider") == "piper-plus-g2p"
+        )
+        for language, profile in frontend.get("languages", {}).items()
+    )
+    if needs_openjtalk_dictionary:
         openjtalk = inspect_openjtalk_dictionary()
         if not openjtalk.ready:
             raise FileNotFoundError(
@@ -455,7 +460,14 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
                 "OpenJTalk dictionary cannot be deployed to Android; missing: "
                 + ", ".join(missing)
             )
-        frontend_resources["openjtalk"] = openjtalk.path
+        if any(
+            profile.get("provider") == "openjtalk"
+            for profile in frontend.get("languages", {}).values()
+        ):
+            frontend_resources["openjtalk"] = openjtalk.path
+        if frontend.get("languages", {}).get("ja", {}).get("provider") \
+                == "piper-plus-g2p":
+            frontend_resources["piper-plus-g2p:ja"] = openjtalk.path
     composable = export_composable_bundle(
         output_dir,
         generator,

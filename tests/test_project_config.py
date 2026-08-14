@@ -90,6 +90,35 @@ class ProjectConfigTests(unittest.TestCase):
             )
             self.assertFalse(resolved["frontend"]["mobile_direct"])
 
+    def test_commercial_presets_replace_all_seven_espeak_routes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for preset in ("quality_commercial", "mobile_commercial"):
+                path = root / f"{preset}.json"
+                path.write_text(json.dumps({
+                    "preset": preset,
+                    "experiment": {
+                        "name": preset,
+                        "languages": ["zh", "en", "ja", "ko", "fr", "es", "pt"],
+                    },
+                }), encoding="utf-8")
+                resolved = load_project_config(path)
+                providers = {
+                    profile["frontend"]["provider"]
+                    for profile in resolved["language_registry"].values()
+                    if profile is not None
+                }
+                self.assertEqual(providers, {"piper-plus-g2p"})
+                self.assertNotIn("espeak-ng", json.dumps(resolved))
+            self.assertEqual(
+                load_project_config(root / "quality_commercial.json")["model"]["hidden_channels"],
+                256,
+            )
+            self.assertEqual(
+                load_project_config(root / "mobile_commercial.json")["model"]["duration_predictor_flow_layers"],
+                2,
+            )
+
     def test_rejects_unknown_public_preset(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "invalid.json"

@@ -386,6 +386,22 @@ def export_composable_bundle(
                     "sha256": resource_sha256,
                     "bytes": resource_bytes,
                 }
+            elif language == "ja":
+                if source is None or not source.is_dir():
+                    raise FileNotFoundError(
+                        "Japanese Piper Plus language pack requires an "
+                        "OpenJTalk dictionary"
+                    )
+                relative = Path("runtime") / "open_jtalk_dic"
+                shutil.copytree(source, pack_dir / relative, dirs_exist_ok=True)
+                resource_sha256, resource_bytes = _tree_identity(source)
+                runtime_resource = {
+                    "id": "openjtalk-dictionary",
+                    "delivery": "language-pack",
+                    "path": relative.as_posix(),
+                    "sha256": resource_sha256,
+                    "bytes": resource_bytes,
+                }
             else:
                 runtime_resource = {
                     "id": "piper-plus-g2p",

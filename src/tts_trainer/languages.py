@@ -56,13 +56,27 @@ class LanguageSpec:
         if provider == "openjtalk":
             profile.setdefault("dictionary", "open_jtalk_dic_utf_8-1.11")
         if provider == "piper-plus-g2p":
-            if code not in {"zh", "ko"}:
+            # Registry overrides may replace an inherited eSpeak/OpenJTalk
+            # provider. Do not leak the old provider's fields into the frozen
+            # Piper contract. / 注册表覆盖可能替换旧 eSpeak/OpenJTalk 前端；
+            # 不要把旧前端字段带入 Piper 契约。
+            profile.pop("voice", None)
+            profile.pop("dictionary", None)
+            supported = {"ja", "en", "zh", "ko", "es", "fr", "pt", "sv"}
+            if code not in supported:
                 raise ValueError(
-                    f"language {code}: piper-plus-g2p is currently routed only for zh and ko"
+                    f"language {code}: piper-plus-g2p supports only "
+                    + ", ".join(sorted(supported))
                 )
             defaults = {
+                "ja": {"profile": "piper-plus-ja-v1", "resource": "openjtalk-dictionary-v1"},
+                "en": {"profile": "piper-plus-en-v1", "resource": "g2p-en-v1"},
                 "zh": {"profile": "mandarin-ipa-v1", "resource": "pypinyin-rules-v1"},
                 "ko": {"profile": "korean-ipa-v1", "resource": "nltk-cmudict-v1"},
+                "es": {"profile": "piper-plus-es-v1", "resource": "piper-plus-rules-v1"},
+                "fr": {"profile": "piper-plus-fr-v1", "resource": "piper-plus-rules-v1"},
+                "pt": {"profile": "piper-plus-pt-v1", "resource": "piper-plus-rules-v1"},
+                "sv": {"profile": "piper-plus-sv-v1", "resource": "piper-plus-rules-v1"},
             }[code]
             for key, value in defaults.items():
                 profile.setdefault(key, value)

@@ -11,11 +11,11 @@ from pathlib import Path
 from .resources import ensure_korean_cmudict
 
 
-SUPPORTED_LANGUAGES = {"zh", "ko"}
+SUPPORTED_LANGUAGES = {"ja", "en", "zh", "ko", "es", "fr", "pt", "sv"}
 
 
 class PiperPlusFrontend:
-    """Production Mandarin/Korean G2P using Piper Plus token semantics."""
+    """GPL-free multilingual G2P using frozen Piper Plus token semantics."""
 
     def __init__(self, language: str, *, resource_root: Path | None = None,
                  auto_download_resources: bool = True):
@@ -57,8 +57,8 @@ class PiperPlusFrontend:
             return self._phonemizer
         if importlib.util.find_spec("piper_plus_g2p") is None:
             raise RuntimeError(
-                "Mandarin/Korean G2P requires Piper Plus. "
-                "Install: pip install 'tts-trainer[asian]'"
+                f"{self.language} G2P requires Piper Plus. "
+                "Install: pip install 'tts-trainer[commercial]'"
             )
         if self.language == "ko":
             self._prepare_korean()
@@ -78,14 +78,33 @@ class PiperPlusFrontend:
             return tuple(self._load().phonemize(text))
 
     def version(self) -> str:
-        versions = [f"piper-plus-g2p {importlib.metadata.version('piper-plus-g2p')}"]
-        dependency = "pypinyin" if self.language == "zh" else "g2pk2"
-        versions.append(f"{dependency} {importlib.metadata.version(dependency)}")
+        def installed_version(distribution: str) -> str:
+            try:
+                return importlib.metadata.version(distribution)
+            except importlib.metadata.PackageNotFoundError as exc:
+                raise RuntimeError(
+                    f"Piper Plus {self.language} backend is incomplete: missing "
+                    f"{distribution}; install: pip install 'tts-trainer[commercial]'"
+                ) from exc
+
+        versions = [f"piper-plus-g2p {installed_version('piper-plus-g2p')}"]
+        dependencies = {
+            "ja": ("pyopenjtalk-plus",),
+            "en": ("g2p-en",),
+            "zh": ("pypinyin",),
+            "ko": ("g2pk2",),
+        }.get(self.language, ())
+        for dependency in dependencies:
+            versions.append(f"{dependency} {installed_version(dependency)}")
         if self.language == "ko":
-            versions.append(f"python-mecab-ko {importlib.metadata.version('python-mecab-ko')}")
+            versions.append(f"python-mecab-ko {installed_version('python-mecab-ko')}")
         return "; ".join(versions)
 
     def resource_id(self) -> str:
         if self.language == "ko":
             return "nltk-cmudict-v1"
-        return "pypinyin-rules-v1"
+        if self.language == "zh":
+            return "pypinyin-rules-v1"
+        if self.language == "ja":
+            return "openjtalk-dictionary-v1"
+        return "piper-plus-rules-v1"

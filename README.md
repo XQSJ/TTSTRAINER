@@ -3,9 +3,9 @@
 用 Qwen3-TTS 生成训练数据，训练多语言、多音色 VITS，并导出移动端可用的
 ONNX 资源。
 
-> **推荐配置：**包含中日韩时使用 `"preset": "mobile_routed"`；只有 eSpeak
-> 覆盖语言时使用 `"preset": "mobile"`。前端契约不同的 checkpoint 不能直接
-> resume。
+> **闭源商业 App 推荐：**使用 `"preset": "mobile_commercial"`，七语全部走
+> MIT Piper Plus G2P，不把 GPL eSpeak 带入部署链路。旧模型继续使用原来的
+> `quality`、`mobile_routed` 或 `mobile`；前端契约不同的 checkpoint 不能 resume。
 
 ## 五分钟开始训练
 
@@ -16,7 +16,7 @@ git clone https://github.com/XQSJ/TTSTRAINER.git
 cd TTSTRAINER
 python3 -m venv .venv
 .venv/bin/pip install -U pip setuptools wheel
-.venv/bin/pip install -e '.[qwen,export,japanese,asian]'
+.venv/bin/pip install -e '.[qwen,export,commercial]'
 ```
 
 ### 2. 复制并修改配置
@@ -30,7 +30,7 @@ cp training_configs/train1.json training_configs/my_model.json
 ```json
 {
   "task": "train",
-  "preset": "mobile_routed",
+  "preset": "mobile_commercial",
   "experiment": {
     "name": "my_model",
     "languages": ["zh", "en", "ja", "ko"],
@@ -47,6 +47,13 @@ cp training_configs/train1.json training_configs/my_model.json
 ```
 
 音色和文本来源的完整写法见下方“生成音色并直接训练”。
+
+`mobile_commercial` 支持 `zh/en/ja/ko/fr/es/pt`，不会调用 eSpeak。日语由
+Piper Plus 内部的 OpenJTalk 后端处理，导出语言包会携带对应字典。若更重视质量而
+不在意模型尺寸，将 preset 改为 `quality_commercial`。
+
+已有 eSpeak/OpenJTalk 路由模型不能只改 preset 后续训。请使用新的
+`experiment.name` 从头训练；已生成的 WAV 数据仍可通过公共 voice ID 复用。
 
 ### 3. 预检并运行
 
@@ -1161,6 +1168,10 @@ configs/models.json
 
 可用 preset：
 
+- `quality_commercial`：闭源商业应用的质量优先模式。`zh/en/ja/ko/fr/es/pt`
+  全部使用 MIT `piper-plus-g2p`，不包含 eSpeak；必须安装 `.[commercial]`。
+- `mobile_commercial`：闭源商业应用的移动轻量模式；前端与
+  `quality_commercial` 相同，使用 64 channels、2 层 Flow SDP。
 - `quality`：默认推荐，约 39M Generator，质量优先；使用 128 channels、6 层
   Flow SDP，时长模块 FP32 约 4.4 MB；
 - `compact`：小模型和流程验证，音质上限较低。
@@ -1185,7 +1196,8 @@ Flow SDP 训练的是音素时长分布，只增加节奏表达能力，不会�
 embedding、G2P 或 Decoder。最终仍导出单个 ONNX；`duration_noise_scale=0` 为确定性
 节奏，推荐试听范围为 `0.15～0.45`。
 
-`quality`、`mobile_routed` 和 `mobile` 的前端契约彼此隔离：选择 `mobile` 不会修改
+`quality_commercial`、`mobile_commercial`、`quality`、`mobile_routed` 和
+`mobile` 的前端契约彼此隔离：选择 `mobile` 不会修改
 `quality` 的中文 Piper Plus、日语 Open JTalk、韩语 Piper Plus 路由。
 不要在不同前端契约之间 `resume` 或 `warm_start`，音频数据可以复用，但模型必须
 分别训练。

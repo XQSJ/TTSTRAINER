@@ -9,6 +9,8 @@ PRESET_FILES = {
     "quality": "configs/internal/quality_pipeline_defaults.json",
     "mobile": "configs/internal/mobile_pipeline_defaults.json",
     "mobile_routed": "configs/internal/mobile_routed_pipeline_defaults.json",
+    "quality_commercial": "configs/internal/quality_commercial_pipeline_defaults.json",
+    "mobile_commercial": "configs/internal/mobile_commercial_pipeline_defaults.json",
 }
 
 

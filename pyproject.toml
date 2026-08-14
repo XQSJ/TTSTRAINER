@@ -26,6 +26,10 @@ asian = [
   "piper-plus-g2p[zh,ko]==0.2.0",
   "python-mecab-ko>=1.3,<2",
 ]
+commercial = [
+  "piper-plus-g2p[all]==0.2.0",
+  "python-mecab-ko>=1.3,<2",
+]
 quality = ["faster-whisper>=1.2,<2", "speechbrain>=1.1,<2"]
 dev = ["pytest>=8", "ruff>=0.5"]
 

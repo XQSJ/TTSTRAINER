@@ -238,6 +238,27 @@ class FrontendTests(unittest.TestCase):
             runtime_contract.declaration_key(), router.declared.declaration_key(),
         )
 
+    def test_commercial_registry_routes_all_seven_languages_to_piper_plus(self):
+        languages = ("zh", "en", "ja", "ko", "fr", "es", "pt")
+        registry = {
+            language: {
+                "name": language,
+                "teacher": None,
+                "frontend": {"provider": "piper-plus-g2p"},
+                "smoke_text": language,
+            }
+            for language in languages
+        }
+        router = frontend_from_config(
+            {"provider": "language-router"},
+            languages=languages,
+            language_registry=registry,
+        )
+        self.assertTrue(all(
+            router.provider_for(language) == "piper-plus-g2p"
+            for language in languages
+        ))
+
     def test_mobile_espeak_routes_all_languages_and_freezes_direct_encoding(self):
         router = frontend_from_config(
             {"provider": "espeak-ng", "mobile_direct": True,
