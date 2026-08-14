@@ -411,7 +411,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
                 "Japanese language pack; run: tts-trainer frontends ensure openjtalk"
             )
         android_required = (
-            "dicrc", "sys.dic", "matrix.bin", "char.bin",
+            "sys.dic", "matrix.bin", "char.bin",
             "left-id.def", "right-id.def", "unk.dic",
         )
         missing = [

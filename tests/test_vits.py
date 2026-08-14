@@ -1040,7 +1040,7 @@ class VitsTests(unittest.TestCase):
             openjtalk_data = resource_root / "open_jtalk_dic"
             openjtalk_data.mkdir(parents=True)
             for name in ("char.bin", "matrix.bin", "sys.dic", "unk.dic",
-                         "dicrc", "left-id.def", "right-id.def"):
+                         "left-id.def", "right-id.def"):
                 (openjtalk_data / name).write_bytes(b"test")
             checkpoint = Path(directory) / "checkpoint"
             save_training_checkpoint(
