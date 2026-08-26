@@ -1,3 +1,5 @@
+"""实验目录布局：名称/语言校验、路径推导与运行清单落盘。 / Experiment layout: name/language validation, path derivation and run manifest."""
+
 from __future__ import annotations
 
 import json
@@ -16,6 +18,8 @@ MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 @dataclass(frozen=True)
 class ExperimentLayout:
+    """一个实验的全部推导路径与初始化参数。 / All derived paths and initialization settings for one experiment."""
+
     name: str
     languages: tuple[str, ...]
     language_registry: dict[str, LanguageSpec]
@@ -33,12 +37,14 @@ class ExperimentLayout:
 
 
 def validate_model_name(name: str) -> str:
+    """校验模型名可安全用作目录名。 / Validate the model name is safe as a directory name."""
     if not MODEL_NAME.fullmatch(name):
         raise ValueError("model name must contain only letters, numbers, '.', '_' and '-', and cannot start with punctuation")
     return name
 
 
 def validate_languages(values, registry: dict[str, LanguageSpec] | None = None) -> tuple[str, ...]:
+    """归一化并校验启用的语言列表。 / Normalize and validate the enabled language list."""
     registry = registry or resolve_language_registry()
     if values is None:
         values = list(DEFAULT_TRAINING_LANGUAGES)
@@ -59,8 +65,10 @@ def validate_languages(values, registry: dict[str, LanguageSpec] | None = None) 
 def resolve_experiment(config_path: str | Path, *, metadata_override: str | None = None,
                        output_override: str | None = None,
                        device_override: str | None = None) -> tuple[dict, ExperimentLayout]:
+    """解析配置为原始字典与实验布局。 / Resolve a config into its raw dict and experiment layout."""
     raw = load_project_config(config_path)
     experiment = raw.get("experiment", {})
+    # 未显式命名时以配置文件名作为实验名。 / Fall back to the config file stem as the experiment name.
     name = validate_model_name(experiment.get("name") or Path(config_path).stem)
     registry = resolve_language_registry(raw.get("language_registry"))
     languages = validate_languages(experiment.get("languages"), registry)
@@ -89,6 +97,7 @@ def resolve_experiment(config_path: str | Path, *, metadata_override: str | None
     ):
         raise ValueError("experiment.initialization.exclude must be an array of module names")
     excludes = tuple(value.strip().rstrip(".") for value in exclude_raw)
+    # exclude 只在 warm_start 下有意义：决定哪些模块不迁移。 / exclude is warm_start-only: which modules not to transfer.
     if mode != "warm_start" and excludes:
         raise ValueError(
             "experiment.initialization.exclude is only valid with mode=warm_start"
@@ -113,14 +122,17 @@ def resolve_experiment(config_path: str | Path, *, metadata_override: str | None
 
 
 def prepare_experiment(layout: ExperimentLayout, resolved_config: dict, config_path: str | Path) -> None:
+    """创建实验目录并落盘解析后配置与运行清单。 / Create experiment dirs and record resolved config plus run manifest."""
     task = str(resolved_config.get("task", "train")).strip().lower()
     layout.run_dir.mkdir(parents=True, exist_ok=True)
+    # prepare 任务只写 run_dir；train 任务才需要数据/训练目录。 / prepare only needs run_dir; train needs the full tree.
     if task == "train":
         layout.dataset_dir.mkdir(parents=True, exist_ok=True)
         layout.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         layout.logs_dir.mkdir(parents=True, exist_ok=True)
         layout.artifacts_dir.mkdir(parents=True, exist_ok=True)
     recorded_config = deepcopy(resolved_config)
+    # 把默认值回填进落盘配置，保证可复现实验。 / Backfill defaults so the recorded config reproduces the run.
     recorded_config.setdefault("experiment", {})["languages"] = list(layout.languages)
     if "model" in recorded_config:
         recorded_config["model"]["num_languages"] = len(layout.languages)

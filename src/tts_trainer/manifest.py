@@ -1,3 +1,4 @@
+"""训练数据 CSV 清单的读取与校验。 / Reading and validating training CSV manifests."""
 from __future__ import annotations
 
 import csv
@@ -10,16 +11,19 @@ from .languages import resolve_language_registry
 
 
 def parse_phonemes(value: str) -> tuple[str, ...] | None:
+    """把 CSV 中的音素串解析为元组，`<space>` 还原为空格。 / Parse a CSV phoneme string; `<space>` maps back to a space token."""
     tokens = tuple(" " if token == "<space>" else token for token in value.split())
     return tokens or None
 
 
 def format_phonemes(tokens: tuple[str, ...]) -> str:
+    """把音素元组写回 CSV 文本形式。 / Serialize phoneme tokens back to CSV text form."""
     return " ".join("<space>" if token == " " else token for token in tokens)
 
 
 @dataclass(frozen=True)
 class Item:
+    """单条训练样本。 / One training sample."""
     audio: Path
     text: str
     language: str
@@ -29,13 +33,16 @@ class Item:
 
 @dataclass(frozen=True)
 class ValidationReport:
+    """清单校验结果汇总。 / Summary of manifest validation."""
     items: tuple[Item, ...]
     language_counts: dict[str, int]
     sample_rates: tuple[int, ...]
 
 
 def read_manifest(path: str | Path) -> list[Item]:
+    """读取 CSV 清单为样本列表。 / Read a CSV manifest into items."""
     manifest = Path(path)
+    # utf-8-sig 兼容带 BOM 的 Excel 导出文件。 / utf-8-sig tolerates BOM from Excel exports.
     with manifest.open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
         required = {"audio", "text", "language", "speaker"}
@@ -58,6 +65,7 @@ def validate_manifest(path: str | Path, expected_sample_rate: int | None = None,
                       *, require_single_speaker: bool = True,
                       require_phonemes: bool = False,
                       supported_languages=None) -> ValidationReport:
+    """校验清单完整性与音频格式。 / Validate manifest completeness and audio format."""
     items = read_manifest(path)
     if not items:
         raise ValueError("metadata contains no samples")

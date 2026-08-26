@@ -1,3 +1,5 @@
+"""可组合导出：不含嵌入表的核心 ONNX 加独立安装的语言包/音色包。 / Composable export: an embedding-free core ONNX plus independently installable language and voice packs."""
+
 from __future__ import annotations
 
 import hashlib
@@ -17,11 +19,12 @@ from .model import MultilingualVITS
 
 
 logger = logging.getLogger(__name__)
+# 可组合清单格式版本，端侧据此校验包兼容性。 / Composable manifest format version; the device side checks pack compatibility against it.
 COMPOSABLE_FORMAT = 1
 
 
 class ComposableInferenceWrapper(nn.Module):
-    """Export a core graph whose language and speaker tables live in packs."""
+    """导出核心图：语言/音色表外置到包中，以 embedding 向量为输入。 / Export a core graph whose language and speaker tables live in packs."""
 
     def __init__(
         self,
@@ -48,10 +51,14 @@ class ComposableInferenceWrapper(nn.Module):
         speaker_embedding: torch.Tensor,
     ):
         if self.insert_pad_after_bos:
+            # 在 BOS 后插入一个 PAD，对齐 sherpa 1.13.4 的历史线上序列。 /
+            # Insert one PAD after BOS to match sherpa 1.13.4's historical wire sequence.
             pad = torch.zeros_like(input[:, :1])
             input = torch.cat((input[:, :1], pad, input[:, 1:]), dim=1)
             input_lengths = input_lengths + 1
         elif self.strip_piper_pads:
+            # 用位置掩码剔除所有传输 PAD(token 0)，得到训练用的紧凑序列。 /
+            # Mask out every transport PAD (token 0) to get the compact training sequence.
             positions = torch.arange(
                 input.shape[1], device=input.device,
             ).unsqueeze(0)
@@ -74,7 +81,7 @@ def _sha256(path: Path) -> str:
 
 
 def _tree_identity(path: Path) -> tuple[str, int]:
-    """Hash relative names and file contents for a deployable resource tree."""
+    """对资源树按相对路径名+文件内容做哈希，返回 (摘要, 总字节数)。 / Hash relative names and file contents for a deployable resource tree; returns (digest, total bytes)."""
     digest = hashlib.sha256()
     total = 0
     for source in sorted(item for item in path.rglob("*") if item.is_file()):
@@ -89,6 +96,8 @@ def _tree_identity(path: Path) -> tuple[str, int]:
 
 
 def _write_vector(path: Path, vector: torch.Tensor) -> dict:
+    """把嵌入向量写成小端 float32 裸文件并返回清单描述。 / Write an embedding vector as a little-endian float32 raw file and return its manifest entry."""
+    # 强制小端 float32，保证跨端（Android ARM）字节序一致。 / Force LE float32 so Android/ARM reads identical bytes.
     values = vector.detach().cpu().numpy().astype("<f4", copy=False)
     path.write_bytes(values.tobytes(order="C"))
     return {
@@ -100,6 +109,7 @@ def _write_vector(path: Path, vector: torch.Tensor) -> dict:
 
 
 def _write_pack_archive(pack_dir: Path, target: Path) -> None:
+    """把包目录以确定性顺序压缩为 zip。 / Zip a pack directory into an archive in deterministic order."""
     with zipfile.ZipFile(
         target, "w", compression=zipfile.ZIP_DEFLATED,
     ) as archive:
@@ -109,7 +119,7 @@ def _write_pack_archive(pack_dir: Path, target: Path) -> None:
 
 
 def _write_android_pinyin_data(source: Path, destination: Path) -> None:
-    """Convert pypinyin tone marks to the native Android TONE3 format."""
+    """把 pypinyin 声调标记转换为 Android 原生 TONE3 格式。 / Convert pypinyin tone marks to the native Android TONE3 format."""
     try:
         from pypinyin.contrib.tone_convert import to_tone3
     except ImportError as exc:
@@ -159,7 +169,7 @@ def export_composable_bundle(
     strip_piper_pads: bool,
     frontend_resources: dict[str, Path] | None = None,
 ) -> dict:
-    """Export core + independently installable language and voice packs.
+    """导出声学核心与可独立安装的语言包、音色包。 / Export core + independently installable language and voice packs.
 
     核心 ONNX 不再包含 language/speaker embedding 表。语言包和音色包只
     保存各自向量与契约，并用 core_sha256 严格绑定对应声学核心。
@@ -185,6 +195,8 @@ def export_composable_bundle(
         insert_pad_after_bos=insert_pad_after_bos,
         strip_piper_pads=strip_piper_pads,
     )
+    # 用第 0 行嵌入作为导出与校验的代表性输入；运行时由包提供真实向量。 /
+    # Row-0 embeddings serve as the representative export/parity input; packs supply real vectors at runtime.
     language_vector = model.conditioning.language_embedding.weight[0:1]
     speaker_vector = model.conditioning.speaker_embedding.weight[0:1]
     with torch.no_grad():
@@ -197,6 +209,8 @@ def export_composable_bundle(
         ).cpu().numpy()
 
     target = core_dir / "model.onnx"
+    # 文本/音频长度动态；strip_piper_pads 的逐元素掩码只支持 batch=1。 /
+    # Dynamic text/audio lengths; the strip_piper_pads element-wise mask supports only batch=1.
     dynamic_axes = {
         "input": {1: "text_length"},
         "output": {2: "audio_length"},
@@ -210,6 +224,8 @@ def export_composable_bundle(
             "output": {0: "batch", 2: "audio_length"},
         })
     with warnings.catch_warnings():
+        # 单步随机上采样触发的常量折叠告警无实际影响。 /
+        # Constant-folding warning from the single-step stochastic upsampling is harmless.
         warnings.filterwarnings(
             "ignore",
             message="Constant folding - Only steps=1 can be constant folded.*",
@@ -226,6 +242,8 @@ def export_composable_bundle(
             ),
             str(target),
             input_names=[
+                # dynamo=False 保持传统 TorchScript 路径，兼容 ORT 1.22。 /
+                # dynamo=False keeps the legacy TorchScript path for ORT 1.22.
                 "input",
                 "input_lengths",
                 "scales",
@@ -259,6 +277,8 @@ def export_composable_bundle(
             f"maximum_absolute_error={maximum_error:.6g}"
         )
 
+    # core 哈希是所有包的兼容性锚点：不匹配即拒绝加载。 /
+    # The core hash is the compatibility anchor for every pack: mismatch means refuse to load.
     core_sha256 = _sha256(target)
     tokens_payload = {"tokens": metadata["tokens"]}
     (core_dir / "tokens.json").write_text(
@@ -314,6 +334,8 @@ def export_composable_bundle(
         pack_dir = language_root / language
         shutil.rmtree(pack_dir, ignore_errors=True)
         pack_dir.mkdir(parents=True, exist_ok=True)
+        # 语言包内嵌该语言的嵌入向量，供核心图运行时查用。 /
+        # The language pack carries this language's embedding vector for runtime lookup.
         embedding = _write_vector(
             pack_dir / "embedding.f32",
             model.conditioning.language_embedding.weight[language_id],
@@ -332,6 +354,8 @@ def export_composable_bundle(
         )
         frontend_profile = dict(frontend["languages"][language])
         provider = frontend_profile["provider"]
+        # 按 provider 把运行时资源(espeak 数据/词典/拼音库)复制进语言包。 /
+        # Copy runtime resources (espeak data/dictionaries/pinyin DBs) into the pack by provider.
         runtime_resource = None
         if provider == "espeak-ng":
             source = frontend_resources.get(provider)
@@ -403,11 +427,15 @@ def export_composable_bundle(
                     "bytes": resource_bytes,
                 }
             else:
+                # 其他语言没有可打包资源，由宿主应用自带 G2P。 /
+                # No bundleable resource for other languages; the host app ships its own G2P.
                 runtime_resource = {
                     "id": "piper-plus-g2p",
                     "delivery": "application-runtime",
                 }
 
+        # 语言包清单：前端契约 + 一致性用例 + core 绑定。 /
+        # Language-pack manifest: frontend contract + conformance cases + core binding.
         manifest = {
             "format": COMPOSABLE_FORMAT,
             "type": "tts-language-pack",
@@ -444,6 +472,7 @@ def export_composable_bundle(
         pack_dir = voice_root / speaker
         shutil.rmtree(pack_dir, ignore_errors=True)
         pack_dir.mkdir(parents=True, exist_ok=True)
+        # 音色包只需一个说话人向量与默认 scales。 / A voice pack needs just one speaker vector plus default scales.
         embedding = _write_vector(
             pack_dir / "embedding.f32",
             model.conditioning.speaker_embedding.weight[speaker_id],
@@ -475,6 +504,8 @@ def export_composable_bundle(
             "bytes": archive.stat().st_size,
         })
 
+    # 总目录：列出核心与全部包及其校验和，是 Android 端发现资源的入口。 /
+    # Top catalog: lists the core and every pack with checksums; the Android resource-discovery entry point.
     catalog = {
         "format": COMPOSABLE_FORMAT,
         "layout": "composable-vits-v1",

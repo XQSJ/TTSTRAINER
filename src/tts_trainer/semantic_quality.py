@@ -1,3 +1,4 @@
+"""语义质量门禁：ASR 回转写与说话人相似度。 / Semantic quality gate: ASR round-trip and speaker similarity."""
 from __future__ import annotations
 
 import importlib.util
@@ -14,22 +15,26 @@ from .logging_utils import TerminalProgress, format_duration, progress_bar
 from .quality_models import ensure_quality_model
 
 
+# 这些语言无词边界，用字符错误率而非词错误率。 / No word boundaries; use character error rate instead of WER.
 CHARACTER_ERROR_LANGUAGES = {"zh", "ja"}
 logger = logging.getLogger(__name__)
 
 
 def _normalized_characters(text: str) -> list[str]:
+    """NFKC + 小写后的有效字符列表。 / Alphanumeric character list after NFKC + casefold."""
     normalized = unicodedata.normalize("NFKC", text).casefold()
     return [character for character in normalized if character.isalnum()]
 
 
 def _normalized_words(text: str) -> list[str]:
+    """NFKC + 小写后的词列表。 / Word list after NFKC + casefold."""
     normalized = unicodedata.normalize("NFKC", text).casefold()
     normalized = re.sub(r"[^\w]+", " ", normalized, flags=re.UNICODE)
     return normalized.split()
 
 
 def edit_distance(reference: list[str], hypothesis: list[str]) -> int:
+    """滚动一行的 Levenshtein 编辑距离。 / Levenshtein distance with one rolling row."""
     previous = list(range(len(hypothesis) + 1))
     for row, expected in enumerate(reference, start=1):
         current = [row]
@@ -44,6 +49,7 @@ def edit_distance(reference: list[str], hypothesis: list[str]) -> int:
 
 
 def text_error_rate(reference: str, hypothesis: str, language: str) -> tuple[str, float]:
+    """按语言选择 CER/WER 并返回错误率。 / Choose CER or WER by language and return the error rate."""
     if language in CHARACTER_ERROR_LANGUAGES:
         metric = "cer"
         expected = _normalized_characters(reference)
@@ -56,8 +62,11 @@ def text_error_rate(reference: str, hypothesis: str, language: str) -> tuple[str
 
 
 class FasterWhisperEvaluator:
+    """Faster-Whisper ASR 评测器。 / Faster-Whisper ASR evaluator."""
+
     def __init__(self, model_path: Path, *, device: str = "cpu",
                  compute_type: str = "int8", beam_size: int = 5):
+        # 可选依赖缺失时给出安装指引而非裸 ImportError。 / Give an install hint instead of a bare ImportError.
         if importlib.util.find_spec("faster_whisper") is None:
             raise RuntimeError(
                 "ASR quality evaluation requires: pip install -e '.[quality]'"
@@ -70,6 +79,8 @@ class FasterWhisperEvaluator:
         self.beam_size = beam_size
 
     def transcribe(self, audio: Path, language: str) -> str:
+        """转写音频为文本。 / Transcribe audio to text."""
+        # 关闭 VAD 与上文条件，保证短样本结果可复现。 / Disable VAD and text conditioning for reproducibility on short clips.
         segments, _ = self.model.transcribe(
             str(audio), language=language, beam_size=self.beam_size,
             vad_filter=False, condition_on_previous_text=False,
@@ -78,6 +89,8 @@ class FasterWhisperEvaluator:
 
 
 class SpeechBrainSpeakerEvaluator:
+    """SpeechBrain ECAPA 说话人相似度评测器。 / SpeechBrain ECAPA speaker-similarity evaluator."""
+
     def __init__(self, model_path: Path, *, device: str = "cpu"):
         if importlib.util.find_spec("speechbrain") is None:
             raise RuntimeError(
@@ -91,16 +104,19 @@ class SpeechBrainSpeakerEvaluator:
         )
 
     def similarity(self, reference: Path, audio: Path) -> float:
+        """返回参考音频与待测音频的说话人相似度。 / Speaker similarity between reference and candidate audio."""
         score, _ = self.model.verify_files(str(reference), str(audio))
         return float(score.squeeze().item())
 
 
 def _speaker_references(items: list[Item], configured: dict,
                         reference_root: Path | None) -> dict[str, Path]:
+    """合并显式配置与目录扫描得到说话人参考音频。 / Merge explicit config with directory scanning for speaker references."""
     references = {
         speaker: Path(path).expanduser().resolve()
         for speaker, path in configured.items()
     }
+    # 未显式配置的说话人在参考目录下按 speaker.* 唯一匹配。 / Unconfigured speakers match a unique speaker.* file in the root.
     if reference_root and reference_root.is_dir():
         for speaker in {item.speaker for item in items} - set(references):
             matches = sorted(reference_root.glob(f"{speaker}.*"))
@@ -114,6 +130,7 @@ def run_semantic_quality_gate(
     *, reference_root: Path | None = None,
     asr_evaluator=None, speaker_evaluator=None,
 ) -> dict:
+    """运行语义质检门禁并输出 JSON 报告。 / Run the semantic quality gate and write a JSON report."""
     asr_config = config.get("asr", {})
     speaker_config = config.get("speaker", {})
     if not asr_config.get("enabled", False) and not speaker_config.get("enabled", False):
@@ -156,6 +173,7 @@ def run_semantic_quality_gate(
             )
 
     total = len(items)
+    # 日志节流：默认约每 5% 打一条，避免刷屏。 / Throttled logging: roughly one line per 5% by default.
     interval = max(1, int(config.get("progress_every_items", max(1, total // 20))))
     started = time.monotonic()
     results = []

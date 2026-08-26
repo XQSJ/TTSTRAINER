@@ -1,3 +1,4 @@
+"""质量评测模型（ASR/说话人）的本地注册与下载。 / Local registry and download of quality-eval models (ASR/speaker)."""
 from __future__ import annotations
 
 import json
@@ -14,12 +15,14 @@ DEFAULT_QUALITY_MODELS_ROOT = PROJECT_ROOT / "models" / "quality"
 
 @dataclass(frozen=True)
 class QualityModelSpec:
+    """质量模型短键到 HF 仓库的映射。 / Maps a quality-model key to an HF repo."""
     key: str
     repo_id: str
     directory_name: str
     required_files: tuple[str, ...]
 
 
+# 支持的质量评测模型清单。 / Supported quality-eval models.
 QUALITY_MODEL_SPECS = {
     "asr-small": QualityModelSpec(
         "asr-small", "Systran/faster-whisper-small", "faster-whisper-small",
@@ -34,6 +37,7 @@ QUALITY_MODEL_SPECS = {
 
 @dataclass(frozen=True)
 class QualityModelStatus:
+    """单个质量模型的本地就绪状态。 / Local readiness status of one quality model."""
     spec: QualityModelSpec
     path: Path
     ready: bool
@@ -42,11 +46,13 @@ class QualityModelStatus:
 
 
 def quality_models_root() -> Path:
+    """返回质量模型根目录，环境变量优先。 / Return the quality models root; the env override wins."""
     override = os.environ.get("TTS_TRAINER_QUALITY_MODELS_DIR")
     return Path(override).expanduser().resolve() if override else DEFAULT_QUALITY_MODELS_ROOT
 
 
 def get_quality_model_spec(key: str) -> QualityModelSpec:
+    """按键查规格，未知键报错。 / Look up a spec by key; unknown keys fail."""
     try:
         return QUALITY_MODEL_SPECS[key]
     except KeyError as exc:
@@ -56,11 +62,13 @@ def get_quality_model_spec(key: str) -> QualityModelSpec:
 
 
 def quality_model_path(key: str, root: Path | None = None) -> Path:
+    """返回质量模型的本地存放路径。 / Return the model's local directory."""
     spec = get_quality_model_spec(key)
     return (root or quality_models_root()) / spec.directory_name
 
 
 def inspect_quality_model(key: str, root: Path | None = None) -> QualityModelStatus:
+    """检查模型文件是否齐全并统计体积。 / Check required files and total size."""
     spec = get_quality_model_spec(key)
     path = quality_model_path(key, root)
     missing = tuple(name for name in spec.required_files if not (path / name).is_file())
@@ -71,6 +79,7 @@ def inspect_quality_model(key: str, root: Path | None = None) -> QualityModelSta
 
 @contextmanager
 def _download_lock(root: Path, key: str):
+    """用 O_EXCL 原子锁防止并发下载同一模型。 / Atomic O_EXCL lock preventing concurrent downloads."""
     root.mkdir(parents=True, exist_ok=True)
     lock = root / f".{key}.download.lock"
     try:
@@ -87,6 +96,7 @@ def _download_lock(root: Path, key: str):
 
 def ensure_quality_model(key: str, root: Path | None = None,
                          *, allow_download: bool = True) -> Path:
+    """确保质量模型就绪，必要时从 HF 下载。 / Ensure a quality model is ready, downloading if needed."""
     destination_root = root or quality_models_root()
     status = inspect_quality_model(key, destination_root)
     if status.ready:

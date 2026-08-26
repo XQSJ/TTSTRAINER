@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 
 def duration_predictor_settings(config: dict | object) -> dict:
-    """Resolve duration architecture, including format-4 legacy defaults."""
+    """解析时长预测器结构设置，兼容 format-4 之前的旧默认值。 / Resolve duration architecture, including format-4 legacy defaults."""
     if not isinstance(config, dict):
         config = config.to_dict()
     return {
@@ -64,7 +64,7 @@ def duration_predictor_settings(config: dict | object) -> dict:
 
 
 def preserve_checkpoint_duration_architecture(config, previous: dict | None, mode: str):
-    """Resume with the checkpoint predictor even if preset defaults evolved.
+    """即使预设默认值演进，resume 时仍沿用 checkpoint 内的预测器结构。 / Resume with the checkpoint predictor even if preset defaults evolved.
 
     preset defaults may safely improve new experiments. Resume/refinement and
     speaker expansion must nevertheless reproduce the exact saved graph. Use
@@ -254,6 +254,7 @@ def refinement_mel_weight(config: dict, refinement_steps: int) -> float:
 
 
 def select_device(requested: str = "auto") -> torch.device:
+    """按优先级选择训练设备：显式指定 > CUDA > MPS > CPU。 / Pick the training device by priority: explicit > CUDA > MPS > CPU."""
     if requested != "auto":
         return torch.device(requested)
     if torch.cuda.is_available(): return torch.device("cuda")
@@ -262,7 +263,7 @@ def select_device(requested: str = "auto") -> torch.device:
 
 
 def resolve_mixed_precision(training: dict, device: torch.device) -> tuple[str, torch.dtype | None]:
-    """Select CUDA AMP without changing checkpoint parameter precision."""
+    """选择 CUDA 混合精度方案，但 checkpoint 权重精度保持不变。 / Select CUDA AMP without changing checkpoint parameter precision."""
     requested = str(training.get("mixed_precision", "auto")).lower()
     if requested not in {"auto", "bf16", "fp16", "fp32"}:
         raise ValueError(
@@ -294,6 +295,7 @@ def resolve_mixed_precision(training: dict, device: torch.device) -> tuple[str, 
 
 
 def _checkpoint_metadata(path: Path, *, warm_start: bool = False) -> dict:
+    """读取并校验 checkpoint 的 metadata.json 格式版本。 / Read and validate the checkpoint metadata.json format."""
     metadata = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
     if warm_start:
         require_warm_start_checkpoint_format(int(metadata["format"]))
@@ -303,6 +305,7 @@ def _checkpoint_metadata(path: Path, *, warm_start: bool = False) -> dict:
 
 
 def _extend_id_map(existing: dict[str, int], values: set[str]) -> dict[str, int]:
+    """在保留旧 ID 的前提下为新增条目追加编号。 / Extend an ID map, keeping old IDs and appending new entries."""
     result = dict(existing)
     for value in sorted(values - set(result)):
         result[value] = len(result)
@@ -310,6 +313,7 @@ def _extend_id_map(existing: dict[str, int], values: set[str]) -> dict[str, int]
 
 
 def _vocabulary_for_initialization(items, mode: str, previous: dict | None) -> Vocabulary:
+    """按初始化模式构建词表：resume 类模式禁止新增 token。 / Build the vocabulary per initialization mode; resume-style modes reject new tokens."""
     discovered = Vocabulary.build(items)
     if previous is None:
         return discovered
@@ -323,8 +327,10 @@ def _vocabulary_for_initialization(items, mode: str, previous: dict | None) -> V
 
 
 def _load_expanded_generator(generator: MultilingualVITS, checkpoint: Path) -> None:
+    """加载旧 checkpoint 并按行扩容 embedding 以支持新说话人/新 token。 / Load the old checkpoint and row-expand embeddings for new speakers/tokens."""
     state = torch.load(checkpoint / "training-state.pt", map_location="cpu", weights_only=False)["generator"]
     current = generator.state_dict()
+    # 仅这两类按第 0 维扩容：说话人 embedding 与文本 embedding。 / Only these two row-expand along dim 0: speaker and text embeddings.
     expandable = {"conditioning.speaker_embedding.weight", "text_encoder.embedding.weight"}
     for name, old_value in state.items():
         if name not in current:
@@ -348,7 +354,7 @@ def _load_warm_start_generator(
     generator: MultilingualVITS, checkpoint: Path, excludes: tuple[str, ...],
     discriminator=None,
 ) -> dict:
-    """Load compatible generator modules while resetting selected components.
+    """加载兼容的生成器模块并重置指定组件。 / Load compatible generator modules while resetting selected components.
 
     Format-3 checkpoints always reset the duration predictor because its
     deterministic one-channel head cannot represent the format-4 stochastic
@@ -425,6 +431,7 @@ def _load_warm_start_generator(
 
 
 def _optimizer_to(optimizer, device: torch.device) -> None:
+    """把优化器状态张量迁回训练设备（torch.load 后落在 CPU）。 / Move optimizer state tensors back onto the training device (torch.load leaves them on CPU)."""
     for state in optimizer.state.values():
         for key, value in state.items():
             if torch.is_tensor(value):
@@ -433,6 +440,7 @@ def _optimizer_to(optimizer, device: torch.device) -> None:
 
 def _resolve_frontend_contract(raw: dict, metadata: Path, languages: tuple[str, ...],
                                previous: dict | None) -> dict:
+    """解析并锁定前端契约，确保与配置和旧 checkpoint 一致。 / Resolve and lock the frontend contract against config and prior checkpoint."""
     declared = frontend_contract_from_config(
         raw.get("frontend"), languages,
         language_registry=raw.get("language_registry"),
@@ -466,7 +474,7 @@ def _resolve_frontend_contract(raw: dict, metadata: Path, languages: tuple[str, 
 
 
 def _semantic_reference_root(dataset_dir: Path) -> Path:
-    """Return the shared voice reference directory recorded for this dataset."""
+    """返回数据集记录的共享音色参考音频目录。 / Return the shared voice reference directory recorded for this dataset."""
     fallback = dataset_dir / "references"
     record_path = dataset_dir / "dataset.json"
     if not record_path.is_file():
@@ -491,6 +499,7 @@ def _semantic_reference_root(dataset_dir: Path) -> Path:
 def train_vits(config_path: str, metadata_path: str | None = None,
                output_dir: str | None = None, *, device_name: str | None = None,
                max_steps: int | None = None):
+    """VITS 主训练入口：数据校验、GAN 训练循环、验证与 checkpoint 管理。 / Main VITS training entry: data validation, GAN training loop, validation, and checkpointing."""
     raw, layout = resolve_experiment(
         config_path, metadata_override=metadata_path,
         output_override=output_dir, device_override=device_name,
@@ -511,6 +520,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                                supported_languages=layout.language_specs)
     items = list(report.items)
     previous = (
+        # warm_start 允许更宽松的 checkpoint 格式，其余模式要求严格格式。 / warm_start accepts looser checkpoint formats; other modes require strict ones.
         _checkpoint_metadata(
             layout.initialization_checkpoint,
             warm_start=layout.initialization_mode == "warm_start",
@@ -536,6 +546,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     if previous is None:
         speaker_map = {speaker: index for index, speaker in enumerate(sorted(current_speakers))}
     else:
+        # 旧说话人保持原 ID，新说话人按排序追加。 / Old speakers keep their IDs; new speakers are appended in sorted order.
         speaker_map = _extend_id_map(previous["speaker_map"], current_speakers)
         if layout.initialization_mode in {"resume", "refine_text_prior"} \
                 and set(speaker_map) != set(previous["speaker_map"]):
@@ -759,7 +770,8 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     logger.info("selected device=%s", device)
     precision_name, autocast_dtype = resolve_mixed_precision(raw["training"], device)
     amp_enabled = autocast_dtype is not None
-    # FP16 needs dynamic loss scaling. BF16 has FP32-like exponent range and
+    # FP16 需要动态损失缩放；BF16 指数范围与 FP32 相同，无需缩放。
+    # 两种模式下模型/优化器主权重均保持 FP32。 / FP16 needs dynamic loss scaling. BF16 has FP32-like exponent range and
     # should not be scaled. Model/optimizer master weights remain FP32 in both.
     scaler = torch.amp.GradScaler(
         "cuda", enabled=precision_name == "fp16",
@@ -777,6 +789,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     profile_counts = Counter(
         (item.language, item.speaker) for item in train_items
     )
+    # 按语言×音色倒数加权采样，避免多数 profile 主导训练。 / Inverse-frequency sampling per lang×voice so majority profiles don't dominate.
     weights = profile_balancing_weights(train_items)
     logger.info(
         "sampling strategy=equal-language-speaker-profile profiles=%d "
@@ -786,6 +799,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     )
     batch_size = int(raw["training"]["batch_size"])
     pool_batches = int(raw["training"].get("length_bucket_pool_batches", 20))
+    # 按音频长度分桶组 batch，减少 padding 浪费并稳定显存占用。 / Bucket batches by audio length to cut padding waste and stabilize memory.
     batch_sampler = LengthBucketBatchSampler(
         weights, audio_sample_lengths(train_items), batch_size,
         pool_batches=pool_batches,
@@ -852,6 +866,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             torch.cuda.memory_allocated(device) / (1024 ** 3),
             torch.cuda.memory_reserved(device) / (1024 ** 3), device,
         )
+    # GAN 双优化器：生成器与判别器各自独立学习率和更新节奏。 / Separate GAN optimizers: generator and discriminator get independent LRs and schedules.
     optimizer_g = torch.optim.AdamW(
         generator.parameters(), lr=raw["training"]["learning_rate_generator"],
         betas=(0.8, 0.99), eps=1e-9,
@@ -881,6 +896,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         lr=refinement_config["learning_rate"],
         betas=(0.8, 0.99), eps=1e-9,
     )
+    # 每 step 指数衰减学习率。 / Exponential per-step LR decay.
     lr_decay = float(raw["training"].get("lr_decay", 0.999875))
     if not 0.0 < lr_decay <= 1.0:
         raise ValueError("training.lr_decay must be in (0, 1]")
@@ -1108,6 +1124,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
     live_progress.update(0, "warming up first batches")
 
     def training_phase_snapshot() -> dict:
+        """打包当前训练阶段快照，写入每个 checkpoint 以便精确恢复。 / Snapshot the current training phase for each checkpoint to enable exact resume."""
         return {
             "stage": training_stage,
             "mixed_precision": precision_name,
@@ -1118,6 +1135,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             "config": refinement_config,
         }
 
+    # ===== 主训练循环：每个 epoch 内按 batch 交替更新 D/G。 / Main loop: alternate D/G updates per batch within each epoch. =====
     for epoch in range(start_epoch, raw["training"]["epochs"] + 1):
         live_progress.clear()
         logger.info(
@@ -1135,6 +1153,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             cpu_waveforms = batch.pop("waveforms")
             batch = {key: value.to(device) for key, value in batch.items()}
             if training_stage == "standard":
+                # --- 标准 VITS GAN 阶段：先更新判别器，再更新生成器。 / Standard VITS GAN stage: update the discriminator first, then the generator. ---
                 with torch.autocast(
                     device_type=device.type, dtype=autocast_dtype,
                     enabled=amp_enabled,
@@ -1149,6 +1168,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     config.segment_frames, audio_config.hop_length,
                 ).to(device)
                 optimizer_d.zero_grad(set_to_none=True)
+                # 判别器更新：detach 生成音频，避免梯度流回生成器。 / Discriminator update: detach fake audio so no gradient reaches the generator.
                 with torch.autocast(
                     device_type=device.type, dtype=autocast_dtype,
                     enabled=amp_enabled,
@@ -1160,6 +1180,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 scaler.step(optimizer_d)
 
                 optimizer_g.zero_grad(set_to_none=True)
+                # 冻结判别器参数以省去其对生成器梯度的计算开销。 / Freeze discriminator params to skip computing its grads w.r.t. generator loss.
                 for parameter in discriminator.parameters():
                     parameter.requires_grad_(False)
                 with torch.autocast(
@@ -1193,11 +1214,13 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     loss_duration_mean = loss_mel.new_zeros(())
                     effective_prior_weight = 0.0
                     loss_g = (
+                        # 标准 VITS 损失加权：Mel 重建为主导项。 / Standard VITS loss weighting: Mel reconstruction dominates.
                         45.0 * loss_mel + loss_duration + loss_kl
                         + adversarial.float() + 2.0 * feature_matching.float()
                     )
                 scaler.scale(loss_g).backward()
                 scaler.unscale_(optimizer_g)
+                # 梯度裁剪到范数 5.0，防止对抗训练发散。 / Clip gradients to norm 5.0 to keep adversarial training stable.
                 torch.nn.utils.clip_grad_norm_(generator.parameters(), 5.0)
                 scaler.step(optimizer_g)
                 scaler.update()
@@ -1207,6 +1230,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 current_lr = optimizer_g.param_groups[0]["lr"]
                 epoch_standard_steps += 1
             else:
+                # --- 文本先验强化阶段：仅更新 text_encoder/flow/duration_predictor。 / Text-prior refinement stage: update only text_encoder/flow/duration_predictor. ---
                 generator.zero_grad(set_to_none=True)
                 optimizer_refinement.zero_grad(set_to_none=True)
                 with torch.autocast(
@@ -1251,6 +1275,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                     )
                 scaler.scale(loss_g).backward()
                 scaler.unscale_(optimizer_refinement)
+                # 同样裁剪到范数 5.0，与标准阶段保持一致。 / Clip to the same norm 5.0 as the standard stage.
                 torch.nn.utils.clip_grad_norm_(
                     refinement_parameters, 5.0,
                 )
@@ -1319,6 +1344,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 live_progress.update(run_step, live_detail)
             checkpoint_every = raw["training"].get("checkpoint_every_steps", 5000)
             if global_step % checkpoint_every == 0:
+                # 周期性 step 级 checkpoint，供断点续训与中间导出。 / Periodic step-level checkpoint for resume and intermediate export.
                 live_progress.clear()
                 logger.info("CHECKPOINT SAVE | step=%d", global_step)
                 save_training_checkpoint(
@@ -1418,6 +1444,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
                 validation_metrics["total"],
             )
             if current_value < best_value:
+                # 选型指标取 min；刷新最优即覆盖 best checkpoint。 / Selection metric is minimized; a new best overwrites the best checkpoint.
                 best_value = current_value
                 best_epoch = epoch
                 selection = {
@@ -1463,6 +1490,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
             if posterior_ready:
                 refinement_ready_streak += 1
             elif validation_metrics is not None:
+                # 一旦失败即清零连击计数，要求连续通过才切换阶段。 / A single failure resets the streak; consecutive passes are required to switch stages.
                 refinement_ready_streak = 0
             required_passes = refinement_config["consecutive_passes"]
             if posterior_ready and refinement_ready_streak >= required_passes:
@@ -1506,6 +1534,7 @@ def train_vits(config_path: str, metadata_path: str | None = None,
         )
         live_progress.clear()
         if should_save_last:
+            # last checkpoint 覆盖式保存，始终指向最新可续训状态。 / The last checkpoint is saved in place and always points at the newest resumable state.
             logger.info(
                 "LAST CHECKPOINT SAVE START | epoch=%d | step=%d | path=%s",
                 epoch, global_step, destination / "last",

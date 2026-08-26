@@ -1,3 +1,4 @@
+"""音频信号质量检查与批量质检门禁。 / Signal-level audio checks and the batch quality gate."""
 from __future__ import annotations
 
 import json
@@ -18,11 +19,13 @@ logger = logging.getLogger(__name__)
 
 
 def _dbfs(value: float) -> float:
+    """线性幅值转 dBFS，下限避免 log(0)。 / Linear amplitude to dBFS, floored to avoid log(0)."""
     return 20.0 * math.log10(max(value, 1e-12))
 
 
 def _edge_silence_seconds(samples: np.ndarray, threshold: float,
                           sample_rate: int) -> tuple[float, float]:
+    """测量首尾静音时长。 / Measure leading and trailing silence durations."""
     active = np.flatnonzero(np.abs(samples) > threshold)
     if not active.size:
         duration = len(samples) / sample_rate
@@ -31,8 +34,10 @@ def _edge_silence_seconds(samples: np.ndarray, threshold: float,
 
 
 def _text_unit_count(text: str) -> int:
-    """Count stable speech-rate units independently of the selected G2P.
+    """统计与所选 G2P 无关的稳定语速单位。 / Count stable speech-rate units independently of the selected G2P.
 
+    音素元组依赖具体前端：eSpeak/Piper 输出含重音与空格符的 Unicode 码点，
+    专用 G2P 输出更大的音素单元；直接用其长度会让同一条录音仅因换前端就翻转结论。
     Phoneme tuples are frontend-specific: eSpeak/Piper emits Unicode
     codepoints including stress and spacing tokens, while dedicated G2Ps emit
     larger phone units. Using their lengths makes the same recording pass or
@@ -42,6 +47,7 @@ def _text_unit_count(text: str) -> int:
 
 
 def inspect_audio_item(item: Item, config: dict) -> dict:
+    """计算单条音频的全部信号指标并按阈值判失败。 / Compute signal metrics for one item and judge failures against thresholds."""
     samples, sample_rate = sf.read(str(item.audio), dtype="float32", always_2d=False)
     samples = np.asarray(samples, dtype=np.float32).squeeze()
     if samples.ndim != 1:
@@ -52,6 +58,7 @@ def inspect_audio_item(item: Item, config: dict) -> dict:
     rms = float(np.sqrt(np.mean(np.square(samples), dtype=np.float64))) if samples.size else 0.0
     clipping_ratio = float(np.mean(absolute >= float(config.get("clipping_amplitude", 0.999)))) \
         if samples.size else 0.0
+    # 阈值以 dBFS 配置，换算回线性幅值再比对。 / Threshold is configured in dBFS; convert back to linear amplitude.
     silence_threshold = 10.0 ** (float(config.get("silence_threshold_dbfs", -45.0)) / 20.0)
     leading_silence, trailing_silence = _edge_silence_seconds(
         samples, silence_threshold, sample_rate,
@@ -97,6 +104,7 @@ def inspect_audio_item(item: Item, config: dict) -> dict:
 
 def run_audio_quality_gate(items: list[Item], config: dict,
                            output_path: str | Path) -> dict:
+    """批量执行信号质检并输出 JSON 报告。 / Run the signal quality gate over items and write a JSON report."""
     total = len(items)
     interval = max(1, int(config.get("progress_every_items", max(1, total // 20))))
     started = time.monotonic()

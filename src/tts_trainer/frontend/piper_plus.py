@@ -1,3 +1,5 @@
+"""Piper Plus 商用前端（MIT）：无 GPL 依赖的多语言 G2P，用于商业部署链路。 / Piper Plus commercial frontend (MIT): GPL-free multilingual G2P for commercial deployment."""
+
 from __future__ import annotations
 
 import contextlib
@@ -11,11 +13,13 @@ from pathlib import Path
 from .resources import ensure_korean_cmudict
 
 
+# 每个语言一个前端实例；此集合为 Piper Plus 后端实际支持的语言范围。
+# One frontend instance per language; the set the Piper Plus backend actually covers.
 SUPPORTED_LANGUAGES = {"ja", "en", "zh", "ko", "es", "fr", "pt", "sv"}
 
 
 class PiperPlusFrontend:
-    """GPL-free multilingual G2P using frozen Piper Plus token semantics."""
+    """使用冻结 Piper Plus token 语义的无 GPL 多语言 G2P。 / GPL-free multilingual G2P using frozen Piper Plus token semantics."""
 
     def __init__(self, language: str, *, resource_root: Path | None = None,
                  auto_download_resources: bool = True):
@@ -27,6 +31,7 @@ class PiperPlusFrontend:
         self._phonemizer = None
 
     def _prepare_korean(self) -> None:
+        """为韩语准备 g2pk2/mecab/NLTK 数据环境。 / Prepare the g2pk2/mecab/NLTK data environment for Korean."""
         if importlib.util.find_spec("g2pk2") is None:
             raise RuntimeError(
                 "Korean G2P requires the asian dependencies. "
@@ -41,6 +46,8 @@ class PiperPlusFrontend:
             self.resource_root, allow_download=self.auto_download_resources,
         )
         value = str(data_root)
+        # 把项目本地的 NLTK 数据目录挂到查找路径最前，避免污染全局安装。
+        # Put the project-local NLTK data dir first so global installs stay untouched.
         existing = os.environ.get("NLTK_DATA")
         paths = existing.split(os.pathsep) if existing else []
         if value not in paths:
@@ -53,6 +60,7 @@ class PiperPlusFrontend:
                 nltk.data.path.insert(0, value)
 
     def _load(self):
+        """惰性加载 phonemizer，缺失商业依赖时给出安装指引。 / Lazily load the phonemizer with install hints for missing commercial deps."""
         if self._phonemizer is not None:
             return self._phonemizer
         if importlib.util.find_spec("piper_plus_g2p") is None:
@@ -70,6 +78,7 @@ class PiperPlusFrontend:
         return self._phonemizer
 
     def phonemize(self, text: str, language: str) -> tuple[str, ...]:
+        """音素化文本；每个实例只服务自己的语言。 / Phonemize text; each instance serves only its own language."""
         if language != self.language:
             raise ValueError(
                 f"Piper Plus {self.language} frontend cannot phonemize {language!r}"
@@ -78,6 +87,7 @@ class PiperPlusFrontend:
             return tuple(self._load().phonemize(text))
 
     def version(self) -> str:
+        """汇总本语言所有后端依赖的版本号，供契约冻结。 / Aggregate every backend dependency version for contract freezing."""
         def installed_version(distribution: str) -> str:
             try:
                 return importlib.metadata.version(distribution)
@@ -88,6 +98,8 @@ class PiperPlusFrontend:
                 ) from exc
 
         versions = [f"piper-plus-g2p {installed_version('piper-plus-g2p')}"]
+        # 各语言实际参与 G2P 的核心依赖，版本变化都可能改变音素输出。
+        # The per-language G2P dependencies whose versions can change phoneme output.
         dependencies = {
             "ja": ("pyopenjtalk-plus",),
             "en": ("g2p-en",),
@@ -101,6 +113,7 @@ class PiperPlusFrontend:
         return "; ".join(versions)
 
     def resource_id(self) -> str:
+        """返回各语言外部资源指纹，供契约与资源包引用。 / Return the per-language external resource fingerprint for contracts and packs."""
         if self.language == "ko":
             return "nltk-cmudict-v1"
         if self.language == "zh":

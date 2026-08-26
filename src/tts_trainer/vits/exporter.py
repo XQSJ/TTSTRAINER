@@ -1,3 +1,5 @@
+"""VITS 检查点导出为 Piper 形状的 ONNX，并做部署资源打包与一致性验证。 / Export a VITS checkpoint to a Piper-shaped ONNX graph with deployment resources and parity validation."""
+
 from __future__ import annotations
 
 import json
@@ -29,10 +31,13 @@ from .model import MultilingualVITS
 
 
 logger = logging.getLogger(__name__)
+# sherpa-onnx Android 运行时的目标版本，决定线上 token 序列格式。 /
+# Target sherpa-onnx Android runtime version; it dictates the wire token sequence.
 SHERPA_ONNX_ANDROID_VERSION = "1.13.4"
 
 
 def require_mobile_blank_semantics(metadata: dict) -> None:
+    """拒绝 blank 语义不符合移动端契约的检查点。 / Reject checkpoints whose blank semantics violate the mobile contract."""
     frontend = metadata.get("frontend") or {}
     if frontend.get("token_encoding") == LEGACY_PIPER_TOKEN_ENCODING:
         raise ValueError(
@@ -54,7 +59,11 @@ def require_mobile_blank_semantics(metadata: dict) -> None:
 
 
 class PiperInferenceWrapper(nn.Module):
-    """Expose standard Piper inputs while retaining two internal conditions.
+    """对外暴露标准 Piper 四输入，内部保留语言/音色两路条件。 / Expose standard Piper inputs while retaining two internal conditions.
+
+    sid 是复合音色档案 id：
+      speaker_id = sid // num_languages
+      language_id = sid % num_languages
 
     sid is a composite profile id:
       speaker_id = sid // num_languages
@@ -99,12 +108,14 @@ class PiperInferenceWrapper(nn.Module):
             input = torch.masked_select(input, keep).unsqueeze(0)
             input_lengths = keep.sum(dim=1)
         sid = sid.to(torch.long)
+        # 拆解复合 sid：模数取语言，整除取音色。 / Decompose composite sid: modulo gives language, floor-division gives speaker.
         language_ids = torch.remainder(sid, self.num_languages)
         speaker_ids = torch.div(sid, self.num_languages, rounding_mode="floor")
         return self.model.infer_deploy(input, input_lengths, language_ids, speaker_ids, scales)
 
 
 def _config_from_metadata(raw: dict) -> VitsConfig:
+    """从 metadata.json 还原 VitsConfig，列表字段需转回元组。 / Rebuild a VitsConfig from metadata.json; list fields must be restored to tuples."""
     config = dict(raw["config"])
     for key in ("decoder_resblock_kernel_sizes", "upsample_rates", "upsample_kernel_sizes"):
         if key in config:
@@ -113,6 +124,7 @@ def _config_from_metadata(raw: dict) -> VitsConfig:
 
 
 def voice_profiles(speaker_map: dict[str, int], language_map: dict[str, int]) -> list[dict]:
+    """枚举全部音色×语言组合并生成复合 sid 档案。 / Enumerate every voice×language pair into composite-sid profiles."""
     profiles = []
     language_count = len(language_map)
     for speaker, speaker_id in sorted(speaker_map.items(), key=lambda item: item[1]):
@@ -131,6 +143,7 @@ def _representative_wire_input(tokens: list[str], frontend: dict) -> torch.Tenso
     """构造真实非空部署输入。 / Build a real non-empty runtime wire input."""
     if len(tokens) < 5:
         raise ValueError("checkpoint vocabulary is missing required special tokens")
+    # 选一个非特殊 token 的音素 id，保证验证输入非空。 / Pick a phoneme id beyond the special tokens so the probe input is non-empty.
     unit_id = 5 if len(tokens) > 5 else 4
     token_encoding = frontend.get("token_encoding", DIRECT_TOKEN_ENCODING)
     if token_encoding in {PIPER_TOKEN_ENCODING, MOBILE_DIRECT_TOKEN_ENCODING}:
@@ -143,6 +156,7 @@ def _representative_wire_input(tokens: list[str], frontend: dict) -> torch.Tenso
 
 
 def _replace_onnx_metadata(model, values: dict[str, object]) -> None:
+    """按 key 覆写 ONNX 元数据，未提及的条目原样保留。 / Overwrite ONNX metadata by key while preserving untouched entries."""
     preserved = {
         item.key: item.value for item in model.metadata_props
         if item.key not in values
@@ -155,6 +169,7 @@ def _replace_onnx_metadata(model, values: dict[str, object]) -> None:
 
 
 def _find_espeak_data_dir() -> Path:
+    """定位可随包分发的 espeak-ng-data 目录。 / Locate an espeak-ng-data directory suitable for bundling."""
     configured = os.environ.get("ESPEAK_DATA_PATH")
     candidates = [Path(configured).expanduser()] if configured else []
     executable = shutil.which("espeak-ng") or shutil.which("espeak")
@@ -181,7 +196,7 @@ def _find_espeak_data_dir() -> Path:
 
 
 def _find_pypinyin_data_dir() -> Path:
-    """Return the exact dictionaries used by the Python Mandarin frontend."""
+    """返回 Python 中文前端实际使用的词典目录。 / Return the exact dictionaries used by the Python Mandarin frontend."""
     spec = importlib.util.find_spec("pypinyin")
     if spec is None or spec.origin is None:
         raise FileNotFoundError(
@@ -205,7 +220,7 @@ def _export_sherpa_android_text_package(
     onnx, model, output_dir: Path, frontend: dict, profiles: list[dict],
     *, sample_rate: int, tokens: list[str],
 ) -> dict:
-    """Write language-specific metadata wrappers for sherpa's eSpeak frontend."""
+    """为 sherpa 的 eSpeak 前端生成按语言区分的元数据封装模型。 / Write language-specific metadata wrappers for sherpa's eSpeak frontend."""
     supported_encodings = {
         PIPER_TOKEN_ENCODING,
         MOBILE_DIRECT_TOKEN_ENCODING,
@@ -226,12 +241,15 @@ def _export_sherpa_android_text_package(
     token_lines = []
     for token_id, token in enumerate(tokens):
         if token == "<unk>":
+            # <unk> 与 sherpa 的音素查表逻辑冲突，必须跳过。 / <unk> clashes with sherpa's phoneme lookup and must be skipped.
             continue
         if len(token) != 1:
             raise ValueError(
                 "mobile eSpeak export requires Unicode-codepoint tokens; "
                 f"found {token!r}"
             )
+        # 空格 token 需要特殊行格式：只写 id，避免行内出现裸空格。 /
+        # The space token needs a special line format: id only, no bare space.
         token_lines.append(
             f"{token_id}\n" if token == " " else f"{token} {token_id}\n"
         )
@@ -294,6 +312,11 @@ def _export_sherpa_android_text_package(
 
 def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
                      *, sample_rate: int = 22050, opset: int = 17) -> Path:
+    """把训练检查点导出为 Piper 兼容 ONNX 及全部部署资源。 / Export a training checkpoint to a Piper-compatible ONNX plus all deployment resources.
+
+    流程共 5 步：加载检查点、构建图、数值一致性校验、写前端/部署资源、收尾。 /
+    Five steps: load checkpoint, build graph, parity check, write frontend/deployment resources, finish.
+    """
     try:
         import onnx
     except ImportError as exc:
@@ -343,11 +366,15 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
     target = output_dir / "model.onnx"
     tokens = _representative_wire_input(metadata["tokens"], frontend)
     lengths = torch.tensor([tokens.shape[1]], dtype=torch.long)
+    # scales=[noise,length,duration_noise]；导出前先取 PyTorch 参考输出用于一致性比对。 /
+    # scales=[noise,length,duration_noise]; capture a PyTorch reference output for parity comparison.
     scales = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
     sid = torch.tensor([0], dtype=torch.long)
     with torch.no_grad():
         reference_output = wrapper(tokens, lengths, scales, sid).cpu().numpy()
     logger.info("ONNX export step=2/5 action=build_graph opset=%d output=%s", opset, target)
+    # 文本长度与音频长度必须动态；mobile-direct 因逐元素 PAD 剥离只支持 batch=1。 /
+    # Text/audio lengths must be dynamic; mobile-direct supports only batch=1 due to the element-wise PAD stripping.
     dynamic_axes = {
         "input": {1: "text_length"},
         "output": {2: "audio_length"},
@@ -358,11 +385,15 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         dynamic_axes["sid"] = {0: "batch"}
         dynamic_axes["output"][0] = "batch"
     with warnings.catch_warnings():
+        # 随机上采样只执行一步，常量折叠告警无实际影响，直接忽略。 /
+        # The stochastic upsampling runs a single step; the constant-folding warning is harmless noise.
         warnings.filterwarnings(
             "ignore", message="Constant folding - Only steps=1 can be constant folded.*",
             category=UserWarning,
         )
         torch.onnx.export(
+            # dynamo=False：走传统 TorchScript 导出路径，保证算子级兼容 ORT 1.22。 /
+            # dynamo=False: legacy TorchScript export path for operator-level ORT 1.22 compatibility.
             wrapper, (tokens, lengths, scales, sid), str(target),
             input_names=["input", "input_lengths", "scales", "sid"],
             output_names=["output"], opset_version=opset, do_constant_folding=True,
@@ -392,6 +423,8 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
             f"PyTorch {reference_output.shape}, ONNX {runtime_output.shape}"
         )
     maximum_error = float(np.max(np.abs(runtime_output - reference_output)))
+    # 容差 2e-4 覆盖 float32 图在 CPU 上的算子级数值偏差。 /
+    # Tolerance 2e-4 covers float32 op-level divergence on CPU.
     if not np.allclose(
         runtime_output, reference_output, atol=2e-4, rtol=2e-4,
     ):
@@ -432,6 +465,8 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         # 导出训练时实际使用的 pypinyin 数据；Android 原生前端兼容该 JSON
         # 格式，但要求目录内使用 Piper 约定的文件名。
         frontend_resources["piper-plus-g2p:zh"] = _find_pypinyin_data_dir()
+    # 日语无论走 openjtalk 还是 piper-plus-g2p 都依赖同一套 OpenJTalk 词典。 /
+    # Japanese needs the same OpenJTalk dictionary whether via openjtalk or piper-plus-g2p.
     needs_openjtalk_dictionary = any(
         profile.get("provider") == "openjtalk"
         or (
@@ -451,6 +486,8 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
             "sys.dic", "matrix.bin", "char.bin",
             "left-id.def", "right-id.def", "unk.dic",
         )
+        # Android 原生 OpenJTalk 只加载这六个文件，缺失即无法部署。 /
+        # The Android native OpenJTalk loads exactly these six files; any gap blocks deployment.
         missing = [
             name for name in android_required
             if not (openjtalk.path / name).is_file()
@@ -487,6 +524,8 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         onnx, model, output_dir, frontend, profiles, sample_rate=sample_rate,
         tokens=metadata["tokens"],
     )
+    # deployment.json 是 Android 端加载模型的唯一契约来源。 /
+    # deployment.json is the single contract the Android side loads the model from.
     deployment = {
         "format": 2,
         "model_type": "multilingual-vits-piper-shaped",
@@ -556,6 +595,7 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
 
 
 def validate_onnx_runtime(model_path: str | Path) -> tuple[int, ...]:
+    """用 onnxruntime 对导出模型做冒烟推理校验并返回输出形状。 / Smoke-test the exported model with onnxruntime and return the output shape."""
     import onnxruntime as ort
     model_path = Path(model_path)
     deployment = json.loads(
@@ -580,6 +620,8 @@ def validate_onnx_runtime(model_path: str | Path) -> tuple[int, ...]:
     if output.ndim != 3 or output.shape[1] != 1 or output.shape[2] <= 0:
         raise RuntimeError(f"unexpected ONNX output shape: {output.shape}")
     if not np.isfinite(output).all():
+        # NaN/Inf 通常意味着图里残留了训练态算子或数值不稳定路径。 /
+        # NaN/Inf usually means a training-mode op leaked into the graph or an unstable numeric path.
         raise RuntimeError("ONNX output contains NaN or infinity")
     peak = float(np.max(np.abs(output)))
     if peak > 1.001:

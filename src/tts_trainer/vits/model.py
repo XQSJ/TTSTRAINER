@@ -1,3 +1,4 @@
+"""MultilingualVITS 模型定义与训练/推理前向。 / MultilingualVITS model and its train/infer forwards."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ def integer_durations(
     text_mask: torch.Tensor,
     length_scale: float | torch.Tensor,
 ) -> torch.Tensor:
-    """Convert predicted durations without systematically lengthening speech.
+    """把预测时长转为整数且不系统性拉长语音。 / Convert predicted durations without systematic lengthening.
 
     ``ceil`` turns a prediction just above one frame into two frames. Mobile
     Piper sequences contain many one-frame blank/phoneme tokens, so that bias
@@ -26,12 +27,15 @@ def integer_durations(
     learned MAS duration and still assigns every valid token at least one frame.
     """
     valid = text_mask.to(torch.bool)
+    # 四舍五入而非 ceil：保留 MAS 学到的时长，避免单向偏差 / Round instead of ceil to avoid one-sided bias
     rounded = torch.round(torch.exp(log_duration) * length_scale).to(torch.long)
+    # 有效 token 至少 1 帧，padding 恒为 0 / Valid tokens get >=1 frame; padding stays 0
     return torch.where(valid, rounded.clamp_min(1), torch.zeros_like(rounded))
 
 
 @dataclass
 class VitsTrainingOutput:
+    """标准训练阶段 forward 的输出张量集合。 / Outputs of the standard training forward."""
     audio: torch.Tensor
     attention: torch.Tensor
     duration_loss: torch.Tensor
@@ -61,7 +65,7 @@ class VitsRefinementOutput:
 
 
 class MultilingualVITS(nn.Module):
-    """Trainable multilingual, multi-speaker VITS generator.
+    """可训练的多语言多说话人 VITS 生成器。 / Trainable multilingual, multi-speaker VITS generator.
 
     Speaker and language identities are separate conditions. Even a one-speaker
     first release keeps both pathways so later checkpoints remain extensible.
@@ -104,11 +108,14 @@ class MultilingualVITS(nn.Module):
     def forward(self, tokens: torch.Tensor, text_lengths: torch.Tensor, spectrogram: torch.Tensor,
                 spec_lengths: torch.Tensor, language_ids: torch.Tensor,
                 speaker_ids: torch.Tensor) -> VitsTrainingOutput:
+        """教师强制训练前向：MAS 对齐 + 后验重建。 / Teacher-forced forward with MAS alignment."""
         g = self.conditioning(language_ids, speaker_ids)
         text_hidden, text_mean, text_log_scale, text_mask = self.text_encoder(tokens, text_lengths, g)
         latent, posterior_mean, posterior_log_scale, audio_mask = self.posterior_encoder(spectrogram, spec_lengths, g)
         latent_prior, _ = self.flow(latent, audio_mask, g)
 
+        # MAS 单调注意力搜索：scores 为逐帧对数似然， (B, T_text, T_spec)
+        # / Monotonic alignment search over per-frame log-likelihoods
         with torch.no_grad():
             difference = latent_prior.unsqueeze(3) - text_mean.unsqueeze(2)
             inv_variance = torch.exp(-2.0 * text_log_scale).unsqueeze(2)
@@ -129,6 +136,7 @@ class MultilingualVITS(nn.Module):
         )
         segment, starts = slice_latent(latent, spec_lengths, self.config.segment_frames)
         audio = self.decoder(segment, g)
+        # 只解码随机 latent 段，控制显存占用 / Decode a random latent segment to bound memory
         return VitsTrainingOutput(
             audio, attention, duration_loss, latent, latent_prior,
             expanded_mean, expanded_log_scale, posterior_mean, posterior_log_scale,
@@ -140,12 +148,14 @@ class MultilingualVITS(nn.Module):
               speaker_ids: torch.Tensor, noise_scale: float = 0.667,
               length_scale: float = 1.0, duration_noise_scale: float = 0.35,
               max_frames: int = 4000):
+        """纯文本推理（PyTorch 版）。 / Text-only inference (PyTorch path)."""
         g = self.conditioning(language_ids, speaker_ids)
         text_hidden, mean, log_scale, text_mask = self.text_encoder(tokens, text_lengths, g)
         log_duration = self.duration_predictor.sample(
             text_hidden, text_mask, g, duration_noise_scale,
         )
         durations = integer_durations(log_duration, text_mask, length_scale)
+        # 上限 max_frames 防御异常时长预测耗尽显存 / Cap frames so runaway durations cannot OOM
         frame_lengths = durations.sum((1, 2)).clamp_min(1).clamp_max(max_frames)
         frames = int(frame_lengths.max().item())
         attention = duration_path(durations, frames)

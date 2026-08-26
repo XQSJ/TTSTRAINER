@@ -1,3 +1,5 @@
+"""前端资源包导出：为每个语言生成可安装的依赖描述而不捆绑第三方运行时。 / Frontend pack export: emits installable per-language descriptors without bundling third-party runtimes."""
+
 from __future__ import annotations
 
 import hashlib
@@ -6,10 +8,11 @@ import shutil
 from pathlib import Path
 
 
-FRONTEND_PACK_FORMAT = 1
+FRONTEND_PACK_FORMAT = 1  # 资源包清单格式版本 / pack manifest format version
 
 
 def _requirements(profile: dict) -> list[dict]:
+    """把语言档案翻译成运行时+资源的依赖描述。 / Translate a language profile into runtime+resource requirements."""
     provider = str(profile["provider"])
     if provider == "espeak-ng":
         return [
@@ -52,19 +55,20 @@ def export_frontend_packs(
     model_sha256: str,
     espeak_data_dir: str | Path | None = None,
 ) -> dict:
-    """Export installable descriptors without bundling third-party runtimes.
+    """导出可安装的依赖描述，不捆绑第三方运行时。 / Export installable descriptors without bundling third-party runtimes.
 
+    声学模型和词表保留在根目录；每个语言目录只保存前端契约、依赖清单和一致性
+    向量，平台项目可以独立打包、下载或卸载，且不会复制共享模型权重。
     The acoustic model and vocabulary stay in the artifact root. Each language
     directory contains only its frozen frontend contract, required runtime
     resources, and conformance vectors. Platform projects may package or
     download those directories independently.
-
-    声学模型和词表保留在根目录；每个语言目录只保存前端契约、依赖清单和一致性
-    向量，平台项目可以独立打包、下载或卸载，且不会复制共享模型权重。
     """
     root = Path(output_dir) / "frontend-packs"
     root.mkdir(parents=True, exist_ok=True)
     shared = {}
+    # espeak 数据目录在多个语言之间共享，只复制到 _shared 一份。
+    # espeak data is shared across languages and copied once into _shared.
     if espeak_data_dir is not None:
         source = Path(espeak_data_dir)
         target = root / "_shared" / "espeak-ng" / "espeak-ng-data"
@@ -76,6 +80,8 @@ def export_frontend_packs(
         }
     all_cases = list((conformance or {}).get("cases") or [])
     languages = {}
+    # 按 language_id 排序导出，保证清单在多次构建间字节稳定。
+    # Export in language_id order so manifests stay byte-stable across builds.
     ordered = sorted(language_map.items(), key=lambda item: item[1])
     for language, language_id in ordered:
         profile = dict(frontend["languages"][language])
@@ -116,6 +122,8 @@ def export_frontend_packs(
             "requirements": _requirements(profile),
             "conformance": "conformance.json",
         }
+        # pack_id 是排序 JSON 的 sha256 前缀；任何契约/资源变化都会改 ID。
+        # pack_id hashes the sorted JSON, so any contract/resource change alters it.
         encoded = json.dumps(
             pack, ensure_ascii=False, sort_keys=True,
         ).encode("utf-8")

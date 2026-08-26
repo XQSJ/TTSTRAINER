@@ -1,3 +1,31 @@
+"""配置驱动的全流程总编排：数据 → 前端 → 训练 → 导出。
+
+run_pipeline 按以下阶段顺序执行（括号内为对应模块与函数）：
+
+    preflight        环境与配置自检
+        │
+    generate_texts   LLM 生成语料（text_generation.generate_texts）
+        │            ── 可选阶段；多音色（multi-speaker）时跳过
+    generate_samples Qwen3-TTS 教师蒸馏语音样本
+        │            （sample_generation.generate_samples）
+    phonemize        G2P 音素化 + 契约冻结
+        │            （frontend.phonemize_manifest）
+    validate         元数据/WAV/质量门校验
+    train            VITS GAN 训练（vits.trainer.train_vits）
+        │
+    export           Piper 形状 ONNX 导出
+                   （vits.exporter.export_vits_onnx）
+
+跳过条件：
+- task=prepare 时，phonemize 及之后阶段全部跳过（只准备数据）。
+- generate_texts 受 pipeline 配置开关控制，且多音色数据集不适用。
+- 各阶段均可由 pipeline 配置独立开关。
+
+English: run_pipeline is the config-driven orchestrator wiring every
+stage (preflight → generate_texts → generate_samples → phonemize →
+validate → train → export); task=prepare stops before phonemize.
+"""
+
 from __future__ import annotations
 
 import json
@@ -22,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Path:
-    """Run the configured dataset → frontend → train → export workflow."""
+    """执行配置驱动的完整工作流。 / Run the configured dataset → frontend → train → export workflow."""
     raw, layout = resolve_experiment(config_path)
     configure_logging_from_config(raw)
     prepare_experiment(layout, raw, config_path)
@@ -31,9 +59,12 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
     text_generation = raw.get("text_generation", {})
     task = raw.get("task", "train")
     multiple_voices = bool(generation.get("voices"))
+    # 组装启用阶段列表；task=prepare 跳过 phonemize 及其后的训练阶段。
+    # Assemble the stage list; task=prepare skips phonemize and all training stages.
     active_stages = ["preflight"]
     if stages.get("generate_texts", True) \
             and text_generation.get("enabled", False) and not multiple_voices:
+        # 多音色配置的文本已按音色管理，文本生成阶段不适用。 / Multi-voice configs manage per-voice texts already.
         active_stages.append("generate_texts")
     if stages.get("generate_samples", True) and generation.get("enabled", True):
         active_stages.append("generate_samples")
@@ -53,6 +84,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
     )
 
     def stage_started(name: str, description: str) -> float:
+        """打印阶段横幅并返回计时起点。 / Log the stage banner and return the timer origin."""
         log_section(
             logger,
             f"STAGE {stage_numbers[name]}/{len(active_stages)}  {name.upper()}",
@@ -61,6 +93,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
         return time.monotonic()
 
     def stage_completed(name: str, started: float, detail: str) -> None:
+        """记录阶段耗时与结果摘要。 / Log elapsed time and the stage detail."""
         elapsed = time.monotonic() - started
         logger.info(
             "STAGE DONE %d/%d | %s | elapsed=%s | %s",
@@ -110,6 +143,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
     if stages.get("generate_texts", True) \
             and text_generation.get("enabled", False) and not multiple_voices:
         stage_time = stage_started("generate_texts", "prepare or reuse multilingual training texts")
+        # generate_texts 内部自行复用已生成文本，实现断点续跑。 / generate_texts reuses existing texts for resumability.
         text_manifest = generate_texts(config_path)
         report["stages"]["generate_texts"] = str(text_manifest.resolve())
         stage_completed("generate_texts", stage_time, f"output={text_manifest}")
@@ -119,6 +153,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
     raw_metadata = Path(generation.get("raw_metadata") or layout.dataset_dir / "metadata.csv")
     if stages.get("generate_samples", True) and generation.get("enabled", True):
         stage_time = stage_started("generate_samples", "generate or reuse teacher WAV samples")
+        # 多音色时文本由各音色自带，不传统一清单。 / Multi-voice runs carry per-voice texts, no shared manifest.
         raw_metadata = generate_samples(
             config_path,
             text_manifest_path=None if multiple_voices else text_manifest,
@@ -130,6 +165,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
 
     if task == "train" and stages.get("phonemize", True):
         stage_time = stage_started("phonemize", "normalize text and convert it to language-specific phonemes")
+        # 前端由训练配置解析，保证音素与训练时一致。 / The frontend is resolved from the training config for phoneme consistency.
         frontend = frontend_from_config(
             raw.get("frontend"), languages=layout.languages,
             language_registry=raw.get("language_registry"),
@@ -149,6 +185,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
             require_phonemes=bool(raw.get("frontend", {}).get("require_phonemes", True)),
             supported_languages=layout.language_specs,
         )
+        # 双向核对：多余语言和缺失语言都视为配置错误。 / Check both directions: extra and missing languages fail.
         outside = sorted({item.language for item in validation.items} - set(layout.languages))
         if outside:
             raise ValueError(
@@ -172,6 +209,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
     checkpoint = layout.checkpoints_dir / "last"
     if task == "train" and stages.get("train", True):
         stage_time = stage_started("train", "quality gate, dataset split and VITS optimization")
+        # 训练内部处理质量门控、数据切分与断点续训。 / Training itself handles quality gating, splitting and resume.
         checkpoint = train_vits(str(config_path), max_steps=max_steps)
         report["stages"]["train"] = str(checkpoint.resolve())
         stage_completed("train", stage_time, f"checkpoint={checkpoint}")
@@ -187,6 +225,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
         if preferred.is_dir():
             checkpoint = preferred
         elif requested_checkpoint == "best":
+            # best 缺失时回退 last 并告警。 / Fall back to last with a warning when best is missing.
             logger.warning("best checkpoint is unavailable; exporting last checkpoint")
         model = export_vits_onnx(checkpoint, layout.artifacts_dir,
                                  sample_rate=int(raw["audio"]["sample_rate"]))
@@ -199,6 +238,7 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
         report["stages"]["export"] = "skipped"
 
     report["finished_at"] = datetime.now(timezone.utc).isoformat()
+    # 汇总报告记录每个阶段的输出或 skipped，供断点与审计使用。 / The report records per-stage outputs or skips for audit/resume.
     destination = layout.run_dir / "pipeline-report.json"
     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     log_section(

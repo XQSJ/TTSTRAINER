@@ -1,9 +1,12 @@
+"""语言规格定义与注册表解析。 / Language specs and registry resolution."""
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
 
+# 默认训练语言与 Qwen 教师支持的语言名称集合。
+# Default training languages and the names Qwen's teacher understands.
 DEFAULT_TRAINING_LANGUAGES = ("zh", "en", "ja", "ko", "fr", "es", "pt")
 QWEN_SUPPORTED_LANGUAGE_NAMES = {
     "Chinese", "English", "Japanese", "Korean", "German",
@@ -14,6 +17,7 @@ LANGUAGE_CODE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 
 @dataclass(frozen=True)
 class LanguageSpec:
+    """单个语言的教学与前端配置规格。 / Teacher and frontend configuration for one language."""
     code: str
     name: str
     teacher_provider: str | None
@@ -24,11 +28,13 @@ class LanguageSpec:
 
     @property
     def frontend_voice(self) -> str:
-        """Compatibility label used by logs and older callers."""
+        """日志与旧调用方使用的兼容标签。 / Compatibility label used by logs and older callers."""
         return self.frontend_profile.get("voice", self.frontend_profile.get("dictionary", ""))
 
     @classmethod
     def from_dict(cls, code: str, raw: dict) -> "LanguageSpec":
+        """从原始配置字典构建并严格校验语言规格。 / Build and strictly validate a spec from a raw config dict."""
+        # 语言码统一小写并做形状校验。 / Normalize the code to lowercase and validate its shape.
         code = code.strip().lower()
         if not LANGUAGE_CODE.fullmatch(code):
             raise ValueError(f"invalid language code: {code!r}")
@@ -51,7 +57,12 @@ class LanguageSpec:
             for key, value in frontend.items()
             if key != "provider" and value is not None and str(value).strip()
         }
+        # espeak-ng 必须显式给出 voice。 / espeak-ng requires an explicit voice.
         if provider == "espeak-ng" and not profile.get("voice"):
+            raise ValueError(f"language {code}: frontend.voice must not be empty")
+        # 日语 OpenJTalk 未指定词典时使用默认版本。 / Japanese OpenJTalk falls back to the default dictionary version.
+        if provider == "openjtalk":
+            profile.setdefault("dictionary", "open_jtalk_dic_utf_8-1.11")
             raise ValueError(f"language {code}: frontend.voice must not be empty")
         if provider == "openjtalk":
             profile.setdefault("dictionary", "open_jtalk_dic_utf_8-1.11")
@@ -94,6 +105,7 @@ class LanguageSpec:
         )
 
     def to_dict(self) -> dict:
+        """序列化为配置字典。 / Serialize back to a config dict."""
         return {
             "name": self.name,
             "teacher": None if self.teacher_provider is None else {
@@ -108,6 +120,7 @@ class LanguageSpec:
         }
 
 
+# 内置语言注册表原始数据。 / Raw built-in language registry.
 BUILTIN_LANGUAGE_REGISTRY_RAW = {
     "zh": {"name": "Chinese", "teacher": {"provider": "qwen", "language": "Chinese"},
            "frontend": {"provider": "piper-plus-g2p", "profile": "mandarin-ipa-v1", "resource": "pypinyin-rules-v1"}, "smoke_text": "你好，欢迎使用语音系统。"},
@@ -133,9 +146,11 @@ BUILTIN_LANGUAGE_REGISTRY_RAW = {
 
 
 def resolve_language_registry(overrides: dict | None = None) -> dict[str, LanguageSpec]:
+    """在内置注册表上应用覆盖并生成规格。 / Apply overrides on the built-in registry and build specs."""
     raw = {code: dict(value) for code, value in BUILTIN_LANGUAGE_REGISTRY_RAW.items()}
     for code, value in (overrides or {}).items():
         if value is None:
+            # None 表示整条删除该语言。 / None removes the language entirely.
             raw.pop(code, None)
         else:
             previous = raw.get(code, {})
@@ -149,6 +164,7 @@ def resolve_language_registry(overrides: dict | None = None) -> dict[str, Langua
 
 
 def language_specs_for(registry: dict[str, LanguageSpec], languages) -> dict[str, LanguageSpec]:
+    """取出所需语言的规格，未注册则报错。 / Fetch specs for the requested languages, failing on unregistered codes."""
     missing = sorted(set(languages) - set(registry))
     if missing:
         raise ValueError(

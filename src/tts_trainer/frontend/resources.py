@@ -1,3 +1,5 @@
+"""前端资源管理：下载并校验 Open JTalk 词典、韩语 CMU 词典等外部资源。 / Frontend resources: download and verify Open JTalk dictionaries, Korean CMU dict and other external resources."""
+
 from __future__ import annotations
 
 import hashlib
@@ -17,13 +19,17 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_FRONTENDS_ROOT = PROJECT_ROOT / "models" / "frontends"
+DEFAULT_FRONTENDS_ROOT = PROJECT_ROOT / "models" / "frontends"  # 资源默认存放根目录 / default resource root
 OPENJTALK_DICTIONARY_NAME = "open_jtalk_dic_utf_8-1.11"
+# 下载源与 sha256 固定配对，校验失败即删除避免污染缓存。
+# Download URLs pair with pinned sha256 digests; failures delete the file to keep the cache clean.
 OPENJTALK_DICTIONARY_URL = (
     "https://github.com/r9y9/open_jtalk/releases/download/v1.11.1/"
     "open_jtalk_dic_utf_8-1.11.tar.gz"
 )
 OPENJTALK_DICTIONARY_SHA256 = "fe6ba0e43542cef98339abdffd903e062008ea170b04e7e2a35da805902f382a"
+# 词典就绪的最低文件集合，缺任一即视为不完整。
+# Minimal file set for a ready dictionary; any gap means incomplete.
 OPENJTALK_REQUIRED_FILES = ("char.bin", "matrix.bin", "sys.dic", "unk.dic")
 KOREAN_CMU_DICT_URL = (
     "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/"
@@ -35,6 +41,8 @@ KOREAN_CMU_DICT_MEMBER = "cmudict/cmudict"
 
 @dataclass(frozen=True)
 class FrontendResourceStatus:
+    """单个前端资源的就绪状态与缺失项。 / Readiness status and missing items for one frontend resource."""
+
     key: str
     path: Path
     ready: bool
@@ -43,15 +51,18 @@ class FrontendResourceStatus:
 
 
 def frontends_root() -> Path:
+    """返回资源根目录（可用环境变量覆盖）。 / Return the resource root, overridable by environment."""
     override = os.environ.get("TTS_TRAINER_FRONTENDS_DIR")
     return Path(override).expanduser().resolve() if override else DEFAULT_FRONTENDS_ROOT
 
 
 def openjtalk_dictionary_path(root: Path | None = None) -> Path:
+    """返回 Open JTalk 词典目录路径。 / Return the Open JTalk dictionary directory path."""
     return (root or frontends_root()) / "openjtalk" / OPENJTALK_DICTIONARY_NAME
 
 
 def inspect_openjtalk_dictionary(root: Path | None = None) -> FrontendResourceStatus:
+    """检查 Open JTalk 词典是否完整就绪。 / Check whether the Open JTalk dictionary is complete and ready."""
     path = openjtalk_dictionary_path(root)
     missing = tuple(name for name in OPENJTALK_REQUIRED_FILES if not (path / name).is_file())
     size = sum(file.stat().st_size for file in path.rglob("*") if file.is_file()) if path.exists() else 0
@@ -67,6 +78,7 @@ def korean_cmudict_path(root: Path | None = None) -> Path:
 
 
 def inspect_korean_cmudict(root: Path | None = None) -> FrontendResourceStatus:
+    """校验韩语 CMU 词典存在且 sha256 匹配。 / Verify the Korean CMU dict exists with a matching sha256."""
     path = korean_cmudict_path(root)
     valid = path.is_file() and _sha256(path) == KOREAN_CMU_DICT_SHA256
     missing = () if valid else ("corpora/cmudict.zip (missing or checksum mismatch)",)
@@ -76,6 +88,7 @@ def inspect_korean_cmudict(root: Path | None = None) -> FrontendResourceStatus:
 
 @contextmanager
 def _download_lock(root: Path, name: str = "openjtalk-dictionary"):
+    """O_EXCL 锁文件保证同一资源同时只有一个下载进程。 / An O_EXCL lock file so only one process downloads a resource at a time."""
     root.mkdir(parents=True, exist_ok=True)
     lock = root / f".{name}.download.lock"
     try:
@@ -99,6 +112,7 @@ def _sha256(path: Path) -> str:
 
 
 def _safe_extract(archive: Path, destination: Path) -> Path:
+    """防路径穿越地解压词典压缩包并定位词典目录。 / Safely extract the dictionary tarball against path traversal and locate its directory."""
     destination_resolved = destination.resolve()
     with tarfile.open(archive, "r:gz") as source:
         members = source.getmembers()
@@ -119,6 +133,7 @@ def _safe_extract(archive: Path, destination: Path) -> Path:
 
 
 def ensure_openjtalk_dictionary(root: Path | None = None, *, allow_download: bool = True) -> Path:
+    """确保 Open JTalk 词典就绪，必要时带锁下载并校验。 / Ensure the Open JTalk dictionary is ready, downloading under a lock if needed."""
     destination_root = root or frontends_root()
     status = inspect_openjtalk_dictionary(destination_root)
     if status.ready:
@@ -131,6 +146,8 @@ def ensure_openjtalk_dictionary(root: Path | None = None, *, allow_download: boo
         )
     resource_root = destination_root / "openjtalk"
     with _download_lock(resource_root):
+        # 双重检查：等锁期间其他进程可能已完成下载。
+        # Double-check: another process may have finished while we waited.
         status = inspect_openjtalk_dictionary(destination_root)
         if status.ready:
             return status.path
@@ -150,6 +167,8 @@ def ensure_openjtalk_dictionary(root: Path | None = None, *, allow_download: boo
                 shutil.rmtree(status.path)
             shutil.move(str(extracted), str(status.path))
         archive.unlink(missing_ok=True)
+        # 先解压到临时目录再原子移动，解压中断不会破坏现有词典。
+        # Extract into a temp dir then atomically move, so interrupts never corrupt the dictionary.
         completed = inspect_openjtalk_dictionary(destination_root)
         if not completed.ready:
             raise RuntimeError(
@@ -172,7 +191,7 @@ def ensure_openjtalk_dictionary(root: Path | None = None, *, allow_download: boo
 
 
 def ensure_korean_cmudict(root: Path | None = None, *, allow_download: bool = True) -> Path:
-    """Ensure g2pk2's CMU dictionary is present in the project, never globally."""
+    """确保 g2pk2 的 CMU 词典存在于项目内而非全局。 / Ensure g2pk2's CMU dictionary is present in the project, never globally."""
     destination_root = root or frontends_root()
     status = inspect_korean_cmudict(destination_root)
     if status.ready:
@@ -184,6 +203,7 @@ def ensure_korean_cmudict(root: Path | None = None, *, allow_download: bool = Tr
         )
     resource_root = destination_root / "korean"
     with _download_lock(resource_root, "korean-cmudict"):
+        # 等锁后重查，避免重复下载。 / Re-check after acquiring the lock to avoid duplicate downloads.
         status = inspect_korean_cmudict(destination_root)
         if status.ready:
             return korean_nltk_data_path(destination_root)

@@ -1,3 +1,5 @@
+"""文本切分：按标点与音素预算把长文本拆成独立推理请求。 / Text chunking: split long text into independent inference requests by punctuation and phoneme budget."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,7 +15,7 @@ _CLOSING_MARKS = frozenset("\"'”’）》】」』〕〉）]")
 
 @dataclass(frozen=True)
 class TextChunk:
-    """One independently phonemized inference request and its following pause."""
+    """一个独立音素化的推理请求及其后停顿。 / One independently phonemized inference request and its following pause."""
 
     text: str
     units: tuple[str, ...]
@@ -21,7 +23,7 @@ class TextChunk:
 
 
 def _is_period_boundary(text: str, index: int) -> bool:
-    """Treat a period as punctuation, except inside a decimal number."""
+    """把句点视为标点，但小数点除外。 / Treat a period as punctuation, except inside a decimal number."""
     previous = text[index - 1] if index else ""
     following = text[index + 1] if index + 1 < len(text) else ""
     return not (previous.isdigit() and following.isdigit())
@@ -42,7 +44,7 @@ def _boundary_kind(text: str) -> str:
 
 
 def _punctuation_pieces(text: str) -> list[str]:
-    """Keep original whitespace while exposing natural sentence boundaries."""
+    """保留原始空白的同时暴露自然句读边界。 / Keep original whitespace while exposing natural sentence boundaries."""
     pieces: list[str] = []
     start = 0
     for index, character in enumerate(text):
@@ -57,7 +59,7 @@ def _punctuation_pieces(text: str) -> list[str]:
 
 
 def _fallback_pieces(text: str) -> list[str]:
-    """Prefer word boundaries; CJK or a single long word falls back to codepoints."""
+    """优先按词边界切分；CJK 或单个超长词退化为码点。 / Prefer word boundaries; CJK or a single long word falls back to codepoints."""
     words: list[str] = []
     start = 0
     inside_word = False
@@ -82,8 +84,9 @@ def chunk_text(
     *,
     max_phoneme_tokens: int = 90,
 ) -> list[TextChunk]:
-    """Split text by punctuation and enforce a phoneme-token inference budget.
+    """按标点切分文本并施加音素 token 推理预算。 / Split text by punctuation and enforce a phoneme-token inference budget.
 
+    文本长度在跨语言场景下不可靠：一个汉字或一个带音符的拉丁字母都可能扩展为多个前端单元，因此每个候选块都用模型实际使用的前端度量。
     Text length is a poor proxy across languages: one Chinese character or one
     accented Latin letter may expand into several frontend units.  Each proposed
     chunk is therefore measured with the exact frontend used by the model.
@@ -141,7 +144,7 @@ def chunk_text(
         return fitted
 
     def fit_codepoints(value: str) -> list[str]:
-        """Binary-search bounded prefixes to avoid one G2P process per character."""
+        """二分搜索有界前缀，避免每个字符跑一次 G2P。 / Binary-search bounded prefixes to avoid one G2P process per character."""
         fitted: list[str] = []
         remaining = value
         while remaining:

@@ -1,3 +1,5 @@
+"""checkpoint 保存/加载与格式兼容性守卫。 / Save/load checkpoints and guard format compatibility."""
+
 from __future__ import annotations
 
 import json
@@ -13,6 +15,7 @@ from pathlib import Path
 CHECKPOINT_FORMAT = 4
 WARM_START_FORMATS = frozenset((3, CHECKPOINT_FORMAT))
 TRAINING_OBJECTIVE = "standard-vits-mel-kl-duration-gan-feature-v1"
+# 训练目标标识：加载时与 checkpoint 记录不一致即拒绝。 / Objective tag: mismatched checkpoints are rejected on load.
 
 
 def inherit_resume_best_checkpoint(
@@ -26,8 +29,10 @@ def inherit_resume_best_checkpoint(
     source = Path(checkpoint)
     target = Path(destination)
     if target.exists():
+        # 目标已存在则视为继承已完成，幂等返回。 / Already inherited; return idempotently.
         return target
     best_epoch = int(selection["best_epoch"])
+    # 续训目录本身或其旁的 best/ 都可能是历史 best 的位置。 / The resume dir itself or its sibling best/ may hold the historic best.
     candidates = (source, source.parent / "best")
     source_best = None
     for candidate in candidates:
@@ -56,6 +61,7 @@ def inherit_resume_best_checkpoint(
 
 
 def require_checkpoint_format(value: int) -> None:
+    """按格式版本拒绝不可直接续训的 checkpoint。 / Reject checkpoints too old to resume directly."""
     if value == 1:
         raise ValueError(
             "checkpoint format 1 has an untrained text prior and produces noisy "
@@ -101,6 +107,7 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
                              optimizer_refinement=None,
                              scheduler_refinement=None,
                              training_phase: dict | None = None) -> Path:
+    """原子保存训练权重与元数据。 / Atomically save training weights plus metadata."""
     import torch
     destination = Path(directory)
     destination.mkdir(parents=True, exist_ok=True)
@@ -124,6 +131,7 @@ def save_training_checkpoint(directory: str | Path, *, generator, discriminator,
         "training_phase": training_phase,
         "scaler": scaler.state_dict() if scaler else None,
     }
+    # 先写临时文件再原子替换，避免中断产生损坏的权重。 / Write to a temp file and swap atomically to avoid corruption on interrupt.
     temporary = destination / "training-state.pt.tmp"
     torch.save(state, temporary)
     temporary.replace(destination / "training-state.pt")
@@ -160,10 +168,12 @@ def load_training_checkpoint(directory: str | Path, *, generator, discriminator=
                              scheduler_d=None, scaler=None, map_location="cpu",
                              optimizer_refinement=None,
                              scheduler_refinement=None) -> dict:
+    """加载 checkpoint，校验格式与训练目标后按需恢复各组件。 / Load a checkpoint, validate format/objective, restore requested components."""
     import torch
     source = Path(directory)
     metadata = json.loads((source / "metadata.json").read_text(encoding="utf-8"))
     state = torch.load(source / "training-state.pt", map_location=map_location, weights_only=False)
+    # 元数据与权重文件双端校验，防止单边被篡改。 / Validate both metadata and weights files to catch one-sided edits.
     require_checkpoint_format(int(metadata["format"]))
     require_checkpoint_format(int(state["format"]))
     for label, payload in (("metadata", metadata), ("training state", state)):

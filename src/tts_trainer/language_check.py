@@ -1,3 +1,4 @@
+"""语言支持检查：教师映射与前端冒烟。 / Language support checks: teacher mapping and frontend smoke test."""
 from __future__ import annotations
 
 import unicodedata
@@ -7,6 +8,7 @@ from .experiments import ExperimentLayout
 from .frontend import frontend_from_config
 
 
+# eSpeak 对未知 CJK 字符的英文念白音素签名。 / Phone signatures of eSpeak's English reading of unknown CJK codepoints.
 _UNICODE_FALLBACK_PHONES = {
     "chinese-letter": "tʃaɪnizletə",
     "japanese-letter": "dʒapənizletə",
@@ -14,20 +16,22 @@ _UNICODE_FALLBACK_PHONES = {
 
 
 def detect_unicode_name_fallback(language: str, phonemes) -> str | None:
-    """Detect eSpeak spelling an unsupported CJK codepoint by Unicode name.
+    """检测 eSpeak 把不支持的中日韩字符读成 Unicode 英文名称。 / Detect eSpeak spelling an unsupported CJK codepoint by Unicode name.
+
+    eSpeak 的日语嗓音会把未知汉字念成英文短语 "Chinese letter"。该输出虽然是合法 IPA，
+    但仅靠供应商与语言切换检查无法发现；若拿去训练，会让许多不同字符坍缩到同一音素序列，
+    破坏文本到先验的映射，必须在训练前失败。
 
     eSpeak's Japanese voice can pronounce unknown kanji as the English phrase
     "Chinese letter". That output is syntactically valid IPA, so provider and
     language-switch checks alone cannot catch it. Training on it destroys the
     text-to-prior mapping because many different characters collapse to the
     same phone sequence.
-
-    检测 eSpeak 把不支持的中日韩字符读成 Unicode 英文名称。该输出虽然是合法 IPA，
-    但会让不同汉字坍缩成同一音素序列，必须在训练前失败。
     """
     if language not in {"zh", "ja", "ko"}:
         return None
     compact = "".join(str(phone) for phone in phonemes)
+    # 去掉变音符号与韵律标记再做子串匹配。 / Strip diacritics and prosody marks before substring matching.
     compact = "".join(
         character for character in unicodedata.normalize("NFD", compact)
         if not unicodedata.combining(character)
@@ -41,6 +45,7 @@ def detect_unicode_name_fallback(language: str, phonemes) -> str | None:
 
 @dataclass(frozen=True)
 class LanguageStatus:
+    """单语言的就绪检查结果。 / Readiness check result for one language."""
     code: str
     name: str
     selected: bool
@@ -54,12 +59,14 @@ class LanguageStatus:
     error: str | None
 
     def to_dict(self) -> dict:
+        """序列化为普通字典。 / Serialize to a plain dict."""
         return asdict(self)
 
 
 def check_language_support(raw: dict, layout: ExperimentLayout, codes=None,
                            *, run_smoke: bool = True,
                            require_teacher: bool | None = None) -> list[LanguageStatus]:
+    """逐语言检查教师映射与前端音素化。 / Check teacher mapping and frontend phonemization per language."""
     requested = tuple(codes or layout.languages)
     unknown = sorted(set(requested) - set(layout.language_registry))
     if unknown:
@@ -89,6 +96,7 @@ def check_language_support(raw: dict, layout: ExperimentLayout, codes=None,
         frontend_version = None
         error = frontend_error
         if error is None and run_smoke:
+            # 冒烟：音素化样例文本并拦截 Unicode 名称回退念白。 / Smoke test: phonemize sample text and trap Unicode-name fallback speech.
             try:
                 frontend_version = frontend.version_for(code)
                 phonemes = frontend.phonemize(spec.smoke_text, code)
@@ -121,6 +129,7 @@ def check_language_support(raw: dict, layout: ExperimentLayout, codes=None,
 
 
 def format_language_statuses(statuses: list[LanguageStatus]) -> str:
+    """把检查结果渲染为对齐的文本表格。 / Render statuses as an aligned text table."""
     header = f"{'CODE':<7} {'TEACHER':<24} {'G2P PROFILE':<26} {'STATUS':<8} DETAILS"
     rows = [header, "-" * len(header)]
     for row in statuses:

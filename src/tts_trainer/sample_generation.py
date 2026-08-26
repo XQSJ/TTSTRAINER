@@ -1,3 +1,8 @@
+"""调用 Qwen3-TTS 教师模型生成语音样本，为 VITS 学生模型蒸馏训练数据。 / Drive the Qwen3-TTS teacher to synthesize speech samples for student-model distillation.
+
+管理共享音色数据集缓存、参考音频策略与最终 metadata 组装。 / Manages the shared voice-dataset cache, reference-audio strategies, and final metadata assembly.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -32,17 +37,22 @@ from .text_generation import generate_texts, text_corpus_path
 
 
 logger = logging.getLogger(__name__)
+# 公开音色 ID 的合法字符集（用于目录名与配置校验）。 / Valid charset for public voice IDs (used as directory names and validated in configs).
 VOICE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
 class GenerationText:
+    """一条待合成的文本及其语言。 / One text to synthesize with its language."""
+
     text: str
     language: str
 
 
 @dataclass(frozen=True)
 class GenerationJob:
+    """单条音频生成任务：文本、候选序号与输出路径。 / One audio job: text, candidate index, and output path."""
+
     item: GenerationText
     candidate: int
     output: Path
@@ -50,12 +60,14 @@ class GenerationJob:
 
 @dataclass(frozen=True)
 class RegenerationPlan:
+    """按语言选择性失效缓存的计划。 / Per-language selective cache invalidation plan."""
+
     audio_languages: frozenset[str]
     reference_languages: frozenset[str]
 
 
 class _BatchHeartbeat:
-    """Report a slow synchronous Qwen call without pretending it has stalled."""
+    """在同步 Qwen 调用耗时过久时周期性打点，而不是误报停滞。 / Report a slow synchronous Qwen call periodically without pretending it has stalled."""
 
     def __init__(self, *, batch_number: int, language: str, interval: float):
         self.batch_number = batch_number
@@ -66,6 +78,7 @@ class _BatchHeartbeat:
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self) -> None:
+        # 后台心跳线程：间隔到期仍未停止就告警一次。 / Heartbeat thread: warn once per interval while the batch is still running.
         while not self.stopped.wait(self.interval):
             logger.warning(
                 "AUDIO BATCH STILL RUNNING | batch=%d | language=%s | "
@@ -84,6 +97,7 @@ class _BatchHeartbeat:
 
 
 def _file_sha256(path: Path) -> str:
+    """流式计算文件 SHA-256。 / Stream-compute a file's SHA-256."""
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -94,8 +108,9 @@ def _file_sha256(path: Path) -> str:
 def _regeneration_plan(
     voice: dict, generation: dict, languages: tuple[str, ...],
 ) -> RegenerationPlan:
-    """Resolve selective cache invalidation while preserving legacy behavior."""
+    """解析按语言选择性失效缓存的计划，同时保留旧字段行为。 / Resolve selective cache invalidation while preserving legacy behavior."""
     settings = voice.get("regenerate")
+    # 旧版整音色重生成开关，与新版 regenerate 结构互斥。 / Legacy whole-voice regenerate switch; mutually exclusive with the newer regenerate object.
     legacy_audio = bool(
         voice.get("regenerate_audio", generation.get("overwrite", False))
     )
@@ -140,6 +155,7 @@ def _regeneration_plan(
             'dataset.voice.regenerate.languages must be "all" or a non-empty array'
         )
     if references and not audio:
+        # 参考重生成必须连带音频重生成，避免新旧参考混入同一批训练 WAV。 / Reference regen requires audio regen so old training WAVs never mix with a new reference.
         raise ValueError(
             "reference regeneration also requires regenerate.audio=true so old "
             "training WAVs are not mixed with a new language reference"
@@ -153,7 +169,7 @@ def _regeneration_plan(
 def _invalidate_language_references(
     references: Path, voice: dict, languages: frozenset[str],
 ) -> None:
-    """Remove only derived language references; never replace the voice anchor."""
+    """只删除派生的语言参考，绝不替换音色主锚点。 / Remove only derived language references; never replace the voice anchor."""
     if not languages:
         return
     if str(voice.get("mode") or "") != "design":
@@ -169,6 +185,7 @@ def _invalidate_language_references(
             "shared strategy has only the immutable master reference; use a new "
             "voice_id to replace it, or regenerate audio while preserving it"
         )
+    # cascade 策略产物名为 localized-*，其余为 designed-*。 / Cascade artifacts are named localized-*, others designed-*.
     prefix = "localized" if strategy == "cascade" else "designed"
     removed = []
     for language in sorted(languages):
@@ -186,13 +203,14 @@ def _invalidate_language_references(
 
 
 def _voice_identity(raw: dict, generation: dict, voice: dict) -> dict:
-    """Return the immutable settings owned by one public voice ID."""
+    """返回一个公开音色 ID 拥有的不可变设置（用于身份锁）。 / Return the immutable settings owned by one public voice ID (used for the identity lock)."""
     mode = str(voice.get("mode") or "")
     reference_strategy = str(
         voice.get("reference_strategy", "shared")
     ).strip().lower()
     reference_identity = None
     if mode == "clone" and voice.get("reference_audio"):
+        # 克隆模式以参考音频内容哈希作为身份指纹，防止悄悄换源。 / Clone mode fingerprints the reference audio by content hash so it cannot be silently swapped.
         reference_path = Path(voice["reference_audio"]).expanduser()
         if not reference_path.is_file():
             raise FileNotFoundError(f"reference audio does not exist: {reference_path}")
@@ -230,6 +248,7 @@ def _voice_identity(raw: dict, generation: dict, voice: dict) -> dict:
 
 
 def _identity_digest(identity: dict) -> str:
+    """对身份字典做规范化 JSON 后取 SHA-256。 / Canonical-JSON the identity dict and hash it with SHA-256."""
     encoded = json.dumps(
         identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
     ).encode("utf-8")
@@ -237,12 +256,13 @@ def _identity_digest(identity: dict) -> str:
 
 
 def _move_tree(source: Path, destination: Path) -> None:
-    """Move a legacy tree without replacing a different cached file."""
+    """迁移旧目录树且不覆盖内容不同的缓存文件。 / Move a legacy tree without replacing a different cached file."""
     if not source.is_dir():
         return
     if not destination.exists():
         source.replace(destination)
         return
+    # 逐文件合并：同名且哈希一致才允许并存，否则视为冲突报错。 / Merge file-by-file: same-name files must hash-identical, otherwise conflict.
     for path in sorted(source.rglob("*")):
         if path.is_dir():
             continue
@@ -265,7 +285,7 @@ def _move_tree(source: Path, destination: Path) -> None:
 
 
 def _canonicalize_reference_names(references: Path) -> None:
-    """Remove the model-internal speaker label from shared reference paths."""
+    """从共享参考路径中去掉模型内部 speaker 标签。 / Remove the model-internal speaker label from shared reference paths."""
     if not references.is_dir():
         return
     designed = references / "designed.wav"
@@ -281,7 +301,7 @@ def _canonicalize_reference_names(references: Path) -> None:
 
 
 def _write_legacy_voice_alias(legacy: Path, destination: Path, previous: dict) -> None:
-    """Keep old metadata paths working after moving WAVs to the voice-ID root."""
+    """WAV 迁移到音色 ID 根目录后，保留旧 metadata 路径可用。 / Keep old metadata paths working after moving WAVs to the voice-ID root."""
     legacy.mkdir(parents=True, exist_ok=True)
     for name in ("references", "wavs"):
         target = destination / name
@@ -298,7 +318,7 @@ def _write_legacy_voice_alias(legacy: Path, destination: Path, previous: dict) -
 
 def _voice_dataset(raw: dict, layout, generation: dict,
                    voice: dict) -> tuple[str, Path, dict]:
-    """Resolve the append-only shared dataset owned by public dataset.voice.id."""
+    """解析由公开 dataset.voice.id 拥有的追加式共享音色数据集。 / Resolve the append-only shared dataset owned by public dataset.voice.id."""
     voice_id = str(voice.get("id") or "").strip()
     if not voice_id:
         raise ValueError(
@@ -342,6 +362,7 @@ def _voice_dataset(raw: dict, layout, generation: dict,
         )
 
     if record.is_file():
+        # 身份锁：同一 voice_id 不允许换用不同的音色设置。 / Identity lock: one voice_id may never switch to different voice settings.
         existing = json.loads(record.read_text(encoding="utf-8"))
         if existing.get("identity") != identity:
             raise ValueError(
@@ -369,6 +390,7 @@ def _voice_dataset(raw: dict, layout, generation: dict,
                 f"voice_id {voice_id!r} contains audio without a voice.json identity lock: "
                 f"{destination}; move it aside or restore its voice.json before generating"
             )
+        # 先写临时文件再原子替换，避免中途崩溃留下半个身份锁。 / Write to a temp file then atomically replace so a crash never leaves a half-written lock.
         temporary = record.with_suffix(".json.tmp")
         temporary.write_text(json.dumps({
             "format": 2,
@@ -383,6 +405,7 @@ def _voice_dataset(raw: dict, layout, generation: dict,
 
 def _sample_filename(item: GenerationText, candidate: int,
                      teacher_language: str) -> str:
+    """由文本/语言/候选/教师语言的规范化 JSON 哈希出内容寻址文件名。 / Hash canonical JSON of text/lang/candidate/teacher-language into a content-addressed filename."""
     encoded = json.dumps({
         "language": item.language,
         "text": item.text,
@@ -393,6 +416,7 @@ def _sample_filename(item: GenerationText, candidate: int,
 
 
 def read_generation_texts(path: str | Path, supported_languages=None) -> list[GenerationText]:
+    """读取生成文本清单 CSV（text/language 两列）并做严格校验。 / Read the generation-text manifest CSV (text/language columns) with strict validation."""
     source = Path(path)
     supported = None if supported_languages is None else set(supported_languages)
     with source.open(newline="", encoding="utf-8-sig") as stream:
@@ -415,17 +439,21 @@ def read_generation_texts(path: str | Path, supported_languages=None) -> list[Ge
 
 
 def _runtime_kwargs(config: dict, inherited_device: str = "auto") -> tuple[str, dict]:
+    """推断教师模型运行设备/精度/注意力实现。 / Infer device, dtype, and attention implementation for the teacher runtime."""
     runtime = config.get("runtime", {})
     requested = runtime.get("device", "auto")
+    # 顶层实验的设备选择可作为 auto 的兜底。 / The experiment-level device acts as the fallback for auto.
     if requested == "auto" and inherited_device != "auto":
         requested = inherited_device
     if requested == "auto":
+        # auto 优先级：CUDA > MPS > CPU。 / auto priority: CUDA > MPS > CPU.
         device = "cuda:0" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     else:
         device = requested
 
     dtype_name = runtime.get("dtype", "auto")
     if dtype_name == "auto":
+        # auto 精度：CUDA 上 bf16（不支持则 fp16），其余 fp32。 / auto dtype: bf16 on CUDA (fp16 fallback), fp32 elsewhere.
         dtype = torch.bfloat16 if device.startswith("cuda") and torch.cuda.is_bf16_supported() else \
             torch.float16 if device.startswith("cuda") else torch.float32
     else:
@@ -436,6 +464,7 @@ def _runtime_kwargs(config: dict, inherited_device: str = "auto") -> tuple[str, 
 
     attention = runtime.get("attention", "auto")
     if attention == "auto":
+        # 仅当 CUDA 且已安装 flash_attn 时才启用 FA2，否则回退 SDPA。 / Enable FA2 only on CUDA with flash_attn installed; otherwise fall back to SDPA.
         attention = "flash_attention_2" if device.startswith("cuda") and importlib.util.find_spec("flash_attn") else "sdpa"
     kwargs = {"device_map": device, "dtype": dtype}
     if attention not in {None, "default"}:
@@ -444,12 +473,14 @@ def _runtime_kwargs(config: dict, inherited_device: str = "auto") -> tuple[str, 
 
 
 def _release_device_memory(device: str) -> None:
+    """回收 Python 对象并清空 CUDA 缓存，释放教师模型显存。 / Collect Python objects and flush the CUDA cache to free teacher-model memory."""
     gc.collect()
     if device.startswith("cuda") and torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
 def _log_runtime_language_support(model, required: set[str], model_name: str) -> None:
+    """核对运行时教师模型上报的语言覆盖必需集合。 / Cross-check the teacher's runtime-reported languages against the required set."""
     getter = getattr(model, "get_supported_languages", None)
     if not callable(getter):
         logger.info("teacher=%s runtime language query unavailable; using validated registry", model_name)
@@ -463,10 +494,12 @@ def _log_runtime_language_support(model, required: set[str], model_name: str) ->
 
 
 def _write_training_wav(path: Path, waveform, source_rate: int, target_rate: int) -> None:
+    """写出 PCM_16 训练 WAV，必要时重采样到目标采样率。 / Write a PCM_16 training WAV, resampling to the target rate when needed."""
     samples = np.asarray(waveform, dtype=np.float32).squeeze()
     if samples.ndim != 1:
         raise ValueError(f"Qwen returned a non-mono waveform with shape {samples.shape}")
     if source_rate != target_rate:
+        # 教师输出采样率与项目目标不一致时用 torchaudio 重采样。 / Resample with torchaudio when the teacher rate differs from the project target.
         tensor = torch.from_numpy(samples)
         samples = torchaudio.functional.resample(tensor, source_rate, target_rate).cpu().numpy()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -474,13 +507,14 @@ def _write_training_wav(path: Path, waveform, source_rate: int, target_rate: int
 
 
 def _postprocess_training_wav(path: Path, config: dict) -> dict | None:
-    """Trim excessive edge silence from a project-generated WAV, in place."""
+    """就地裁掉项目生成 WAV 两端过长的静音。 / Trim excessive edge silence from a project-generated WAV, in place."""
     if not config.get("enabled", True) or not config.get("trim_edge_silence", True):
         return None
     samples, sample_rate = sf.read(path, dtype="float32", always_2d=False)
     samples = np.asarray(samples, dtype=np.float32).squeeze()
     if samples.ndim != 1:
         raise ValueError(f"generated WAV must be mono: {path}")
+    # dBFS 阈值换算成线性幅值。 / Convert the dBFS threshold to a linear amplitude.
     threshold = 10.0 ** (float(config.get("silence_threshold_dbfs", -45.0)) / 20.0)
     active = np.flatnonzero(np.abs(samples) > threshold)
     if not active.size:
@@ -491,6 +525,7 @@ def _postprocess_training_wav(path: Path, config: dict) -> dict | None:
     if start == 0 and stop == len(samples):
         return None
     trimmed = samples[start:stop]
+    # 先写 .trim.tmp 再原子替换，避免半写状态。 / Write to .trim.tmp then atomically replace to avoid a half-written file.
     temporary = path.with_name(path.name + ".trim.tmp")
     sf.write(temporary, trimmed, sample_rate, subtype="PCM_16", format="WAV")
     temporary.replace(path)
@@ -504,6 +539,7 @@ def _postprocess_training_wav(path: Path, config: dict) -> dict | None:
 
 
 def _copy_reference(source: Path, destination: Path) -> Path:
+    """把上传的参考音频复制进音色数据集（同路径则跳过）。 / Copy an uploaded reference into the voice dataset (no-op when paths already match)."""
     if not source.is_file():
         raise FileNotFoundError(f"reference audio does not exist: {source}")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -513,12 +549,12 @@ def _copy_reference(source: Path, destination: Path) -> Path:
 
 
 def _qwen_reference_input(value):
-    """Qwen accepts string paths, not pathlib.Path objects."""
+    """Qwen 只接受字符串路径，不接受 pathlib.Path。 / Qwen accepts string paths, not pathlib.Path objects."""
     return str(value) if isinstance(value, Path) else value
 
 
 def _checkpoint_dataset_metadata(layout) -> Path | None:
-    """Find the raw dataset belonging to a resume/expand checkpoint."""
+    """找到 resume/expand 检查点对应的数据集 metadata。 / Find the raw dataset belonging to a resume/expand checkpoint."""
     checkpoint = layout.initialization_checkpoint
     if checkpoint is None:
         return None
@@ -538,6 +574,7 @@ def _checkpoint_dataset_metadata(layout) -> Path | None:
 
 
 def _read_voice_manifest(path: Path) -> list[dict]:
+    """读取音色数据集的 speaker-free manifest.csv。 / Read the voice dataset's speaker-free manifest.csv."""
     if not path.is_file():
         raise FileNotFoundError(
             f"voice dataset manifest is missing: {path}; generate this voice first"
@@ -559,7 +596,7 @@ def _read_voice_manifest(path: Path) -> list[dict]:
 
 def _migrate_voice_manifest(voice_root: Path, datasets_root: Path,
                             voice_id: str) -> Path | None:
-    """Build the new speaker-free index from older model-local metadata."""
+    """从旧的模型级 metadata 重建新的 speaker-free 索引。 / Build the new speaker-free index from older model-local metadata."""
     rows = []
     seen = set()
     for record_path in datasets_root.glob("*/dataset.json"):
@@ -578,6 +615,7 @@ def _migrate_voice_manifest(voice_root: Path, datasets_root: Path,
             except ValueError:
                 continue
             key = (str(item.audio.resolve()), item.text, item.language)
+            # 以 (音频, 文本, 语言) 三元组去重合并旧记录。 / Dedupe legacy rows by the (audio, text, language) triple.
             if key in seen:
                 continue
             seen.add(key)
@@ -609,7 +647,7 @@ def _migrate_voice_manifest(voice_root: Path, datasets_root: Path,
 
 
 def _sync_voice_manifest(voice_dataset: Path, jobs: list[GenerationJob]) -> Path:
-    """Persist a speaker-free append-only index beside the shared voice WAVs."""
+    """把 speaker-free 追加式索引持久化到共享音色 WAV 旁。 / Persist a speaker-free append-only index beside the shared voice WAVs."""
     manifest = voice_dataset / "manifest.csv"
     rows = _read_voice_manifest(manifest) if manifest.is_file() else []
     seen = {
@@ -617,6 +655,7 @@ def _sync_voice_manifest(voice_dataset: Path, jobs: list[GenerationJob]) -> Path
         for row in rows
     }
     for job in jobs:
+        # 追加式合并：已有 (音频, 文本, 语言) 的任务不重复写入。 / Append-only merge: skip jobs whose (audio, text, language) already exists.
         key = (str(job.output.resolve()), job.item.text, job.item.language)
         if key in seen:
             continue
@@ -643,7 +682,7 @@ def _sync_voice_manifest(voice_dataset: Path, jobs: list[GenerationJob]) -> Path
 
 
 def _speaker_assignments(generation: dict) -> dict[str, str]:
-    """Return model speaker label -> public voice ID."""
+    """返回「模型 speaker 标签 -> 公开音色 ID」映射。 / Return model speaker label -> public voice ID."""
     value = generation.get("speaker_assignments") or {}
     if not isinstance(value, dict):
         raise ValueError("dataset.speakers must be an object mapping speaker names to voice IDs")
@@ -667,7 +706,7 @@ def _assigned_voice_rows(
     assignments: dict[str, str], layout, generation: dict,
     text_generation: dict,
 ) -> list[dict]:
-    """Select shared voice WAVs and assign model-local speaker labels."""
+    """挑选共享音色 WAV 并打上模型本地 speaker 标签。 / Select shared voice WAVs and assign model-local speaker labels."""
     root = Path(generation.get("voice_dataset_root") or layout.dataset_dir.parent / "voices")
     candidates = int(generation.get("candidates_per_text", 1))
     target = (
@@ -678,6 +717,7 @@ def _assigned_voice_rows(
     counts = Counter()
     for speaker, voice_id in assignments.items():
         manifest = root / voice_id / "manifest.csv"
+        # manifest 缺失时先尝试从旧模型目录迁移生成。 / When the manifest is missing, try migrating it from older model-local storage first.
         if not manifest.is_file():
             _migrate_voice_manifest(root / voice_id, layout.dataset_dir.parent, voice_id)
         for row in _read_voice_manifest(manifest):
@@ -685,10 +725,12 @@ def _assigned_voice_rows(
             if language not in layout.languages:
                 continue
             profile = (speaker, language)
+            # 按 speaker×语言封顶，超出目标配额的缓存样本跳过。 / Cap per speaker×language; cached rows beyond the target quota are skipped.
             if target is not None and counts[profile] >= target:
                 continue
             counts[profile] += 1
             selected.append({**row, "speaker": speaker})
+        # 每个 speaker×语言都必须凑够目标份数，否则训练分布不均。 / Every speaker×language must reach its target quota, otherwise training data is unbalanced.
         missing = [
             language for language in layout.languages
             if counts[(speaker, language)] < (target or 1)
@@ -707,6 +749,7 @@ def _assigned_voice_rows(
 
 
 def _write_model_metadata(output: Path, rows: list[dict]) -> Path:
+    """写出含 speaker 列的模型 metadata CSV。 / Write the model metadata CSV with the speaker column."""
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     with temporary.open("w", newline="", encoding="utf-8") as stream:
@@ -731,6 +774,7 @@ def _checkpoint_speaker_rows(
     layout, generation: dict, text_generation: dict,
     replaced_speakers: set[str],
 ) -> list[dict]:
+    """从检查点复用未被替换 speaker 的历史样本行。 / Reuse checkpoint rows for speakers that are not being replaced."""
     if layout.initialization_mode not in {
         "resume", "warm_start", "expand_speakers", "refine_text_prior",
     }:
@@ -772,7 +816,11 @@ def _generate_samples_single(
     text_manifest_path: str | Path | None = None,
     model_loader: Callable = load_qwen_teacher,
 ) -> Path:
-    """Generate a named VITS dataset using the official Qwen teacher runtime.
+    """用官方 Qwen 教师运行时生成一个具名 VITS 数据集。 / Generate a named VITS dataset using the official Qwen teacher runtime.
+
+    两种音色模式遵循 Qwen3-TTS 官方 README：
+    - design：VoiceDesign 先造一条参考音频，再由 Base 克隆它生成全部样本。
+    - clone：Base 用上传的参考音频 + 转写文本构造可复用的克隆 prompt。
 
     Voice modes follow the official Qwen3-TTS README:
     - design: VoiceDesign creates one reference, then Base clones it for all rows.
@@ -799,6 +847,7 @@ def _generate_samples_single(
     )
     assignments = _speaker_assignments(generation)
     if not voice:
+        # 纯组装路径：只做 speaker 指派与 metadata 拼装，不调用教师模型。 / Assembly-only path: speaker assignment and metadata merge without invoking the teacher.
         if not assignments:
             raise ValueError(
                 "dataset must define voice for generation or speakers for model assembly"
@@ -826,6 +875,7 @@ def _generate_samples_single(
         return output_metadata
     generated_default = None
     if text_generation.get("enabled", False):
+        # 未显式给 manifest 时自动生成或复用文本语料。 / Auto-generate or reuse the text corpus when no manifest is supplied.
         if text_manifest_path is None and not generation.get("text_manifest"):
             logger.info(
                 "TEXT AUTO PREPARE | source=config | action=generate_or_reuse",
@@ -843,6 +893,7 @@ def _generate_samples_single(
     all_texts = read_generation_texts(text_manifest, registry)
     texts = [item for item in all_texts if item.language in layout.languages]
     if text_generation.get("enabled", False):
+        # 按语言截断到 sentences_per_language，保持各语言配额一致。 / Cap per language at sentences_per_language to keep quotas balanced.
         target = int(text_generation.get("sentences_per_language", 100))
         selected_counts = {}
         selected_texts = []
@@ -861,6 +912,7 @@ def _generate_samples_single(
         )
     logger.info("text manifest=%s selected=%d", text_manifest, len(texts))
     teacher_languages = {}
+    # 每个实验语言必须能映射到 Qwen 教师语言标签。 / Every experiment language must map to a Qwen teacher language tag.
     for language, spec in layout.language_specs.items():
         if spec.teacher_provider != "qwen" or not spec.teacher_language:
             raise ValueError(
@@ -921,6 +973,7 @@ def _generate_samples_single(
                 and legacy.is_file()
                 and not regenerate_audio
             ):
+                # 旧模型级命名缓存可直接搬进音色内容寻址布局。 / Legacy model-named caches can be copied straight into the content-addressed layout.
                 output.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(legacy, output)
                 migrated += 1
@@ -949,6 +1002,7 @@ def _generate_samples_single(
             or not job.output.is_file()
         )
     ]
+    # 缓存命中即跳过，只重生成缺失或显式失效的任务。 / Cache hits are skipped; only missing or explicitly invalidated jobs are regenerated.
     cached_count = len(jobs) - len(pending)
     logger.info(
         "AUDIO PLAN | total=%d | pending=%d | cached=%d | output=%s",
@@ -1008,6 +1062,7 @@ def _generate_samples_single(
                     layout.dataset_dir / "references" / f"{speaker}.designed.wav"
                 )
                 if not reference_audio.is_file() and legacy_reference.is_file():
+                    # 迁移旧模型目录里的 designed 参考而不是重新设计。 / Migrate the legacy designed reference instead of re-designing it.
                     reference_audio.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(legacy_reference, reference_audio)
                     logger.info(
@@ -1015,6 +1070,7 @@ def _generate_samples_single(
                         legacy_reference, reference_audio,
                     )
                 if not reference_audio.is_file():
+                    # 参考音频缺失才加载 VoiceDesign 模型，用完立即释放。 / Load VoiceDesign only when the reference is missing; release it right after use.
                     design_model = model_loader(
                         model_keys.get("voice_design", "voice-design-1.7b"),
                         **common,
@@ -1043,9 +1099,11 @@ def _generate_samples_single(
                     del design_model
                     _release_device_memory(device)
                 if reference_strategy == "shared":
+                    # shared：单条参考通配全部语言（键 "*"）。 / shared: one reference serves all languages via the "*" key.
                     reference_inputs["*"] = reference_audio
                     prompt_texts["*"] = reference_text
                 else:
+                    # cascade：此参考作为主锚点，稍后派生各语言版本。 / cascade: this reference is the master anchor for per-language derivatives.
                     cascade_master_input = reference_audio
                     cascade_master_text = reference_text
             if reference_strategy == "per_language":
@@ -1054,6 +1112,7 @@ def _generate_samples_single(
                     raise ValueError(
                         "dataset.voice.reference_texts must be an object keyed by language"
                     )
+                # 只为仍有待生成任务的语言制作参考，节省模型调用。 / Only build references for languages that still have pending jobs.
                 target_languages = [
                     language for language in layout.languages
                     if any(job.item.language == language for job in pending)
@@ -1072,6 +1131,7 @@ def _generate_samples_single(
                         references / f"designed-{language}.txt"
                     )
                     if reference_audio.is_file():
+                        # 缓存命中必须带转写文本，否则音画不一致无法恢复。 / A cache hit must carry its transcript, otherwise text-audio pairing is unrecoverable.
                         if not reference_transcript.is_file():
                             raise RuntimeError(
                                 "language-specific reference audio is missing its "
@@ -1084,6 +1144,7 @@ def _generate_samples_single(
                         reference_inputs[language] = reference_audio
                     else:
                         language_text = requested_reference_text
+                        # 惰性加载设计模型：首个缺失参考出现时才加载。 / Lazy-load the design model on the first missing reference.
                         if design_model is None:
                             design_model = model_loader(
                                 model_keys.get(
@@ -1124,12 +1185,14 @@ def _generate_samples_single(
                         reference_transcript.write_text(
                             language_text, encoding="utf-8",
                         )
+                        # 直接复用刚生成的波形元组，避免再读一次磁盘。 / Reuse the freshly generated waveform tuple instead of re-reading disk.
                         reference_inputs[language] = (ref_wavs[0], ref_rate)
                     prompt_texts[language] = language_text
                 if design_model is not None:
                     del design_model
                     _release_device_memory(device)
         else:
+            # clone 模式：上传参考音频 + 精确转写构成克隆 prompt。 / clone mode: uploaded reference audio + exact transcript form the clone prompt.
             reference_value = voice.get("reference_audio")
             if not reference_value:
                 raise ValueError("clone mode requires dataset.voice.reference_audio")
@@ -1156,6 +1219,7 @@ def _generate_samples_single(
                 language for language in layout.languages
                 if any(job.item.language == language for job in pending)
             ]
+            # 主语言克隆 prompt 惰性创建一次，供其余语言参考生成复用。 / The master clone prompt is lazily built once and reused for all target languages.
             master_prompt = None
             logger.info(
                 "CASCADE REFERENCES | voice_id=%s | master_language=%s | "
@@ -1176,6 +1240,7 @@ def _generate_samples_single(
                 localized_audio = references / f"localized-{language}.wav"
                 localized_transcript = references / f"localized-{language}.txt"
                 if localized_audio.is_file():
+                    # 缓存的本地化参考必须能还原其转写文本。 / A cached localized reference must be able to restore its transcript.
                     if not localized_transcript.is_file():
                         raise RuntimeError(
                             "cascade reference audio is missing its transcript: "
@@ -1194,6 +1259,7 @@ def _generate_samples_single(
                     language == reference_language
                     and requested_reference_text == cascade_master_text
                 ):
+                    # 主语言且文本一致：直接复制主参考，无需再合成。 / Master language with identical text: copy the master reference instead of synthesizing.
                     localized_audio.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(cascade_master_input, localized_audio)
                     localized_transcript.write_text(
@@ -1257,6 +1323,7 @@ def _generate_samples_single(
                 extra={"tts_style": "success"},
             )
         clone_prompts = {}
+        # 每条参考只构建一次可复用的克隆 prompt（Qwen 的耗时步骤）。 / Build one reusable clone prompt per reference — the expensive step in Qwen.
         for language_key, reference_input in reference_inputs.items():
             logger.info(
                 "creating reusable clone prompt voice_id=%s mode=%s language=%s",
@@ -1286,6 +1353,7 @@ def _generate_samples_single(
             ]
             for language in layout.languages
         }
+        # 按语言分组后切批：同批共享一条教师语言标签与克隆 prompt。 / Group by language then slice into batches: each batch shares one teacher tag and clone prompt.
         batches = [
             (language, language_jobs[start:start + batch_size])
             for language, language_jobs in pending_by_language.items()
@@ -1310,6 +1378,7 @@ def _generate_samples_single(
                 wavs, sample_rate = clone_model.generate_voice_clone(
                     text=[job.item.text for job in batch],
                     language=[teacher_language] * len(batch),
+                    # 优先用语言专属 prompt，shared 场景回退到 "*"。 / Prefer the language-specific prompt, falling back to "*" in shared mode.
                     voice_clone_prompt=clone_prompts.get(
                         language, clone_prompts.get("*"),
                     ),
@@ -1342,6 +1411,7 @@ def _generate_samples_single(
             extra={"tts_style": "success"},
         )
         logger.info("AUDIO MODEL RELEASE | status=started | device=%s", device)
+        # 生成完毕立即释放教师模型，把显存留给后续训练。 / Release the teacher right after generation so training gets the memory back.
         del clone_model
         _release_device_memory(device)
         logger.info(
@@ -1408,6 +1478,7 @@ def _generate_samples_single(
         extra={"tts_style": "success"},
     )
     if raw.get("task", "train") == "prepare":
+        # prepare 任务到音色清单即止，不组装模型 metadata。 / prepare tasks stop at the voice manifest without assembling model metadata.
         logger.info(
             "VOICE PREPARE DONE | voice_id=%s | samples=%d | manifest=%s | "
             "model_metadata=skipped",
@@ -1428,6 +1499,7 @@ def _generate_samples_single(
         path.resolve() != previous_metadata.resolve()
         for path, _ in included_manifests
     ):
+        # 检查点 metadata 自动并入（标记 automatic，稍后按配额截断）。 / Auto-include checkpoint metadata (flagged automatic for later quota capping).
         included_manifests.append((previous_metadata, True))
         logger.info(
             "METADATA AUTO REUSE | mode=%s | source=%s | current_speaker=%s",
@@ -1460,6 +1532,7 @@ def _generate_samples_single(
                     and included_counts[profile] >= target_per_profile:
                 continue
             key = (str(item.audio), item.text, item.language, item.speaker)
+            # 四元组去重：同一音频绝不重复进入 metadata。 / Dedupe by the 4-tuple so one audio file never enters metadata twice.
             if key in seen:
                 continue
             seen.add(key)
@@ -1475,6 +1548,7 @@ def _generate_samples_single(
             "METADATA FILTER | skipped_disabled_languages=%s",
             dict(sorted(skipped_languages.items())),
         )
+    # 当前行优先：有 speaker 指派时走共享缓存选取，否则直接用本音色任务。 / Current voice first: pick from the shared cache when assignments exist, else use this run's jobs.
     current_rows = (
         _assigned_voice_rows(assignments, layout, generation, text_generation)
         if assignments else [{
@@ -1527,10 +1601,11 @@ def _generate_samples_single(
 
 def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path | None = None,
                      model_loader: Callable = load_qwen_teacher) -> Path:
-    """Prepare every declared public voice, then assemble model speakers if requested."""
+    """先逐个准备声明的公开音色，再按需组装模型 speaker。 / Prepare every declared public voice, then assemble model speakers if requested."""
     raw, layout = resolve_experiment(config_path)
     voices = raw.get("generation", {}).get("voices") or {}
     if not voices:
+        # 单音色/无 voices 配置时直接走单次生成路径。 / With no voices map, go straight to the single-run generation path.
         return _generate_samples_single(
             config_path, text_manifest_path=text_manifest_path,
             model_loader=model_loader,
@@ -1545,6 +1620,7 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         extra={"tts_style": "success"},
     )
     for index, (voice_id, voice) in enumerate(voices.items(), 1):
+        # 每个音色拆成独立 prepare 子任务配置，逐个生成或复用。 / Split each voice into its own prepare sub-config and generate/reuse in turn.
         job = deepcopy(raw)
         job.pop("dataset", None)
         job["task"] = "prepare"
@@ -1569,6 +1645,7 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         )
 
     if raw.get("task", "train") == "prepare":
+        # prepare 到各音色就绪为止，写汇总文件而不组装模型。 / prepare ends once every voice is ready; write the summary without model assembly.
         prepare_experiment(layout, raw, config_path)
         summary = layout.run_dir / "prepared-voices.json"
         summary.write_text(json.dumps({
@@ -1596,6 +1673,7 @@ def generate_samples(config_path: str | Path, *, text_manifest_path: str | Path 
         )
         return summary
 
+    # 组装阶段：去掉 voice 定义、关掉文本生成，仅做 metadata 合并。 / Assembly stage: drop voice defs, disable text generation, merge metadata only.
     assembly = deepcopy(raw)
     assembly.pop("dataset", None)
     assembly_generation = assembly.setdefault("generation", {})

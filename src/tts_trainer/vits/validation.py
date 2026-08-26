@@ -1,3 +1,4 @@
+"""训练期验证：确定性数据划分与逐 profile 评估。 / Training-time validation: deterministic splits and per-profile evaluation."""
 from __future__ import annotations
 
 import csv
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def _item_key(item: Item, seed: int) -> str:
+    """样本内容指纹（含 seed），驱动确定性划分。 / Content fingerprint (with seed) for deterministic splits."""
     identity = "\0".join((
         str(seed), str(item.audio.resolve()), item.text, item.language, item.speaker,
     ))
@@ -32,7 +34,7 @@ def split_train_validation(
     items: list[Item], *, fraction: float, seed: int,
     minimum_per_profile: int = 1, maximum_per_profile: int | None = None,
 ) -> tuple[list[Item], list[Item], dict]:
-    """Deterministically split every language/speaker profile.
+    """按语言×说话人 profile 确定性划分训练/验证。 / Deterministically split every language/speaker profile.
 
     A profile always keeps at least one training row. Profiles with only one
     item cannot contribute validation data and are reported explicitly.
@@ -54,11 +56,13 @@ def split_train_validation(
     for (language, speaker), rows in sorted(groups.items()):
         ordered = sorted(rows, key=lambda item: _item_key(item, seed))
         if len(ordered) < 2:
+            # 单样本 profile 无法贡献验证集 / Single-item profiles cannot yield validation rows
             validation_count = 0
         else:
             validation_count = max(minimum_per_profile, round(len(ordered) * fraction))
             if maximum_per_profile is not None:
                 validation_count = min(validation_count, maximum_per_profile)
+            # 每个至少保留一条训练样本 / Always keep at least one training row
             validation_count = min(validation_count, len(ordered) - 1)
         validation_items.extend(ordered[:validation_count])
         train_items.extend(ordered[validation_count:])
@@ -95,6 +99,7 @@ def split_train_validation(
 
 
 def _write_items(path: Path, items: list[Item]) -> None:
+    """把划分结果写成带音素列的 CSV。 / Write a split as CSV with phonemes."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(
@@ -113,6 +118,7 @@ def _write_items(path: Path, items: list[Item]) -> None:
 
 def save_split_artifacts(run_dir: str | Path, train_items: list[Item],
                          validation_items: list[Item], report: dict) -> Path:
+    """落盘 split CSV 与 JSON 报告，便于复现实验。 / Persist split CSVs and a JSON report."""
     destination = Path(run_dir) / "splits"
     _write_items(destination / "train.csv", train_items)
     _write_items(destination / "validation.csv", validation_items)
@@ -122,6 +128,7 @@ def save_split_artifacts(run_dir: str | Path, train_items: list[Item],
 
 
 def _profile_path_component(value: str) -> str:
+    """把语言/说话人名净化为安全路径片段。 / Sanitize a name into a safe path component."""
     return "".join(
         character if character.isalnum() or character in "._-" else "_"
         for character in value
@@ -153,6 +160,7 @@ def _evaluate_profile_preview(
     comparison_target = batch["waveforms"][
         index:index + 1, 0, :comparison_samples
     ]
+    # clamp_min 避免 log(0)；对数域 L1 即 Mel L1 / Guard log(0); L1 in log-mel domain
     comparison_mel = torch.log(
         mel_transform(comparison_target.float()).clamp_min(1e-5)
     )
@@ -261,8 +269,9 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                         preview_dir: str | Path | None = None,
                         language_map: dict[str, int] | None = None,
                         speaker_map: dict[str, int] | None = None) -> dict:
-    """Evaluate posterior reconstruction and the actual text-prior pathway."""
+    """评估后验重建与真实文本先验链路。 / Evaluate posterior reconstruction and the actual text-prior pathway."""
     was_training = generator.training
+    # 记住训练态，评估完还原 / Remember training state and restore afterwards
     generator.eval()
     totals = defaultdict(float)
     profile_totals: dict[str, dict[str, float]] = defaultdict(
@@ -280,6 +289,7 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
     cuda_devices = [device.index if device.index is not None else torch.cuda.current_device()] \
         if device.type == "cuda" else []
     with torch.random.fork_rng(devices=cuda_devices):
+        # 固定 RNG 保证每次验证的随机 latent 段可复现 / Fixed RNG makes random segments reproducible
         torch.manual_seed(seed)
         for batch_index, batch in enumerate(loader, 1):
             batch = {key: value.to(device) for key, value in batch.items()}
@@ -307,6 +317,7 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                 output.prior_mean, output.prior_log_scale, output.audio_mask,
             )
             batch_size = int(batch["tokens"].shape[0])
+            # 逐样本指标供 profile 聚合，批次指标用于全局汇总 / Per-item values feed profile aggregation
             mel_per_item = (mel_fake - mel_real).abs().mean((1, 2))
             prior_per_item = (mel_prior - mel_real).abs().mean((1, 2))
             examples += batch_size
@@ -335,6 +346,7 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                 )
                 profile_totals[profile_name]["items"] += 1.0
                 if profile_name in profile_full_metrics:
+                    # 每个 profile 只做一次完整样本评估 / Full-sample preview once per profile
                     continue
                 destinations: list[Path] = []
                 if preview_dir is not None:
@@ -345,6 +357,7 @@ def evaluate_validation(generator, loader, mel_transform, audio_config, model_co
                         / _profile_path_component(speaker)
                     )
                     if not legacy_preview_written:
+                        # 兼容旧布局：根目录额外写一份预览 / Legacy layout also writes one copy at the root
                         destinations.append(root)
                         legacy_preview_written = True
                 profile_full_metrics[profile_name] = _evaluate_profile_preview(

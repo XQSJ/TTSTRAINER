@@ -1,3 +1,4 @@
+"""VITS 数据集、采样与批组装。 / Datasets, sampling and batch assembly for VITS."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from ..text import Vocabulary
 
 @dataclass(frozen=True)
 class AudioConfig:
+    """音频前端参数（STFT/Mel），决定帧与样本的换算。 / Audio frontend parameters mapping frames to samples."""
     sample_rate: int = 22050
     n_fft: int = 1024
     hop_length: int = 256
@@ -23,7 +25,10 @@ class AudioConfig:
 
 
 class LengthBucketBatchSampler(torch.utils.data.Sampler[list[int]]):
-    """Keep weighted sampling while grouping similarly sized audio."""
+    """按长度分桶组批以减少 padding。 / Bucket similarly sized audio into batches to cut padding.
+
+    Keep weighted sampling while grouping similarly sized audio.
+    """
 
     def __init__(self, weights, lengths, batch_size: int, *, pool_batches: int = 20):
         self.weights = torch.as_tensor(weights, dtype=torch.double)
@@ -47,6 +52,7 @@ class LengthBucketBatchSampler(torch.utils.data.Sampler[list[int]]):
         pool_size = self.batch_size * self.pool_batches
         batches = []
         for start in range(0, len(sampled), pool_size):
+            # 池内按音频长度排序，相邻样本进同批 / Sort within pool so batch members are near-equal length
             pool = sampled[start:start + pool_size]
             pool.sort(key=self.lengths.__getitem__)
             batches.extend(
@@ -54,13 +60,14 @@ class LengthBucketBatchSampler(torch.utils.data.Sampler[list[int]]):
                 for offset in range(0, len(pool), self.batch_size)
             )
         if len(batches) > 1:
+            # 打乱批次顺序，避免 epoch 内出现长度趋势 / Shuffle batch order to avoid length trends
             order = torch.randperm(len(batches)).tolist()
             batches = [batches[index] for index in order]
         yield from batches
 
 
 def audio_sample_lengths(items: list[Item]) -> list[int]:
-    """Read inexpensive audio headers for length-aware batching."""
+    """只读头部获取样本数，供长度感知组批。 / Read inexpensive audio headers for length-aware batching."""
     return [int(sf.info(str(item.audio)).frames) for item in items]
 
 
@@ -68,9 +75,10 @@ def inspect_alignment_item(
     item: Item, vocabulary: Vocabulary, audio_config: AudioConfig,
     *, piper_compatible: bool = False,
 ) -> dict:
-    """Check the hard MAS requirement before a sample reaches a batch."""
+    """预检 MAS 硬约束（帧数≥token 数）。 / Check the hard MAS requirement before a sample reaches a batch."""
     info = sf.info(str(item.audio))
     sample_count = int(info.frames)
+    # center=False 的 STFT 帧数公式 / Frame count for non-centered STFT
     audio_frames = (
         0 if sample_count < audio_config.n_fft
         else 1 + (sample_count - audio_config.n_fft) // audio_config.hop_length
@@ -91,6 +99,8 @@ def inspect_alignment_item(
 
 
 class VitsDataset(torch.utils.data.Dataset):
+    """逐条加载音频并在线计算线性谱。 / Loads audio rows and computes spectrograms on the fly."""
+
     def __init__(self, items: list[Item], vocabulary: Vocabulary,
                  speaker_map: dict[str, int], language_map: dict[str, int],
                  audio_config: AudioConfig, *, piper_compatible: bool = False):
@@ -112,6 +122,7 @@ class VitsDataset(torch.utils.data.Dataset):
             raise ValueError(f"{item.audio}: sample rate {sample_rate}, expected {self.audio_config.sample_rate}")
         if waveform.shape[0] != 1:
             raise ValueError(f"{item.audio}: expected mono audio")
+        # center=False 保证帧数与 MAS 预检公式一致 / center=False matches the MAS pre-check frame count
         spectrogram = torch.stft(
             waveform.squeeze(0), n_fft=self.audio_config.n_fft,
             hop_length=self.audio_config.hop_length, win_length=self.audio_config.win_length,
@@ -132,6 +143,7 @@ class VitsDataset(torch.utils.data.Dataset):
 
 
 def collate_vits(batch):
+    """把变长样本补零组批并记录真实长度。 / Pad variable-length rows into tensors with true lengths."""
     batch_size = len(batch)
     max_text = max(row["tokens"].shape[0] for row in batch)
     max_spec = max(row["spectrogram"].shape[1] for row in batch)
@@ -164,10 +176,12 @@ def collate_vits(batch):
 
 def slice_waveforms(waveforms: torch.Tensor, starts: torch.Tensor,
                     segment_frames: int, hop_length: int) -> torch.Tensor:
+    """按帧起点切出与 latent 段对齐的真实音频段。 / Slice ground-truth audio to match latent segments."""
     segment_samples = segment_frames * hop_length
     result = []
     for batch, frame_start in enumerate(starts):
         sample_start = int(frame_start.item()) * hop_length
         segment = waveforms[batch:batch + 1, :, sample_start:sample_start + segment_samples]
+        # 尾部不足一段时补零，保证所有段等长 / Zero-pad tail so every segment has equal length
         result.append(F.pad(segment, (0, segment_samples - segment.shape[-1])))
     return torch.cat(result)

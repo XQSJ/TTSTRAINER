@@ -1,3 +1,4 @@
+"""MultilingualVITS 模型的结构与超参数配置。 / Structure and hyperparameters for MultilingualVITS."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -8,6 +9,7 @@ from ..project_config import load_project_config
 
 @dataclass(frozen=True)
 class VitsConfig:
+    """不可变 VITS 模型配置，字段与序列化 checkpoint 一一对应。 / Immutable VITS model config mirrored in checkpoints."""
     vocab_size: int
     num_languages: int = 7
     num_speakers: int = 1
@@ -32,6 +34,7 @@ class VitsConfig:
     segment_frames: int = 32
 
     def __post_init__(self):
+        """校验字段合法性，防止延迟到建模期才失败。 / Validate fields eagerly at construction."""
         duration_types = {
             "stochastic_lognormal", "stochastic_mobile", "stochastic_quality",
         }
@@ -59,20 +62,26 @@ class VitsConfig:
 
     @property
     def hop_length(self) -> int:
+        """帧移 = 所有上采样率之积，须与音频前端保持一致。 / Hop length equals the product of upsample rates."""
         result = 1
         for rate in self.upsample_rates:
             result *= rate
         return result
 
     def to_dict(self) -> dict:
+        """序列化为可写入 checkpoint 的字典。 / Serialize into a checkpoint-safe dict."""
         return asdict(self)
 
 
 def load_vits_config(path: str | Path, *, vocab_size: int | None = None) -> VitsConfig:
+    """从项目 YAML 读取并构造 VitsConfig。 / Build a VitsConfig from project YAML."""
     raw = load_project_config(path)
+    # 兼容顶层或 model: 子节两种写法 / Accept either flat YAML or a nested model: section
     model = raw.get("model", raw)
     if vocab_size is not None:
+        # 运行期词表可能与配置中不一致，以实际为准 / Actual vocabulary overrides the file value
         model["vocab_size"] = vocab_size
+    # YAML 列表需转回元组以匹配 dataclass 类型 / YAML lists must become tuples to match field types
     for key in ("decoder_resblock_kernel_sizes", "upsample_rates", "upsample_kernel_sizes"):
         if key in model:
             model[key] = tuple(model[key])

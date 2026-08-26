@@ -1,3 +1,4 @@
+"""基线端到端训练入口。 / End-to-end entry for baseline training."""
 from __future__ import annotations
 
 import random
@@ -11,6 +12,7 @@ from .text import Vocabulary
 
 
 def train(config_path: str) -> Path:
+    """执行基线训练并返回 best.pt 路径。 / Run baseline training and return the best.pt path."""
     torch, torchaudio = require_training_dependencies()
     config = load_config(config_path)
     report = validate_manifest(config.data.metadata, config.data.sample_rate)
@@ -24,6 +26,8 @@ def train(config_path: str) -> Path:
     random.seed(config.training.seed)
 
     class Dataset(torch.utils.data.Dataset):
+        """按需读取音频并提取 log-Mel 特征。 / Reads audio lazily and extracts log-Mel features."""
+
         def __len__(self): return len(items)
         def __getitem__(self, index):
             item = items[index]
@@ -38,6 +42,8 @@ def train(config_path: str) -> Path:
             return torch.tensor(vocab.encode_item(item)), language_map[item.language], mel
 
     def collate(batch):
+        """组 batch 并把 Mel 重采样到文本长度。 / Batch items and resample Mel to text length."""
+        # 基线用均匀重采样对齐文本与 Mel 帧，M2 会替换为显式时长预测。
         # Baseline aligns text positions to uniformly resampled Mel frames. M2
         # replaces this with explicit duration prediction/alignment.
         max_text = max(len(row[0]) for row in batch)
@@ -51,6 +57,7 @@ def train(config_path: str) -> Path:
         return tokens, langs, mask, targets
 
     counts = report.language_counts
+    # 逆频率权重让长尾语言获得等量采样。 / Inverse-frequency weights equalize sampling across languages.
     weights = [1.0 / counts[item.language] for item in items]
     sampler = torch.utils.data.WeightedRandomSampler(weights, len(items), replacement=True)
     loader = torch.utils.data.DataLoader(Dataset(), batch_size=config.data.batch_size, sampler=sampler,

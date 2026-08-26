@@ -1,3 +1,5 @@
+"""日语前端：基于 pyopenjtalk/Open JTalk 的日语文本到音素转换。 / Japanese frontend: Japanese text-to-phoneme via pyopenjtalk/Open JTalk."""
+
 from __future__ import annotations
 
 import hashlib
@@ -11,10 +13,10 @@ from .resources import OPENJTALK_DICTIONARY_NAME, ensure_openjtalk_dictionary
 
 
 class OpenJTalkFrontend:
-    """Japanese text frontend backed by pyopenjtalk/Open JTalk.
+    """基于 pyopenjtalk/Open JTalk 的日语文本前端。 / Japanese text frontend backed by pyopenjtalk/Open JTalk.
 
-    The dependency is loaded lazily so non-Japanese experiments do not need it.
-    `g2p(..., join=False)` returns stable phone units such as ``ch`` and ``N``;
+    依赖惰性加载，非日语实验无需安装。The dependency is loaded lazily so non-Japanese experiments do not need it.
+    `g2p(..., join=False)` 返回 ``ch``、``N`` 等稳定音素单元，刻意不拆成 Unicode 码点。`g2p(..., join=False)` returns stable phone units such as ``ch`` and ``N``;
     these are intentionally not split into Unicode codepoints.
     """
 
@@ -49,6 +51,8 @@ class OpenJTalkFrontend:
                     "pip install -e '.[japanese]' (CMake and a C/C++ compiler may be required)"
                 ) from exc
             self._module.OPEN_JTALK_DICT_DIR = str(dictionary).encode("utf-8")
+        # 用户词典在首次加载后应用一次；重复 update 会对同一全局实例叠加。
+        # Apply the user dictionary once; repeated updates stack on the global instance.
         if self.user_dictionary and not self._dictionary_applied:
             if not self.user_dictionary.is_file():
                 raise FileNotFoundError(f"Open JTalk user dictionary not found: {self.user_dictionary}")
@@ -57,6 +61,7 @@ class OpenJTalkFrontend:
         return self._module
 
     def version(self) -> str:
+        """返回 pyopenjtalk 版本，供契约冻结。 / Return the pyopenjtalk version for contract freezing."""
         self._load()
         try:
             version = importlib.metadata.version("pyopenjtalk")
@@ -65,12 +70,14 @@ class OpenJTalkFrontend:
         return f"pyopenjtalk {version}"
 
     def dictionary_id(self) -> str:
+        """返回词典指纹：内置名或用户词典的 sha256 前缀。 / Return the dictionary fingerprint: built-in name or user-dict sha256 prefix."""
         if self.user_dictionary is None:
             return OPENJTALK_DICTIONARY_NAME
         digest = hashlib.sha256(self.user_dictionary.read_bytes()).hexdigest()[:16]
         return f"user:{self.user_dictionary.name}:sha256:{digest}"
 
     def phonemize(self, text: str, language: str) -> tuple[str, ...]:
+        """音素化日语文本，空结果视为错误。 / Phonemize Japanese text; an empty result is an error."""
         if language != "ja":
             raise ValueError(f"Open JTalk only supports ja, got {language!r}")
         module = self._load()

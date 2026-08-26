@@ -1,3 +1,27 @@
+"""tts-trainer 命令行入口：注册全部子命令并分发执行。
+
+子命令按用途分组导读 /
+- 数据准备：generate-texts（LLM 生成语料）、generate-samples（Qwen3-TTS
+  教师蒸馏语音）、validate（校验元数据与 PCM WAV）、vocab（词表）。
+- 前端：phonemize（音素化+契约冻结）、frontend-info（解析出的多语言
+  前端信息）、frontends（前端资源管理：status/ensure）、
+  language-check（语言支持检查）。
+- 训练：train-vits（VITS GAN 训练）、train-many（批量训练多个配置）、
+  init-experiment（创建 dataset/run 实验目录）、run-pipeline（单命令
+  跑完启用的全部阶段）。
+- 导出与验证：export-vits（Piper 形状 ONNX 导出）、synthesize-onnx
+  （项目本地 ONNX 参考运行时合成）；另有 export（导出旧版 Mel 基线，
+  非波形 TTS 模型）。
+- 模型管理：models（Qwen 模型资源：status/ensure/path）、qwen-runtime
+  （检查 Qwen Python 运行环境）。
+
+一条命令跑完全流程用 run-pipeline。
+
+English: CLI entry point registering ~20 subcommands grouped by purpose:
+data prep, frontend, training, export/validation, and model management.
+Use run-pipeline to run the whole flow from one config.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -38,6 +62,7 @@ from .interrupts import run_supervised, should_supervise
 
 
 def _dispatch(argv=None) -> int:
+    """构建参数解析器并按子命令分发。 / Build the parser and dispatch the subcommand."""
     configure_logging(os.environ.get("TTS_TRAINER_LOG_LEVEL", "INFO"))
     parser = argparse.ArgumentParser(prog="tts-trainer")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -221,12 +246,15 @@ def _dispatch(argv=None) -> int:
     elif args.command == "export":
         print(export_onnx(args.config, args.checkpoint, args.output))
     elif args.command == "export-vits":
+        # 优先走实验布局推导 checkpoint；显式 --checkpoint 用于脱离实验目录导出。
+        # Prefer the experiment layout; --checkpoint exports outside an experiment.
         if args.config:
             raw, layout = resolve_experiment(args.config)
             checkpoint_name = raw.get("validation", {}).get("export_checkpoint", "last")
             if checkpoint_name not in {"best", "last"}:
                 raise ValueError("validation.export_checkpoint must be best or last")
             checkpoint = layout.checkpoints_dir / checkpoint_name
+            # best 不存在时回退 last，保证导出总能产出模型。 / Fall back to last so export always succeeds.
             if checkpoint_name == "best" and not checkpoint.is_dir():
                 checkpoint = layout.checkpoints_dir / "last"
             output = Path(args.output) if args.output else layout.artifacts_dir
@@ -288,6 +316,7 @@ def _dispatch(argv=None) -> int:
         vocabulary = Vocabulary.load(model_dir / "tokens.json")
         mismatches = verify_frontend_conformance(conformance, frontend, vocabulary)
         version_mismatches = []
+        # 逐语言核对前端引擎版本，语言级版本优先于全局版本。 / Per-language engine version overrides the global one.
         for language, profile in contract.languages.items():
             expected = profile.get("engine_version") or contract.engine_version
             actual = frontend.version_for(language)
@@ -362,6 +391,7 @@ def _dispatch(argv=None) -> int:
 
 
 def main(argv=None) -> int:
+    """命令行总入口：可选监督包装 + 中断友好退出。 / Top entry: optional supervision wrapper and interrupt-safe exit."""
     arguments = list(sys.argv[1:] if argv is None else argv)
     if should_supervise(arguments):
         return run_supervised(arguments)

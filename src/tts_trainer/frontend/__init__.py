@@ -1,3 +1,5 @@
+"""文本前端子系统：把各语言文本转换为音素序列并管理前端契约与资源。 / Text frontend subsystem: converts text per language into phonemes and manages frontend contracts and resources."""
+
 from .contract import (FrontendContract, frontend_contract_from_config,
                        frontend_lock_path, load_frontend_contract,
                        save_frontend_contract)

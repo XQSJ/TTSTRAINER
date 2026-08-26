@@ -1,9 +1,12 @@
+"""项目配置加载：preset/extends 继承与 dataset 简写展开。 / Load configs with preset/extends inheritance and dataset sugar."""
+
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
 
+# 公开 preset 到内部默认配置文件的映射。 / Public preset names mapped to internal default files.
 PRESET_FILES = {
     "compact": "configs/internal/pipeline_defaults.json",
     "quality": "configs/internal/quality_pipeline_defaults.json",
@@ -15,6 +18,7 @@ PRESET_FILES = {
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
+    """递归深合并，override 覆盖同名叶子值。 / Recursively merge dicts; override wins at leaves."""
     result = dict(base)
     for key, value in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(value, dict):
@@ -25,7 +29,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def _normalize_dataset_config(raw: dict) -> dict:
-    """Expand the small public `dataset` block into internal pipeline settings."""
+    """把公开的精简 dataset 块展开为内部配置。 / Expand the small public `dataset` block into internal pipeline settings."""
     dataset = raw.get("dataset")
     if dataset is None:
         result = dict(raw)
@@ -42,7 +46,9 @@ def _normalize_dataset_config(raw: dict) -> dict:
         raise ValueError("dataset.text must be a JSON object")
     text_override = dict(text)
     if "sentences_per_language" in dataset:
+        # 顶层短语法等价于 dataset.text.sentences_per_language。 / Top-level shorthand mirrors dataset.text.sentences_per_language.
         text_override["sentences_per_language"] = dataset["sentences_per_language"]
+    # 未显式关闭时默认启用文本生成：有声线或未用现成 speaker 数据。 / Default on: a voice is set or no pre-made speakers are reused.
     text_override.setdefault(
         "enabled",
         bool(dataset.get("voice") or dataset.get("voices"))
@@ -53,6 +59,7 @@ def _normalize_dataset_config(raw: dict) -> dict:
     )
 
     generation_override = {}
+    # 单 voice 与多 voices 互斥，避免歧义覆盖。 / Single voice and voices map are mutually exclusive.
     if "voice" in dataset and "voices" in dataset:
         raise ValueError("dataset cannot define both voice and voices")
     if "voice" in dataset:
@@ -150,6 +157,7 @@ def _normalize_dataset_config(raw: dict) -> dict:
     if task not in {"prepare", "train"}:
         raise ValueError("task must be prepare or train")
     result["task"] = task
+    # prepare 阶段只产数据，train 阶段消费数据；下方校验各自的必填项。 / prepare only produces data; train consumes it — validate each side's required fields.
     if task == "prepare" and dataset.get("speakers"):
         raise ValueError(
             "task=prepare does not use dataset.speakers; assign speakers in a train config"
@@ -166,10 +174,12 @@ def _normalize_dataset_config(raw: dict) -> dict:
 
 
 def _preset_path(source: Path, preset: str) -> Path:
+    """定位 preset 对应的内部默认配置文件。 / Locate the internal default file for a preset."""
     relative = PRESET_FILES.get(preset)
     if relative is None:
         choices = ", ".join(sorted(PRESET_FILES))
         raise ValueError(f"unknown config preset {preset!r}; choose one of: {choices}")
+    # 依次向上搜索配置目录、CWD 与安装源码树。 / Search upward, then CWD, then the installed source tree.
     candidates = []
     for root in (source.parent, *source.parents, Path.cwd(), Path(__file__).resolve().parents[2]):
         candidate = (root / relative).resolve()
@@ -184,9 +194,10 @@ def _preset_path(source: Path, preset: str) -> Path:
 
 
 def load_project_config(path: str | Path, _seen: set[Path] | None = None) -> dict:
-    """Load JSON configuration with a public preset or expert `extends` inheritance."""
+    """加载 JSON 配置并解析 preset 或专家 extends 继承。 / Load JSON configuration with a public preset or expert `extends` inheritance."""
     source = Path(path).expanduser().resolve()
     seen = set() if _seen is None else _seen
+    # 环形继承检测。 / Detect circular inheritance chains.
     if source in seen:
         chain = " -> ".join(str(item) for item in (*seen, source))
         raise ValueError(f"circular config inheritance: {chain}")

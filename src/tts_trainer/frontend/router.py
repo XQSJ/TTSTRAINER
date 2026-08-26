@@ -1,3 +1,5 @@
+"""前端路由：按语言/模型声明选择 G2P 前端，并共享同一 token 空间。 / Frontend routing: picks the G2P frontend per language/model declaration while sharing one token space."""
+
 from __future__ import annotations
 
 from ..languages import resolve_language_registry
@@ -9,11 +11,13 @@ from .piper_plus import PiperPlusFrontend
 
 
 class FrontendRouter:
-    """Route each language to its configured G2P while sharing one token space."""
+    """按语言路由到各自配置的 G2P，同时共享同一 token 空间。 / Route each language to its configured G2P while sharing one token space."""
 
     def __init__(self, routes: dict[str, object], declared: FrontendContract):
         self.routes = dict(routes)
         self.declared = declared
+        # 各 provider 声明的资源标识（voice/profile/dictionary），用于报告与契约导出。
+        # Declared resource identifier per provider (voice/profile/dictionary).
         self.voices = {
             language: profile.get(
                 "voice", profile.get("profile", profile.get("dictionary", profile["provider"]))
@@ -44,11 +48,14 @@ class FrontendRouter:
         return self.frontend_for(language).phonemize(text, language)
 
     def contract(self, languages) -> FrontendContract:
+        """导出指定语言的冻结前端契约（含实测引擎版本与资源 ID）。 / Export the frozen frontend contract for the given languages, with detected engine versions and resource IDs."""
         profiles = {}
         for language in languages:
             profile = dict(self.declared.languages[language])
             frontend = self.frontend_for(language)
             profile["engine_version"] = frontend.version()
+            # 各 provider 的资源指纹字段名不同，契约里统一到对应键。
+            # Each provider uses a different resource fingerprint key.
             if isinstance(frontend, OpenJTalkFrontend):
                 profile["dictionary"] = frontend.dictionary_id()
             elif isinstance(frontend, PiperPlusFrontend):
@@ -63,6 +70,7 @@ class FrontendRouter:
 
 def frontend_from_config(config: dict | None = None, *, languages=None,
                          language_registry: dict | None = None) -> FrontendRouter:
+    """按训练配置构建路由器，同一 provider 的前端实例按语言复用。 / Build a router from training config; one provider instance is reused across its languages."""
     config = config or {}
     languages = tuple(languages or ())
     registry = resolve_language_registry(language_registry)
@@ -108,14 +116,18 @@ def frontend_from_config(config: dict | None = None, *, languages=None,
                 ),
             )
             routes[language] = piper_plus[language]
-        else:  # LanguageSpec validation should make this unreachable.
+        else:
+            # LanguageSpec 校验应使该分支不可达；仍兜底以防注册表被绕过。
+            # LanguageSpec validation should make this unreachable.
             raise ValueError(f"unsupported frontend provider: {provider}")
     return FrontendRouter(routes, declared)
 
 
 def frontend_from_contract(contract: FrontendContract, config: dict | None = None) -> FrontendRouter:
-    """Recreate a runtime router from an exported frontend contract."""
+    """从已导出的前端契约重建运行时路由器。 / Recreate a runtime router from an exported frontend contract."""
     config = dict(config or {})
+    # 用户自定义 Open JTalk 词典无法从契约恢复，必须由调用方再次提供路径。
+    # Custom Open JTalk dictionaries cannot be recovered from the contract.
     user_languages = [
         language for language, profile in contract.languages.items()
         if str(profile.get("dictionary", "")).startswith("user:")
@@ -126,13 +138,15 @@ def frontend_from_contract(contract: FrontendContract, config: dict | None = Non
             + ", ".join(user_languages)
             + "; supply frontend.openjtalk.user_dictionary"
         )
+    # 把契约语言档案反向翻译成 frontend_from_config 可消费的注册表项。
+    # Translate contract language profiles back into registry entries.
     registry = {
         language: {
             "name": language,
             "teacher": None,
             "frontend": {
                 key: value for key, value in profile.items()
-                if key != "engine_version"
+                if key != "engine_version"  # 机器检测的版本不属于声明语义 / machine-detected, not declarable
             },
             "smoke_text": language,
         }
@@ -144,6 +158,8 @@ def frontend_from_contract(contract: FrontendContract, config: dict | None = Non
         if profile.get("provider", "espeak-ng") == "espeak-ng"
     }
     resolved_config = dict(config)
+    # 由契约的 token 编码反推兼容开关，保证重建结果与导出时语义一致。
+    # Derive compatibility switches from the contract's token encoding.
     resolved_config["provider"] = contract.provider
     resolved_config["piper_compatible"] = (
         contract.token_encoding == PIPER_TOKEN_ENCODING

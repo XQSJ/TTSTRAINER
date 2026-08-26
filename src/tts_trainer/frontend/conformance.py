@@ -1,3 +1,5 @@
+"""前端一致性：冻结代表性样本的音素与 token ID，保证训练期与 Android 端一致。 / Frontend conformance: freezes phonemes and token IDs of representative cases so training matches the Android side."""
+
 from __future__ import annotations
 
 import json
@@ -8,14 +10,14 @@ from ..manifest import Item
 from ..text import Vocabulary
 
 
-FRONTEND_CONFORMANCE_FORMAT = 1
+FRONTEND_CONFORMANCE_FORMAT = 1  # 一致性文件格式版本 / conformance file format version
 
 
 def build_frontend_conformance(items: list[Item], vocabulary: Vocabulary,
                                language_map: dict[str, int],
                                *, cases_per_language: int = 3,
                                piper_compatible: bool = False) -> dict:
-    """Freeze representative text -> phoneme -> token-ID cases for mobile QA."""
+    """冻结代表性 文本->音素->token ID 样本，供移动端 QA 使用。 / Freeze representative text -> phoneme -> token-ID cases for mobile QA."""
     if cases_per_language < 1:
         raise ValueError("cases_per_language must be at least 1")
     counts = Counter()
@@ -35,6 +37,8 @@ def build_frontend_conformance(items: list[Item], vocabulary: Vocabulary,
         counts[item.language] += 1
     missing = sorted(set(language_map) - set(counts))
     if missing:
+        # 每个训练语言都必须有冻结样本，否则移动端无法验证该语言。
+        # Every training language needs frozen cases, else mobile cannot verify it.
         raise ValueError(
             "cannot build frontend conformance without frozen phonemes for: "
             + ", ".join(missing)
@@ -49,6 +53,7 @@ def build_frontend_conformance(items: list[Item], vocabulary: Vocabulary,
 
 
 def save_frontend_conformance(conformance: dict, path: str | Path) -> Path:
+    """把一致性数据写入 JSON 文件。 / Write the conformance data to a JSON file."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(conformance, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -56,6 +61,7 @@ def save_frontend_conformance(conformance: dict, path: str | Path) -> Path:
 
 
 def load_frontend_conformance(path: str | Path) -> dict:
+    """读取并校验一致性 JSON 文件。 / Load and validate a conformance JSON file."""
     result = json.loads(Path(path).read_text(encoding="utf-8"))
     if int(result.get("format", 0)) != FRONTEND_CONFORMANCE_FORMAT:
         raise ValueError("unsupported frontend conformance format")
@@ -66,7 +72,7 @@ def load_frontend_conformance(path: str | Path) -> dict:
 
 def verify_frontend_conformance(conformance: dict, frontend,
                                 vocabulary: Vocabulary) -> list[dict]:
-    """Return mismatch records; an empty list means exact frontend parity."""
+    """返回不一致记录；空列表表示前端完全一致。 / Return mismatch records; an empty list means exact frontend parity."""
     mismatches = []
     for case in conformance["cases"]:
         actual_phonemes = frontend.phonemize(case["text"], case["language"])
