@@ -63,9 +63,6 @@ class LanguageSpec:
         # 日语 OpenJTalk 未指定词典时使用默认版本。 / Japanese OpenJTalk falls back to the default dictionary version.
         if provider == "openjtalk":
             profile.setdefault("dictionary", "open_jtalk_dic_utf_8-1.11")
-            raise ValueError(f"language {code}: frontend.voice must not be empty")
-        if provider == "openjtalk":
-            profile.setdefault("dictionary", "open_jtalk_dic_utf_8-1.11")
         if provider == "piper-plus-g2p":
             # Registry overrides may replace an inherited eSpeak/OpenJTalk
             # provider. Do not leak the old provider's fields into the frozen
