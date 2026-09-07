@@ -241,3 +241,61 @@ def ensure_korean_cmudict(root: Path | None = None, *, allow_download: bool = Tr
             status.path, status.path.stat().st_size,
         )
         return korean_nltk_data_path(destination_root)
+
+
+# 英语与韩语共用同一份 nltk cmudict 词表；en 导出用它生成 Android 端的
+# cmudict_data.json，使部署词典与 g2p-en 训练词典来自同一数据源。
+# English and Korean share the same nltk cmudict corpus; the en export turns
+# it into the Android cmudict_data.json so the deployed dictionary comes from
+# the same data source g2p-en used during training.
+def english_cmudict_json_path(root: Path | None = None) -> Path:
+    return (root or frontends_root()) / "english" / "cmudict_data.json"
+
+
+def _cmudict_first_pronunciations(zip_path: Path) -> dict[str, str]:
+    """按 nltk 语义解析 cmudict：key 小写、保留撇号、多发音取首个。 / Parse cmudict with nltk semantics: lowercase keys, apostrophes kept, first pronunciation wins."""
+    result: dict[str, str] = {}
+    with zipfile.ZipFile(zip_path) as archive:
+        with archive.open(KOREAN_CMU_DICT_MEMBER) as stream:
+            for raw in stream:
+                line = raw.decode("latin-1").strip()
+                if not line or line.startswith(";;;"):
+                    continue
+                pieces = line.split()
+                if len(pieces) < 3:
+                    continue
+                word = pieces[0].lower()
+                if word not in result:
+                    result[word] = " ".join(pieces[2:])
+    return result
+
+
+def build_english_cmudict_json(root: Path | None = None, *, allow_download: bool = True) -> Path:
+    """生成 Android 端 cmudict_data.json；键值与 g2p-en 查询结果逐词一致。 / Build the Android cmudict_data.json whose entries match g2p-en lookups word for word."""
+    # nltk 的 read_cmudict_block 丢弃发音序号列（pieces[2:]），key 取小写原词；
+    # g2p-en 查询 self.cmu[word][0] 即首个发音。C++ loadCmuDict 期望扁平
+    # {word: "HH AH0 L OW1"} 且查词同样使用小写带撇号的形态。
+    # nltk's read_cmudict_block drops the index column (pieces[2:]) and
+    # lowercases keys; g2p-en reads self.cmu[word][0], i.e. the first
+    # pronunciation. C++ loadCmuDict expects a flat {word: "HH AH0 L OW1"}
+    # and looks words up in the same lowercase-with-apostrophe form.
+    destination_root = root or frontends_root()
+    target = english_cmudict_json_path(destination_root)
+    if target.is_file():
+        return target
+    ensure_korean_cmudict(destination_root, allow_download=allow_download)
+    source = korean_cmudict_path(destination_root)
+    entries = _cmudict_first_pronunciations(source)
+    if not entries:
+        raise RuntimeError("cmudict corpus produced no entries; refusing to write an empty dictionary")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".json.part")
+    temporary.write_text(
+        json.dumps(entries, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    temporary.replace(target)
+    logger.info(
+        "english cmudict_data.json built entries=%d path=%s", len(entries), target,
+    )
+    return target

@@ -426,6 +426,29 @@ def export_composable_bundle(
                     "sha256": resource_sha256,
                     "bytes": resource_bytes,
                 }
+            elif language == "en":
+                # g2p-en trains against the nltk cmudict; ship that dictionary
+                # so the native English backend never falls back to its
+                # embedded copy and drifts from the frozen training tokens.
+                # g2p-en 训练读取 nltk cmudict；随包分发该词典，避免原生
+                # 英语后端回退到内嵌副本而偏离训练 token。
+                if source is None or not (source / "cmudict_data.json").is_file():
+                    raise FileNotFoundError(
+                        "English Piper Plus language pack requires "
+                        "cmudict_data.json"
+                    )
+                relative = Path("runtime") / "cmudict"
+                shutil.copyfile(
+                    source / "cmudict_data.json", pack_dir / relative,
+                )
+                resource_sha256, resource_bytes = _tree_identity(pack_dir / relative)
+                runtime_resource = {
+                    "id": "cmudict",
+                    "delivery": "language-pack",
+                    "path": relative.as_posix(),
+                    "sha256": resource_sha256,
+                    "bytes": resource_bytes,
+                }
             else:
                 # 其他语言没有可打包资源，由宿主应用自带 G2P。 /
                 # No bundleable resource for other languages; the host app ships its own G2P.

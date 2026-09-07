@@ -24,7 +24,10 @@ from ..frontend.contract import (DIRECT_TOKEN_ENCODING,
                                  MOBILE_DIRECT_TOKEN_ENCODING,
                                  PIPER_TOKEN_ENCODING)
 from ..frontend.conformance import save_frontend_conformance
-from ..frontend.resources import inspect_openjtalk_dictionary
+from ..frontend.resources import (
+    build_english_cmudict_json,
+    inspect_openjtalk_dictionary,
+)
 from .composable import export_composable_bundle
 from .config import VitsConfig
 from .model import MultilingualVITS
@@ -213,6 +216,20 @@ def _find_pypinyin_data_dir() -> Path:
             "pypinyin data required by the Android Mandarin frontend is "
             "missing: " + ", ".join(missing)
         )
+    return directory
+
+
+def english_cmudict_dir_for_export() -> Path:
+    """生成并返回英语词典目录（内含 cmudict_data.json）。 / Build and return the English dictionary directory holding cmudict_data.json."""
+    # loadCmuDict 通过 findG2pDictFile 在 dict_dir 中按文件名查找，目录里
+    # 只需这一个文件；内容与 g2p-en 训练查询逐词一致。
+    # loadCmuDict resolves the file by name inside dict_dir via
+    # findG2pDictFile, so the directory holds exactly this one file; its
+    # entries match the g2p-en training lookups word for word.
+    target = build_english_cmudict_json()
+    directory = target.parent / "cmudict-export"
+    directory.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(target, directory / "cmudict_data.json")
     return directory
 
 
@@ -465,6 +482,18 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         # 导出训练时实际使用的 pypinyin 数据；Android 原生前端兼容该 JSON
         # 格式，但要求目录内使用 Piper 约定的文件名。
         frontend_resources["piper-plus-g2p:zh"] = _find_pypinyin_data_dir()
+    if any(
+        language == "en" and profile.get("provider") == "piper-plus-g2p"
+        for language, profile in frontend.get("languages", {}).items()
+    ):
+        # g2p-en reads the nltk cmudict; the Android native English backend
+        # otherwise falls back to the copy compiled into libpiper_plus.so.
+        # Ship the training-side dictionary in the language pack so both ends
+        # resolve every word identically.
+        # g2p-en 训练读取 nltk cmudict；Android 原生英语后端在缺少外部词典时
+        # 回退到编译进 libpiper_plus.so 的内嵌副本。把训练侧词典随语言包
+        # 分发，保证两端逐词一致。
+        frontend_resources["piper-plus-g2p:en"] = english_cmudict_dir_for_export()
     # 日语无论走 openjtalk 还是 piper-plus-g2p 都依赖同一套 OpenJTalk 词典。 /
     # Japanese needs the same OpenJTalk dictionary whether via openjtalk or piper-plus-g2p.
     needs_openjtalk_dictionary = any(
