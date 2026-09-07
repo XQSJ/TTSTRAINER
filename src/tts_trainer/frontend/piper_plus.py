@@ -114,10 +114,17 @@ class PiperPlusFrontend:
 
     def resource_id(self) -> str:
         """返回各语言外部资源指纹，供契约与资源包引用。 / Return the per-language external resource fingerprint for contracts and packs."""
-        if self.language == "ko":
-            return "nltk-cmudict-v1"
-        if self.language == "zh":
-            return "pypinyin-rules-v1"
-        if self.language == "ja":
-            return "openjtalk-dictionary-v1"
-        return "piper-plus-rules-v1"
+        # 必须与 languages.py 中 piper-plus-g2p 的注册表 resource 声明逐字一致，
+        # 否则 frontend.lock.json 与训练配置的 declaration_key 永不相等。
+        # Must match the registry's declared resource in languages.py verbatim,
+        # or the lock file's declaration_key never equals the configured one.
+        return {
+            "ko": "nltk-cmudict-v1",
+            "zh": "pypinyin-rules-v1",
+            "ja": "openjtalk-dictionary-v1",
+            "en": "g2p-en-v1",
+            "es": "piper-plus-rules-v1",
+            "fr": "piper-plus-rules-v1",
+            "pt": "piper-plus-rules-v1",
+            "sv": "piper-plus-rules-v1",
+        }.get(self.language, "piper-plus-rules-v1")
