@@ -439,9 +439,12 @@ def export_composable_bundle(
                     )
                 relative = Path("runtime") / "cmudict"
                 destination = pack_dir / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source / "cmudict_data.json", destination)
-                resource_sha256, resource_bytes = _tree_identity(pack_dir / relative)
+                destination.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(
+                    source / "cmudict_data.json",
+                    destination / "cmudict_data.json",
+                )
+                resource_sha256, resource_bytes = _tree_identity(destination)
                 runtime_resource = {
                     "id": "cmudict",
                     "delivery": "language-pack",
