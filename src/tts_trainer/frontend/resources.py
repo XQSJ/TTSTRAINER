@@ -252,6 +252,73 @@ def english_cmudict_json_path(root: Path | None = None) -> Path:
     return (root or frontends_root()) / "english" / "cmudict_data.json"
 
 
+# 日常英语兜底词表：OpenSubtitles 2018 英语词频前 5 万。词表缺口（如
+# offline）在 native 端会被静默丢弃，导出时用 g2p-en 预测补齐这些高频词，
+# 生词覆盖面从训练语料扩展到日常英语。
+# Everyday-English fallback list: the top 50k OpenSubtitles 2018 English
+# word frequencies. Word-list gaps (e.g. offline) are silently dropped by
+# the native side; the export predicts these high-frequency misses with
+# g2p-en, extending coverage beyond the training corpus.
+ENGLISH_FREQUENCY_URL = (
+    "https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/"
+    "content/2018/en/en_50k.txt"
+)
+ENGLISH_FREQUENCY_SHA256 = (
+    "5351ff405b1126ef555791dd4d9798a48e3e9a501a9fc481a9da957752cfb458"
+)
+# 词典产物缓存版本：补充策略变更时递增，旧缓存自动重建。
+# Cache version of the dictionary artifact; bump when the supplement strategy changes.
+ENGLISH_CMUDICT_CACHE_VERSION = "v2-frequency-20k"
+
+
+def english_frequency_path(root: Path | None = None) -> Path:
+    return (root or frontends_root()) / "english" / "en_50k.txt"
+
+
+def ensure_english_frequency(root: Path | None = None, *, allow_download: bool = True) -> Path:
+    """确保词频表存在且校验通过，返回其路径。 / Ensure the frequency list exists with a matching checksum and return its path."""
+    destination_root = root or frontends_root()
+    target = english_frequency_path(destination_root)
+    if target.is_file() and _sha256(target) == ENGLISH_FREQUENCY_SHA256:
+        return target
+    if not allow_download:
+        raise FileNotFoundError(
+            f"English frequency list is missing at {target}. "
+            "Run: tts-trainer frontends ensure english"
+        )
+    resource_root = destination_root / "english"
+    with _download_lock(resource_root, "english-frequency"):
+        if target.is_file() and _sha256(target) == ENGLISH_FREQUENCY_SHA256:
+            return target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_suffix(".txt.part")
+        logger.info("frontend resource download starting key=english-frequency path=%s", target)
+        urllib.request.urlretrieve(ENGLISH_FREQUENCY_URL, temporary)
+        digest = _sha256(temporary)
+        if digest != ENGLISH_FREQUENCY_SHA256:
+            temporary.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"English frequency list checksum mismatch: expected "
+                f"{ENGLISH_FREQUENCY_SHA256}, got {digest}"
+            )
+        temporary.replace(target)
+    return target
+
+
+def english_frequency_words(root: Path | None = None, *, limit: int = 20000,
+                            allow_download: bool = True) -> list[str]:
+    """读取词频表前 limit 个纯字母词（小写）。 / Read the first limit alphabetic words (lowercase) from the frequency list."""
+    source = ensure_english_frequency(root, allow_download=allow_download)
+    words: list[str] = []
+    for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+        word = line.split()[0].strip().lower() if line.split() else ""
+        if word.isascii() and word.isalpha():
+            words.append(word)
+        if len(words) >= limit:
+            break
+    return words
+
+
 def _cmudict_first_pronunciations(zip_path: Path) -> dict[str, str]:
     """按 nltk 语义解析 cmudict：key 小写、保留撇号、多发音取首个。 / Parse cmudict with nltk semantics: lowercase keys, apostrophes kept, first pronunciation wins."""
     result: dict[str, str] = {}
@@ -319,7 +386,13 @@ def build_english_cmudict_json(root: Path | None = None, *, allow_download: bool
     # and looks words up in the same lowercase-with-apostrophe form.
     destination_root = root or frontends_root()
     target = english_cmudict_json_path(destination_root)
-    if supplement_words is None and target.is_file():
+    # 缓存带版本戳：补充策略变化（词表/词频扩容）后旧产物自动重建。
+    # The cache carries a version stamp: a changed supplement strategy
+    # (word lists, frequency expansion) rebuilds the artifact.
+    cache_stamp = destination_root / "english" / ".cmudict-cache-version"
+    stamp_value = ENGLISH_CMUDICT_CACHE_VERSION
+    if target.is_file() and cache_stamp.is_file() \
+            and cache_stamp.read_text(encoding="utf-8").strip() == stamp_value:
         return target
     ensure_korean_cmudict(destination_root, allow_download=allow_download)
     source = korean_cmudict_path(destination_root)
@@ -328,6 +401,13 @@ def build_english_cmudict_json(root: Path | None = None, *, allow_download: bool
         raise RuntimeError("cmudict corpus produced no entries; refusing to write an empty dictionary")
     if supplement_words:
         supplement_english_oov(entries, supplement_words)
+    # 高频词兜底：词频表里 cmudict 缺失的日常词也补进词典，把生词覆盖面
+    # 从训练语料扩展到日常英语（语料词优先级相同，仅查重后补）。
+    # High-frequency fallback: also supplement everyday words the cmudict
+    # lacks, extending beyond the training corpus (already-added corpus
+    # words simply stay).
+    frequency = english_frequency_words(destination_root, allow_download=allow_download)
+    supplement_english_oov(entries, frequency)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".json.part")
     temporary.write_text(
@@ -335,6 +415,7 @@ def build_english_cmudict_json(root: Path | None = None, *, allow_download: bool
         encoding="utf-8",
     )
     temporary.replace(target)
+    cache_stamp.write_text(stamp_value, encoding="utf-8")
     logger.info(
         "english cmudict_data.json built entries=%d path=%s", len(entries), target,
     )
