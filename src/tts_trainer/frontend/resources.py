@@ -268,7 +268,8 @@ ENGLISH_FREQUENCY_SHA256 = (
 )
 # 词典产物缓存版本：补充策略变更时递增，旧缓存自动重建。
 # Cache version of the dictionary artifact; bump when the supplement strategy changes.
-ENGLISH_CMUDICT_CACHE_VERSION = "v2-frequency-20k"
+# 词频扩大到 5 万后词典缓存结构变了，版本号升到 v3 让旧产物自动重建。 / Bumped to v3 so the larger frequency list triggers a cache rebuild.
+ENGLISH_CMUDICT_CACHE_VERSION = "v3-frequency-50k"
 
 
 def english_frequency_path(root: Path | None = None) -> Path:
@@ -305,7 +306,7 @@ def ensure_english_frequency(root: Path | None = None, *, allow_download: bool =
     return target
 
 
-def english_frequency_words(root: Path | None = None, *, limit: int = 20000,
+def english_frequency_words(root: Path | None = None, *, limit: int = 50000,
                             allow_download: bool = True) -> list[str]:
     """读取词频表前 limit 个纯字母词（小写）。 / Read the first limit alphabetic words (lowercase) from the frequency list."""
     source = ensure_english_frequency(root, allow_download=allow_download)
