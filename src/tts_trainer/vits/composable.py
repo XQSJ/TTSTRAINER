@@ -365,8 +365,9 @@ def export_composable_bundle(
                     "deployable language pack"
                 )
             relative = Path("runtime") / "espeak-ng-data"
-            shutil.copytree(source, pack_dir / relative, dirs_exist_ok=True)
-            resource_sha256, resource_bytes = _tree_identity(source)
+            destination = pack_dir / relative
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+            resource_sha256, resource_bytes = _tree_identity(destination)
             runtime_resource = {
                 "id": "espeak-ng-data",
                 "delivery": "language-pack",
@@ -382,8 +383,9 @@ def export_composable_bundle(
                     "its deployable language pack"
                 )
             relative = Path("runtime") / "open_jtalk_dic"
-            shutil.copytree(source, pack_dir / relative, dirs_exist_ok=True)
-            resource_sha256, resource_bytes = _tree_identity(source)
+            destination = pack_dir / relative
+            shutil.copytree(source, destination, dirs_exist_ok=True)
+            resource_sha256, resource_bytes = _tree_identity(destination)
             runtime_resource = {
                 "id": "openjtalk-dictionary",
                 "delivery": "language-pack",
@@ -417,8 +419,9 @@ def export_composable_bundle(
                         "OpenJTalk dictionary"
                     )
                 relative = Path("runtime") / "open_jtalk_dic"
-                shutil.copytree(source, pack_dir / relative, dirs_exist_ok=True)
-                resource_sha256, resource_bytes = _tree_identity(source)
+                destination = pack_dir / relative
+                shutil.copytree(source, destination, dirs_exist_ok=True)
+                resource_sha256, resource_bytes = _tree_identity(destination)
                 runtime_resource = {
                     "id": "openjtalk-dictionary",
                     "delivery": "language-pack",
