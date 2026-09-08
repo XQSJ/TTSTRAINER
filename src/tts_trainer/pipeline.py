@@ -34,6 +34,23 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import csv
+
+
+def _english_corpus_texts(layout) -> list[str]:
+    """读取数据集清单中英文语料的 text 列，供导出补全 OOV 词典。 / Read the English corpus text column from the dataset manifest for the OOV dictionary supplement."""
+    manifest = Path(layout.metadata)
+    if not manifest.is_file():
+        return []
+    texts: list[str] = []
+    with manifest.open("r", encoding="utf-8", newline="") as stream:
+        for row in csv.DictReader(stream):
+            if str(row.get("language", "")).strip().lower() == "en":
+                text = str(row.get("text", "")).strip()
+                if text:
+                    texts.append(text)
+    return texts
+
 from .experiments import prepare_experiment, resolve_experiment
 from .frontend import frontend_from_config, phonemize_manifest
 from .language_check import check_language_support
@@ -228,7 +245,8 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
             # best 缺失时回退 last 并告警。 / Fall back to last with a warning when best is missing.
             logger.warning("best checkpoint is unavailable; exporting last checkpoint")
         model = export_vits_onnx(checkpoint, layout.artifacts_dir,
-                                 sample_rate=int(raw["audio"]["sample_rate"]))
+                                 sample_rate=int(raw["audio"]["sample_rate"]),
+                                 corpus_texts=_english_corpus_texts(layout))
         report["stages"]["export"] = str(model.resolve())
         report["stages"]["export_checkpoint"] = str(checkpoint.resolve())
         if stages.get("validate_onnx", True):

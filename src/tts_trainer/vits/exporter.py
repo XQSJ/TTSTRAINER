@@ -219,14 +219,36 @@ def _find_pypinyin_data_dir() -> Path:
     return directory
 
 
-def english_cmudict_dir_for_export() -> Path:
+def _english_corpus_words(corpus_texts: list[str] | None) -> list[str]:
+    """从语料文本提取英文词（小写、只留字母与撇号）。 / Extract English words (lowercase, letters and apostrophes only) from corpus texts."""
+    if not corpus_texts:
+        return []
+    words: list[str] = []
+    for text in corpus_texts:
+        current = []
+        for character in text:
+            if character.isascii() and (character.isalpha() or character == "'"):
+                current.append(character.lower())
+            else:
+                if current:
+                    words.append("".join(current))
+                    current = []
+        if current:
+            words.append("".join(current))
+    return words
+
+
+def english_cmudict_dir_for_export(corpus_words: list[str] | None = None) -> Path:
     """生成并返回英语词典目录（内含 cmudict_data.json）。 / Build and return the English dictionary directory holding cmudict_data.json."""
     # loadCmuDict 通过 findG2pDictFile 在 dict_dir 中按文件名查找，目录里
-    # 只需这一个文件；内容与 g2p-en 训练查询逐词一致。
+    # 只需这一个文件；内容与 g2p-en 训练查询逐词一致。语料词经 g2p-en
+    # 预测补入，覆盖 cmudict 本身缺失但训练时读过的词。
     # loadCmuDict resolves the file by name inside dict_dir via
     # findG2pDictFile, so the directory holds exactly this one file; its
-    # entries match the g2p-en training lookups word for word.
-    target = build_english_cmudict_json()
+    # entries match the g2p-en training lookups word for word. Corpus words
+    # are supplemented via g2p-en's predictor, covering words the cmudict
+    # itself lacks but training read out.
+    target = build_english_cmudict_json(supplement_words=corpus_words)
     directory = target.parent / "cmudict-export"
     directory.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(target, directory / "cmudict_data.json")
@@ -328,7 +350,8 @@ def _export_sherpa_android_text_package(
 
 
 def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
-                     *, sample_rate: int = 22050, opset: int = 17) -> Path:
+                     *, sample_rate: int = 22050, opset: int = 17,
+                     corpus_texts: list[str] | None = None) -> Path:
     """把训练检查点导出为 Piper 兼容 ONNX 及全部部署资源。 / Export a training checkpoint to a Piper-compatible ONNX plus all deployment resources.
 
     流程共 5 步：加载检查点、构建图、数值一致性校验、写前端/部署资源、收尾。 /
@@ -489,11 +512,15 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         # g2p-en reads the nltk cmudict; the Android native English backend
         # otherwise falls back to the copy compiled into libpiper_plus.so.
         # Ship the training-side dictionary in the language pack so both ends
-        # resolve every word identically.
+        # resolve every word identically. Corpus texts feed the OOV
+        # supplement so native lookup never silently drops a training word.
         # g2p-en 训练读取 nltk cmudict；Android 原生英语后端在缺少外部词典时
         # 回退到编译进 libpiper_plus.so 的内嵌副本。把训练侧词典随语言包
-        # 分发，保证两端逐词一致。
-        frontend_resources["piper-plus-g2p:en"] = english_cmudict_dir_for_export()
+        # 分发，保证两端逐词一致；语料文本用于补全 OOV 词条，避免原生查
+        # 不到训练读过的词而静默吞词。
+        frontend_resources["piper-plus-g2p:en"] = english_cmudict_dir_for_export(
+            _english_corpus_words(corpus_texts)
+        )
     # 日语无论走 openjtalk 还是 piper-plus-g2p 都依赖同一套 OpenJTalk 词典。 /
     # Japanese needs the same OpenJTalk dictionary whether via openjtalk or piper-plus-g2p.
     needs_openjtalk_dictionary = any(

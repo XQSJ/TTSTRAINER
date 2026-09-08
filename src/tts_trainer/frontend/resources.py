@@ -270,7 +270,45 @@ def _cmudict_first_pronunciations(zip_path: Path) -> dict[str, str]:
     return result
 
 
-def build_english_cmudict_json(root: Path | None = None, *, allow_download: bool = True) -> Path:
+def supplement_english_oov(entries: dict[str, str], words: list[str]) -> int:
+    """把 g2p-en 预测的 OOV 发音并入词典，返回补充条数。 / Merge g2p-en's predicted pronunciations for OOV words into the dictionary; returns how many were added."""
+    # g2p-en 训练时用 LSTM 预测器读出 cmudict 没有的词（如 offline），而
+    # Android 原生端只会查表，查不到就静默丢词。导出时用同一个预测器把
+    # 训练语料的 OOV 词补进词典，保证两端逐词一致。
+    # g2p-en reads cmudict-missing words (e.g. offline) through its LSTM
+    # predictor during training, while the Android native side only does
+    # table lookups and silently drops misses. Run the same predictor over
+    # the training corpus's OOV words so both ends agree word for word.
+    unseen = sorted({
+        word.lower() for word in words
+        if word and word.isascii() and word.lower() not in entries
+    })
+    if not unseen:
+        return 0
+    try:
+        from g2p_en import G2p
+    except ImportError as exc:
+        raise RuntimeError(
+            "English OOV supplementation requires g2p-en; install: "
+            "pip install 'tts-trainer[commercial]'"
+        ) from exc
+    predictor = G2p()
+    added = 0
+    for word in unseen:
+        arpabet = [token for token in predictor.predict(word) if token.isascii()]
+        if not arpabet:
+            continue
+        entries[word] = " ".join(arpabet)
+        added += 1
+    logger.info(
+        "english cmudict supplemented oov_words=%d added=%d sample=%s",
+        len(unseen), added, unseen[:8],
+    )
+    return added
+
+
+def build_english_cmudict_json(root: Path | None = None, *, allow_download: bool = True,
+                                supplement_words: list[str] | None = None) -> Path:
     """生成 Android 端 cmudict_data.json；键值与 g2p-en 查询结果逐词一致。 / Build the Android cmudict_data.json whose entries match g2p-en lookups word for word."""
     # nltk 的 read_cmudict_block 丢弃发音序号列（pieces[2:]），key 取小写原词；
     # g2p-en 查询 self.cmu[word][0] 即首个发音。C++ loadCmuDict 期望扁平
@@ -281,13 +319,15 @@ def build_english_cmudict_json(root: Path | None = None, *, allow_download: bool
     # and looks words up in the same lowercase-with-apostrophe form.
     destination_root = root or frontends_root()
     target = english_cmudict_json_path(destination_root)
-    if target.is_file():
+    if supplement_words is None and target.is_file():
         return target
     ensure_korean_cmudict(destination_root, allow_download=allow_download)
     source = korean_cmudict_path(destination_root)
     entries = _cmudict_first_pronunciations(source)
     if not entries:
         raise RuntimeError("cmudict corpus produced no entries; refusing to write an empty dictionary")
+    if supplement_words:
+        supplement_english_oov(entries, supplement_words)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".json.part")
     temporary.write_text(
