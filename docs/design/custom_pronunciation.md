@@ -123,8 +123,9 @@ definite phoneme sequence that flows into the gate.
 ## 5. 配置形态 / Config shape
 
 ```json
-// custom_words（trainer 配置）
+// 训练配置 train.json 内嵌 custom_words 块（随 preset/extends 合并）
 {
+  ...,
   "custom_words": {
     "en": {
       "native_words": {

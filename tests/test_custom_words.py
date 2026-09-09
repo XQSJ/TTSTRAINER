@@ -20,13 +20,14 @@ class CustomWordsTest(unittest.TestCase):
             custom = load_custom_words(config)
             self.assertFalse(has_custom_words(custom))
 
-    def test_parse_native_and_shared(self):
+    def test_parse_native_and_shared_embedded_in_config(self):
         with TemporaryDirectory() as td:
             config = Path(td) / "train.json"
-            config.write_text("{}", encoding="utf-8")
-            (Path(td) / "custom_words.json").write_text(json.dumps({
-                "native_words": {"en": {"fosi": {}}},
-                "shared_words": {"kubernetes": {}},
+            config.write_text(json.dumps({
+                "custom_words": {
+                    "native_words": {"en": {"fosi": {}}},
+                    "shared_words": {"kubernetes": {}},
+                },
             }), encoding="utf-8")
             custom = load_custom_words(config)
             self.assertTrue(has_custom_words(custom))

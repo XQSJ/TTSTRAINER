@@ -29,13 +29,11 @@ SHARED_BASE_LANGUAGE = "en"
 
 
 def load_custom_words(config_path: str | Path) -> dict:
-    """读取实验配置旁的 custom_words.json；不存在返回空结构。 / Read the
-    custom_words.json next to the experiment config; return an empty shape
-    when absent."""
-    path = Path(config_path).resolve().parent / CUSTOM_WORDS_FILENAME
-    if not path.is_file():
-        return {"native_words": {}, "shared_words": {}}
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    """读取训练配置内的 custom_words 块（随 preset/extends 合并）；未声明
+    返回空结构。 / Read the config's embedded custom_words block (merged
+    through preset/extends); return an empty shape when absent."""
+    from .project_config import load_project_config
+    raw = load_project_config(config_path).get("custom_words") or {}
     native: dict[str, dict[str, dict]] = {}
     for language, words in (raw.get("native_words") or {}).items():
         native[str(language)] = {str(w): dict(v or {}) for w, v in words.items()}
