@@ -51,6 +51,24 @@ def _english_corpus_texts(layout) -> list[str]:
                     texts.append(text)
     return texts
 
+
+def _gate_custom_words(config_path) -> dict:
+    """读取定制词确认闸门的定稿产物；未配置时为空（零影响）。 / Load the
+    confirmation gate's verified output; empty when unconfigured."""
+    from .custom_words import load_custom_words, has_custom_words, load_verified
+    if not has_custom_words(load_custom_words(config_path)):
+        return {}
+    verified = load_verified(config_path)
+    if not verified:
+        # 配置了定制词但闸门未跑/未确认任何词：明确拒绝导出，防止自动读音
+        # 漏进生产。 / Custom words exist but the gate never confirmed any:
+        # refuse to export so no unconfirmed reading slips into production.
+        raise RuntimeError(
+            "custom_words.json exists but custom_words_verified.json is empty; "
+            "run: python -m tts_trainer custom-words --config " + str(config_path)
+        )
+    return verified
+
 from .experiments import prepare_experiment, resolve_experiment
 from .frontend import frontend_from_config, phonemize_manifest
 from .language_check import check_language_support
@@ -246,7 +264,8 @@ def run_pipeline(config_path: str | Path, *, max_steps: int | None = None) -> Pa
             logger.warning("best checkpoint is unavailable; exporting last checkpoint")
         model = export_vits_onnx(checkpoint, layout.artifacts_dir,
                                  sample_rate=int(raw["audio"]["sample_rate"]),
-                                 corpus_texts=_english_corpus_texts(layout))
+                                 corpus_texts=_english_corpus_texts(layout),
+                                 verified_custom_words=_gate_custom_words(config_path))
         report["stages"]["export"] = str(model.resolve())
         report["stages"]["export_checkpoint"] = str(checkpoint.resolve())
         if stages.get("validate_onnx", True):

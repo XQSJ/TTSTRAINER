@@ -238,20 +238,35 @@ def _english_corpus_words(corpus_texts: list[str] | None) -> list[str]:
     return words
 
 
-def english_cmudict_dir_for_export(corpus_words: list[str] | None = None) -> Path:
+def english_cmudict_dir_for_export(corpus_words: list[str] | None = None,
+                                   verified: dict | None = None) -> Path:
     """生成并返回英语词典目录（内含 cmudict_data.json）。 / Build and return the English dictionary directory holding cmudict_data.json."""
     # loadCmuDict 通过 findG2pDictFile 在 dict_dir 中按文件名查找，目录里
     # 只需这一个文件；内容与 g2p-en 训练查询逐词一致。语料词经 g2p-en
-    # 预测补入，覆盖 cmudict 本身缺失但训练时读过的词。
+    # 预测补入，覆盖 cmudict 本身缺失但训练时读过的词。确认闸门定稿的
+    # 定制词读音最后合并（优先级最高），并随包生成 custom-wordlist.json。
     # loadCmuDict resolves the file by name inside dict_dir via
     # findG2pDictFile, so the directory holds exactly this one file; its
     # entries match the g2p-en training lookups word for word. Corpus words
     # are supplemented via g2p-en's predictor, covering words the cmudict
-    # itself lacks but training read out.
+    # itself lacks but training read out. Gate-confirmed custom readings
+    # merge last (highest priority) and ship as custom-wordlist.json.
     target = build_english_cmudict_json(supplement_words=corpus_words)
     directory = target.parent / "cmudict-export"
     directory.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(target, directory / "cmudict_data.json")
+    if verified:
+        from ..custom_words import merge_into_english_cmudict, deployment_wordlist
+        entries = json.loads((directory / "cmudict_data.json").read_text(encoding="utf-8"))
+        merged = merge_into_english_cmudict(verified, entries)
+        (directory / "cmudict_data.json").write_text(
+            json.dumps(entries, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        wordlist = deployment_wordlist(verified)
+        if wordlist:
+            (directory / "custom-wordlist.json").write_text(
+                json.dumps(wordlist, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("custom-words merged into en cmudict entries=%d wordlist=%d",
+                    merged, len(wordlist))
     return directory
 
 
@@ -351,7 +366,8 @@ def _export_sherpa_android_text_package(
 
 def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
                      *, sample_rate: int = 22050, opset: int = 17,
-                     corpus_texts: list[str] | None = None) -> Path:
+                     corpus_texts: list[str] | None = None,
+                     verified_custom_words: dict | None = None) -> Path:
     """把训练检查点导出为 Piper 兼容 ONNX 及全部部署资源。 / Export a training checkpoint to a Piper-compatible ONNX plus all deployment resources.
 
     流程共 5 步：加载检查点、构建图、数值一致性校验、写前端/部署资源、收尾。 /
@@ -519,7 +535,8 @@ def export_vits_onnx(checkpoint_dir: str | Path, output_dir: str | Path,
         # 分发，保证两端逐词一致；语料文本用于补全 OOV 词条，避免原生查
         # 不到训练读过的词而静默吞词。
         frontend_resources["piper-plus-g2p:en"] = english_cmudict_dir_for_export(
-            _english_corpus_words(corpus_texts)
+            _english_corpus_words(corpus_texts),
+            verified=verified_custom_words,
         )
     # 日语无论走 openjtalk 还是 piper-plus-g2p 都依赖同一套 OpenJTalk 词典。 /
     # Japanese needs the same OpenJTalk dictionary whether via openjtalk or piper-plus-g2p.

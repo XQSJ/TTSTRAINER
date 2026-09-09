@@ -50,6 +50,23 @@ from .batch_training import train_many
 from .experiments import prepare_experiment, resolve_experiment
 from .pipeline import run_pipeline
 from .sample_generation import generate_samples
+from .custom_words import run_custom_words_gate
+
+
+def _gate_verified(config_path: str) -> dict:
+    """导出前读取定制词闸门定稿；未配置为空，配置未确认则拒绝导出。 / Load
+    the gate's verified readings before export; empty when unconfigured,
+    refusing the export when configured but unconfirmed."""
+    from .custom_words import load_custom_words, has_custom_words, load_verified
+    if not has_custom_words(load_custom_words(config_path)):
+        return {}
+    verified = load_verified(config_path)
+    if not verified:
+        raise SystemExit(
+            "custom_words.json exists but custom_words_verified.json is empty; "
+            "run: python -m tts_trainer custom-words --config " + str(config_path)
+        )
+    return verified
 from .text_generation import generate_texts
 from .qwen_teacher import inspect_qwen_runtime
 from .language_check import check_language_support, format_language_statuses
@@ -109,6 +126,16 @@ def _dispatch(argv=None) -> int:
     many.add_argument("configs", nargs="+")
     many.add_argument("--max-parallel", type=int, default=1)
     many.add_argument("--max-steps", type=int)
+    custom = sub.add_parser(
+        "custom-words",
+        help="run the special-word pronunciation confirmation gate (edit custom_words.json next to the config)",
+    )
+    custom.add_argument("--config", default="training_configs/train1.json")
+    custom.add_argument("--listen", action="store_true",
+                        help="also render candidates with QwenTTS in the current voice for listening")
+    custom.add_argument("--listen-dir", default="artifacts/custom_words_listen")
+    custom.add_argument("--non-interactive", action="store_true",
+                        help="accept every auto candidate without prompting (CI mode)")
     export = sub.add_parser(
         "export", help="export the legacy Mel baseline (not a waveform TTS model)",
     )
@@ -243,6 +270,11 @@ def _dispatch(argv=None) -> int:
         for config_path in train_many(args.configs, max_parallel=args.max_parallel,
                                       max_steps=args.max_steps):
             print(config_path)
+    elif args.command == "custom-words":
+        print(run_custom_words_gate(
+            args.config, listen=args.listen, listen_dir=args.listen_dir,
+            interactive=not args.non_interactive,
+        ))
     elif args.command == "export":
         print(export_onnx(args.config, args.checkpoint, args.output))
     elif args.command == "export-vits":
@@ -259,11 +291,14 @@ def _dispatch(argv=None) -> int:
                 checkpoint = layout.checkpoints_dir / "last"
             output = Path(args.output) if args.output else layout.artifacts_dir
             sample_rate = args.sample_rate or raw["audio"]["sample_rate"]
+            verified = _gate_verified(args.config)
         else:
             checkpoint = Path(args.checkpoint)
             output = Path(args.output or "artifacts/vits")
             sample_rate = args.sample_rate or 22050
-        result = export_vits_onnx(checkpoint, output, sample_rate=sample_rate)
+            verified = {}
+        result = export_vits_onnx(checkpoint, output, sample_rate=sample_rate,
+                                  verified_custom_words=verified)
         print(result)
         if args.validate_runtime: print(f"onnxruntime output shape: {validate_onnx_runtime(result)}")
     elif args.command == "synthesize-onnx":
