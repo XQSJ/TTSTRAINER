@@ -384,10 +384,79 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 | `training.epochs` | 总训练轮数 |
 | `training.stage` | `auto` 自动两阶段；`standard` 始终训练完整声学主链 |
 | `training.mixed_precision` | 默认 `fp32`；显式设为 `bf16` 才启用省显存训练 |
+| `custom_words` | 可选：定制特殊词读音（品牌、产品、人名），见[定制词定音](#定制词定音) |
 
 商业模型优先选择 `preset: "mobile_commercial"` 或
 `preset: "quality_commercial"`。两者使用完全相同的七语 Piper Plus 前端，区别仅为
 模型规模；训练端与移动端必须使用导出清单锁定的同一前端版本。
+
+## 定制词定音
+
+官方品牌、产品名、人名等特殊词需要读准确时，在训练配置里加 `custom_words` 块。
+读音由系统自动生成，你只需要**听一遍确认**；不配置则完全走原流程。
+
+### 第一步：在训练配置里声明词
+
+```json
+{
+  "task": "train",
+  "preset": "mobile_commercial",
+  "experiment": {
+    "name": "my_model",
+    "languages": ["zh", "en", "ja"]
+  },
+  "custom_words": {
+    "native_words": {
+      "en": { "fosi": {} }
+    },
+    "shared_words": {
+      "kubernetes": {}
+    }
+  }
+}
+```
+
+- `native_words.<语言>`：该语言自己的词，读音写进该语言词典。
+- `shared_words`：各语言混排都读相似音的词（品牌、人名），读音落在英语
+  词典并自动生成部署侧 custom-wordlist，不用逐语言配置。
+- `{}` 表示读音自动生成；也可给参考拼写提示，如 `{ "zorp": { "reference": "zohrp" } }`。
+
+### 第二步：过确认闸门（必须）
+
+```bash
+PYTHONPATH=src .venv/bin/python -m tts_trainer custom-words \
+  --config training_configs/train1.json
+```
+
+每个词显示自动读音（如 `fosi → F OW1 S IY0`，即 "Foh-see"），按提示：
+
+| 按键 | 动作 |
+|---|---|
+| `y` / 回车 | 确认该读音 |
+| `s` | 跳过该词（回到词典/兜底默认路径） |
+| `r` | 重新试听（需 `--listen`） |
+
+确认结果写入配置旁的 `custom_words_verified.json`。加 `--listen` 会用
+QwenTTS 按当前音色把候选读音念出来生成试听 WAV（需要 Qwen 运行时，可选）；
+CI 场景用 `--non-interactive` 全部接受自动候选。
+
+### 第三步：训练导出照常
+
+```bash
+PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
+  --config training_configs/train1.json
+```
+
+导出时已确认读音以最高优先级合并进语言包词典，并自动生成
+`custom-wordlist.json` 随包分发——部署端不需要任何改动。
+
+### 闸门规则
+
+- 未配置 `custom_words`：原流程零影响。
+- 配置了但没跑闸门（`custom_words_verified.json` 为空）：**导出直接拒绝**，
+  防止未经确认的读音漏进生产。
+
+设计与完整流程见 [docs/design/custom_pronunciation.md](docs/design/custom_pronunciation.md)。
 
 ## 数据复用规则
 
