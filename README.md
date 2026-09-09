@@ -397,21 +397,16 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 
 ### 第一步：在训练配置里声明词
 
+完整示例见 [custom-words.example.json](training_configs/custom-words.example.json)，
+核心是在训练配置里加一个 `custom_words` 块：
+
 ```json
-{
-  "task": "train",
-  "preset": "mobile_commercial",
-  "experiment": {
-    "name": "my_model",
-    "languages": ["zh", "en", "ja"]
+"custom_words": {
+  "native_words": {
+    "en": { "fosi": {}, "zorp": { "reference": "zohrp" } }
   },
-  "custom_words": {
-    "native_words": {
-      "en": { "fosi": {} }
-    },
-    "shared_words": {
-      "kubernetes": {}
-    }
+  "shared_words": {
+    "kubernetes": {}
   }
 }
 ```
@@ -473,6 +468,15 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer run-pipeline \
 - 未配置 `custom_words`：原流程零影响。
 - 配置了但没跑闸门（`custom_words_verified.json` 为空）：**导出直接拒绝**，
   防止未经确认的读音漏进生产。
+
+### 定稿产物与改词重跑
+
+- 闸门确认结果写在配置同目录的 `custom_words_verified.json`（每词的 ARPAbet
+  读音与近似拼写），导出时以最高优先级合并进语言包词典。
+- 配置里**增删词后重跑一次闸门**即可，verified 文件整体重写；只改已确认词的
+  `reference` 提示同样需要重跑。
+- 已确认读音不满意时也可手工微调 `custom_words_verified.json` 的 `arpabet`
+  字段（cmudict ARPAbet 格式，如 `"F OW1 S IY0"`），下次导出生效。
 
 设计与完整流程见 [docs/design/custom_pronunciation.md](docs/design/custom_pronunciation.md)。
 
@@ -1275,6 +1279,10 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer generate-samples \
 
 # 只训练 VITS
 PYTHONPATH=src .venv/bin/python -m tts_trainer train-vits \
+  --config training_configs/my_model.json
+
+# 定制词读音确认闸门（配置了 custom_words 时必须跑一次）
+PYTHONPATH=src .venv/bin/python -m tts_trainer custom-words \
   --config training_configs/my_model.json
 
 # 重新导出 checkpoint

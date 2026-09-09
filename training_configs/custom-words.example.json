@@ -1,0 +1,36 @@
+{
+  "_comment": "定制特殊词读音的示例配置，完整流程见 README「定制词定音」章节 / Example config for special-word pronunciations; see the README's custom-words section",
+
+  "task": "train",
+  "preset": "mobile_commercial",
+  "experiment": {
+    "name": "custom_voice",
+    "languages": ["zh", "en", "ja"],
+    "device": "auto"
+  },
+
+  "custom_words": {
+    "_comment_native": "native_words：每个语言自己的词，读音写进该语言词典 / per-language words whose readings land in that language's dictionary",
+    "native_words": {
+      "en": {
+        "fosi": {},
+        "zorp": { "reference": "zohrp" }
+      }
+    },
+
+    "_comment_shared": "shared_words：各语言混排读相似音的词（品牌/人名），读音落英语词典并自动分发部署词表 / words read similarly across languages (brands, names); readings land in the English dictionary and ship as the deployment wordlist",
+    "shared_words": {
+      "kubernetes": {},
+      "mybrand": { "reference": "my brand" }
+    }
+  },
+
+  "dataset": {
+    "sentences_per_language": 2000,
+    "speakers": { "voice_01": "voice_01" }
+  },
+  "training": {
+    "batch_size": 4,
+    "epochs": 150
+  }
+}
