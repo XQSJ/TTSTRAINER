@@ -434,11 +434,29 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer custom-words \
 |---|---|
 | `y` / 回车 | 确认该读音 |
 | `s` | 跳过该词（回到词典/兜底默认路径） |
-| `r` | 重新试听（需 `--listen`） |
 
-确认结果写入配置旁的 `custom_words_verified.json`。加 `--listen` 会用
-QwenTTS 按当前音色把候选读音念出来生成试听 WAV（需要 Qwen 运行时，可选）；
-CI 场景用 `--non-interactive` 全部接受自动候选。
+确认结果写入配置旁的 `custom_words_verified.json`；CI 场景用
+`--non-interactive` 全部接受自动候选。
+
+**想真正听读音（服务器无扬声器）**：加 `--listen` 会用 QwenTTS 按当前音色
+把每个候选读音合成为 WAV 写到 `artifacts/custom_words_listen/`（需要 Qwen
+运行时），把文件取回本地播放试听后再回来确认：
+
+```bash
+# 服务器上生成试听
+PYTHONPATH=src .venv/bin/python -m tts_trainer custom-words \
+  --config training_configs/train1.json --listen --non-interactive
+
+# 本地电脑拉回试听（按需替换地址）
+scp user@server:/path/to/TTSTRAINER/artifacts/custom_words_listen/*.wav ./
+
+# 本地听完满意后，回服务器正式确认
+PYTHONPATH=src .venv/bin/python -m tts_trainer custom-words \
+  --config training_configs/train1.json
+```
+
+不懂 ARPAbet 也不想听：直接 `y` 接受自动候选即可——g2p-en 对常规品牌词的
+预测准确率很高（fosi/kubernetes 均一次命中）。
 
 ### 第三步：训练导出照常
 
