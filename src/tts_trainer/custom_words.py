@@ -174,21 +174,31 @@ def deployment_wordlist(verified: dict) -> dict[str, str]:
 
 
 def run_custom_words_gate(config_path: str, *, listen: bool = False,
-                          listen_dir: str = "artifacts/custom_words_listen",
+                          listen_dir: str | None = None,
                           interactive: bool = True) -> str:
     """阶段② 确认闸门：生成候选 → 逐词过用户 → 产出 custom_words_verified.json。
 
-    未配置 custom_words.json 时直接返回跳过（原流程零影响）；--non-interactive
+    未配置 custom_words 时直接返回跳过（原流程零影响）；--non-interactive
     全部接受自动候选（CI 模式）；--listen 用 QwenTTS 按当前音色渲染试听。
+    试听 WAV 默认写进该实验的 runs/<name>/custom_words_listen/，随实验目录
+    走；--listen-dir 可覆盖。
 
     / Stage-2 confirmation gate: build candidates, walk the user through every
-    word, and emit custom_words_verified.json. With no custom_words.json the
-    gate is skipped entirely; --non-interactive accepts every auto candidate
-    (CI mode); --listen renders listen-along WAVs with QwenTTS.
+    word, and emit custom_words_verified.json. With no custom_words configured
+    the gate is skipped entirely; --non-interactive accepts every auto candidate
+    (CI mode); --listen renders listen-along WAVs with QwenTTS. Listen WAVs
+    default to the experiment's runs/<name>/custom_words_listen/ so they live
+    with the experiment; --listen-dir overrides.
     """
     from .project_config import load_project_config
+    from .experiments import resolve_experiment
     raw = load_project_config(config_path)
     languages = tuple(raw.get("experiment", {}).get("languages", ()))
+    if listen_dir is None:
+        # 试听产物随实验 run 目录走，多实验不混放。 / Listen outputs live in
+        # the experiment's run directory so multiple experiments never mix.
+        _, layout = resolve_experiment(config_path)
+        listen_dir = str(layout.run_dir / "custom_words_listen")
 
     custom = load_custom_words(config_path)
     if not has_custom_words(custom):

@@ -439,8 +439,8 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer custom-words \
 `--non-interactive` 全部接受自动候选。
 
 **想真正听读音（服务器无扬声器）**：加 `--listen` 会用 QwenTTS 按当前音色
-把每个候选读音合成为 WAV 写到 `artifacts/custom_words_listen/`（需要 Qwen
-运行时），把文件取回本地播放试听后再回来确认：
+把每个候选读音合成为 WAV 写到该实验的 `runs/<实验名>/custom_words_listen/`
+（需要 Qwen 运行时，随实验目录走），把文件取回本地播放试听后再回来确认：
 
 ```bash
 # 服务器上生成试听
@@ -448,7 +448,7 @@ PYTHONPATH=src .venv/bin/python -m tts_trainer custom-words \
   --config training_configs/train1.json --listen --non-interactive
 
 # 本地电脑拉回试听（按需替换地址）
-scp user@server:/path/to/TTSTRAINER/artifacts/custom_words_listen/*.wav ./
+scp user@server:/path/to/TTSTRAINER/runs/my_model/custom_words_listen/*.wav ./
 
 # 本地听完满意后，回服务器正式确认
 PYTHONPATH=src .venv/bin/python -m tts_trainer custom-words \
